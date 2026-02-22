@@ -1,5 +1,8 @@
 # Remotion Core Migration (HyperEdit)
 
+> Note: This document covers the original Remotion-first migration.
+> For the production-focused V2 upgrade (transitions, validation+migrations, campaign scoring), see `REMOTION_CORE_V2.md`.
+
 ## Objective
 
 Move HyperEdit from an FFmpeg-command-first compositor to a **Remotion-first deterministic editor core**.

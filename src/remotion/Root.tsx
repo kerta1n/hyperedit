@@ -174,7 +174,7 @@ const calculateDuration = (props: DynamicAnimationProps): number => {
 };
 
 const defaultProjectSpec: RemotionProjectSpec = {
-  version: '1.0',
+  version: '2.0',
   id: 'default-spec',
   title: 'Untitled Project',
   createdAt: new Date().toISOString(),
@@ -196,6 +196,7 @@ const defaultProjectSpec: RemotionProjectSpec = {
   clips: [],
   captions: [],
   voiceover: [],
+  transitions: [],
   brandTheme: {
     name: 'Default Theme',
     fontFamily: 'Inter',

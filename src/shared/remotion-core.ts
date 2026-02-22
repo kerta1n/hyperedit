@@ -2,9 +2,28 @@ export type RemotionTrackType = 'video' | 'audio' | 'text';
 
 export type CaptionPresetId = 'clean-lower-third' | 'highlight-mode';
 
+export type RemotionSpecVersion = '1.0' | '2.0';
+
+export type RemotionEasing = 'linear' | 'ease-in' | 'ease-out' | 'ease-in-out';
+
+export type LegacyTransitionType = 'none' | 'fade' | 'slide-left' | 'slide-right' | 'zoom';
+
+export type RemotionJunctionTransitionType = 'none' | 'crossfade' | 'slide-left' | 'slide-right' | 'dip-to-black';
+
 export interface RemotionTransition {
-  type: 'none' | 'fade' | 'slide-left' | 'slide-right' | 'zoom';
+  type: LegacyTransitionType;
   durationSec: number;
+  easing?: RemotionEasing;
+}
+
+export interface RemotionClipJunctionTransition {
+  id: string;
+  fromClipId: string;
+  toClipId: string;
+  type: RemotionJunctionTransitionType;
+  durationSec: number;
+  easing?: RemotionEasing;
+  fallbackBehavior?: 'cut' | 'clamp' | 'crossfade';
 }
 
 export interface RemotionClipTransform {
@@ -36,8 +55,8 @@ export interface RemotionClip {
   volume?: number;
   muted?: boolean;
   transform?: RemotionClipTransform;
-  transitionIn?: RemotionTransition;
-  transitionOut?: RemotionTransition;
+  transitionIn?: RemotionTransition; // legacy v1-compatible field
+  transitionOut?: RemotionTransition; // legacy v1-compatible field
   segmentRole?: 'hook' | 'body' | 'cta' | 'generic';
 }
 
@@ -114,7 +133,7 @@ export interface VoiceoverLayer {
 }
 
 export interface RemotionProjectSpec {
-  version: '1.0';
+  version: RemotionSpecVersion;
   id: string;
   title: string;
   createdAt: string;
@@ -129,6 +148,7 @@ export interface RemotionProjectSpec {
   clips: RemotionClip[];
   captions: RemotionCaption[];
   voiceover: VoiceoverLayer[];
+  transitions?: RemotionClipJunctionTransition[];
   brandTheme: BrandTheme;
   adTemplate: AdTemplate;
   meta?: Record<string, unknown>;
@@ -137,8 +157,13 @@ export interface RemotionProjectSpec {
 export interface VariantGenerationOptions {
   count: number;
   hooks?: string[];
+  hookPool?: string[];
   bodies?: string[];
+  bodyPool?: string[];
   ctas?: string[];
+  ctaPool?: string[];
+  toneProfile?: 'direct-response' | 'educational' | 'playful' | 'premium' | string;
+  captionStyleProfile?: 'balanced' | 'punchy' | 'minimal' | string;
 }
 
 export const CAPTION_STYLE_PRESETS: Record<CaptionPresetId, Partial<RemotionCaptionStyle>> = {

@@ -66,6 +66,7 @@
     "remotion:render": "node scripts/remotion-core-cli.js render",
     "remotion:variants": "node scripts/remotion-core-cli.js variants",
     "remotion:batch": "node scripts/remotion-core-cli.js batch",
+    "remotion:campaign": "node scripts/remotion-core-cli.js campaign",
     "knip": "knip",
     "lint": "eslint ."
   }

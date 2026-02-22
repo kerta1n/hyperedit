@@ -3,6 +3,7 @@ import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { bundle } from '@remotion/bundler';
 import { renderMedia, selectComposition } from '@remotion/renderer';
+import { parseSpecInput } from './spec.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -29,18 +30,23 @@ async function getBundleUrl() {
 }
 
 function withDefaults(spec) {
+  const { spec: parsedSpec } = parseSpecInput(spec || {}, {
+    source: 'renderSpecWithRemotion',
+  });
+
   return {
-    ...spec,
+    ...parsedSpec,
     settings: {
-      width: spec?.settings?.width || 1920,
-      height: spec?.settings?.height || 1080,
-      fps: spec?.settings?.fps || 30,
-      backgroundColor: spec?.settings?.backgroundColor || '#000000',
+      width: parsedSpec?.settings?.width || 1920,
+      height: parsedSpec?.settings?.height || 1080,
+      fps: parsedSpec?.settings?.fps || 30,
+      backgroundColor: parsedSpec?.settings?.backgroundColor || '#000000',
     },
-    clips: spec?.clips || [],
-    captions: spec?.captions || [],
-    voiceover: spec?.voiceover || [],
-    tracks: spec?.tracks || [],
+    clips: parsedSpec?.clips || [],
+    captions: parsedSpec?.captions || [],
+    voiceover: parsedSpec?.voiceover || [],
+    tracks: parsedSpec?.tracks || [],
+    transitions: parsedSpec?.transitions || [],
   };
 }
 

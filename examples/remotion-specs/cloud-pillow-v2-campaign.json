@@ -1,0 +1,115 @@
+{
+  "version": "2.0",
+  "id": "cloud-pillow-ad-v2",
+  "title": "Cloud Pillow DR Ad - V2 Campaign Base",
+  "createdAt": "2026-02-22T00:00:00.000Z",
+  "updatedAt": "2026-02-22T00:00:00.000Z",
+  "settings": {
+    "width": 1080,
+    "height": 1920,
+    "fps": 30,
+    "backgroundColor": "#06070a"
+  },
+  "tracks": [
+    { "id": "T1", "type": "text", "name": "Captions", "order": 0 },
+    { "id": "V1", "type": "video", "name": "Primary", "order": 1 },
+    { "id": "A1", "type": "audio", "name": "Music", "order": 2 }
+  ],
+  "clips": [],
+  "captions": [
+    {
+      "id": "cap-hook",
+      "startSec": 0,
+      "endSec": 2.6,
+      "text": "{{HOOK}}",
+      "segmentRole": "hook",
+      "style": {
+        "presetId": "highlight-mode",
+        "position": "center",
+        "animation": "highlight"
+      }
+    },
+    {
+      "id": "cap-body",
+      "startSec": 2.6,
+      "endSec": 7.5,
+      "text": "{{BODY}}",
+      "segmentRole": "body",
+      "style": {
+        "presetId": "clean-lower-third",
+        "position": "bottom",
+        "animation": "fade"
+      }
+    },
+    {
+      "id": "cap-cta",
+      "startSec": 7.5,
+      "endSec": 10,
+      "text": "{{CTA}}",
+      "segmentRole": "cta",
+      "style": {
+        "presetId": "highlight-mode",
+        "position": "bottom",
+        "animation": "highlight"
+      }
+    }
+  ],
+  "voiceover": [],
+  "transitions": [],
+  "brandTheme": {
+    "name": "Cloud Pillow",
+    "fontFamily": "Inter",
+    "accentColor": "#22d3ee",
+    "secondaryColor": "#f97316",
+    "backgroundColor": "#06070a",
+    "textColor": "#ffffff",
+    "glow": 0.42,
+    "motionSpeed": 1.08
+  },
+  "adTemplate": {
+    "name": "hook-body-cta",
+    "segments": {
+      "hook": {
+        "id": "hook",
+        "startSec": 0,
+        "endSec": 2.6,
+        "captionPreset": "highlight-mode",
+        "textOptions": [
+          "If you're waking up with neck pain, this is why.",
+          "Your pillow might be ruining your sleep quality.",
+          "Stop scrolling if your mornings feel like a hangover."
+        ]
+      },
+      "body": {
+        "id": "body",
+        "startSec": 2.6,
+        "endSec": 7.5,
+        "captionPreset": "clean-lower-third",
+        "textOptions": [
+          "Cloud Pillow combines ergonomic support with cooling airflow for deeper sleep.",
+          "Its memory-gel core supports your neck while breathable mesh keeps heat away.",
+          "Designed for side and back sleepers, it reduces pressure and improves comfort."
+        ]
+      },
+      "cta": {
+        "id": "cta",
+        "startSec": 7.5,
+        "endSec": 10,
+        "captionPreset": "highlight-mode",
+        "textOptions": [
+          "Tap now for 30% off.",
+          "Shop Cloud Pillow today.",
+          "Try it risk-free tonight."
+        ]
+      }
+    }
+  },
+  "meta": {
+    "industry": "sleep",
+    "funnelStage": "direct-response",
+    "campaignDefaults": {
+      "toneProfile": "direct-response",
+      "captionStyleProfile": "punchy"
+    }
+  }
+}

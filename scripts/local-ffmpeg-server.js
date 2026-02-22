@@ -8,8 +8,14 @@ import formidable from 'formidable';
 import { GoogleGenAI } from '@google/genai';
 import { fal } from '@fal-ai/client';
 import { timelineToRemotionSpec } from './remotion-core/timeline-to-spec.js';
-import { normalizeSpec, generateAdVariants } from './remotion-core/spec.js';
+import {
+  normalizeSpec,
+  generateAdVariants,
+  parseSpecInput,
+  RemotionSpecValidationError,
+} from './remotion-core/spec.js';
 import { renderSpecWithRemotion, renderVariantBatch } from './remotion-core/render.js';
+import { scoreVariantBatch, writeCampaignReport } from './remotion-core/ad-intelligence.js';
 
 // Load environment variables from .dev.vars
 function loadEnvVars() {
@@ -1985,6 +1991,21 @@ function saveSpecSnapshot(session, filename, spec) {
   return outputPath;
 }
 
+function parseIncomingRemotionSpec(spec, source = 'server') {
+  return parseSpecInput(spec, { source });
+}
+
+function sendSpecValidationError(res, error) {
+  const payload = {
+    error: error?.payload?.code || 'INVALID_REMOTION_SPEC',
+    message: error.message,
+    details: Array.isArray(error.issues) ? error.issues : [],
+  };
+
+  res.writeHead(422, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+  res.end(JSON.stringify(payload));
+}
+
 async function handleGetRemotionSpec(req, res, sessionId) {
   const session = getSession(sessionId);
   if (!session) {
@@ -2004,6 +2025,11 @@ async function handleGetRemotionSpec(req, res, sessionId) {
       specPath,
     }));
   } catch (error) {
+    if (error instanceof RemotionSpecValidationError) {
+      sendSpecValidationError(res, error);
+      return;
+    }
+
     console.error(`[${sessionId}] Failed to build remotion spec:`, error.message);
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: error.message }));
@@ -2023,17 +2049,26 @@ async function handleGenerateRemotionVariants(req, res, sessionId) {
     for await (const chunk of req) body += chunk;
     const options = body ? JSON.parse(body) : {};
 
-    const baseSpec = options.baseSpec
-      ? normalizeSpec(options.baseSpec)
-      : buildSessionRemotionSpec(session, sessionId, {
-        defaultCaptionPreset: options.defaultCaptionPreset,
-      });
+    const specResult = options.baseSpec
+      ? parseIncomingRemotionSpec(options.baseSpec, `api:/session/${sessionId}/remotion-spec/variants`)
+      : {
+        spec: buildSessionRemotionSpec(session, sessionId, {
+          defaultCaptionPreset: options.defaultCaptionPreset,
+        }),
+        migration: { migrated: false, fromVersion: '2.0', toVersion: '2.0' },
+        warnings: [],
+      };
 
-    const variants = generateAdVariants(baseSpec, {
+    const variants = generateAdVariants(specResult.spec, {
       count: options.count || 3,
       hooks: options.hooks,
+      hookPool: options.hookPool,
       bodies: options.bodies,
+      bodyPool: options.bodyPool,
       ctas: options.ctas,
+      ctaPool: options.ctaPool,
+      toneProfile: options.toneProfile,
+      captionStyleProfile: options.captionStyleProfile,
     });
 
     const variantPaths = variants.map((variant, index) => {
@@ -2047,8 +2082,15 @@ async function handleGenerateRemotionVariants(req, res, sessionId) {
       count: variants.length,
       variants,
       variantPaths,
+      migration: specResult.migration,
+      warnings: specResult.warnings,
     }));
   } catch (error) {
+    if (error instanceof RemotionSpecValidationError) {
+      sendSpecValidationError(res, error);
+      return;
+    }
+
     console.error(`[${sessionId}] Variant generation failed:`, error.message);
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: error.message }));
@@ -2068,17 +2110,26 @@ async function handleRenderVariants(req, res, sessionId) {
     for await (const chunk of req) body += chunk;
     const options = body ? JSON.parse(body) : {};
 
-    const baseSpec = options.baseSpec
-      ? normalizeSpec(options.baseSpec)
-      : buildSessionRemotionSpec(session, sessionId, {
-        defaultCaptionPreset: options.defaultCaptionPreset,
-      });
+    const specResult = options.baseSpec
+      ? parseIncomingRemotionSpec(options.baseSpec, `api:/session/${sessionId}/render-variants`)
+      : {
+        spec: buildSessionRemotionSpec(session, sessionId, {
+          defaultCaptionPreset: options.defaultCaptionPreset,
+        }),
+        migration: { migrated: false, fromVersion: '2.0', toVersion: '2.0' },
+        warnings: [],
+      };
 
-    const variants = generateAdVariants(baseSpec, {
+    const variants = generateAdVariants(specResult.spec, {
       count: options.count || 3,
       hooks: options.hooks,
+      hookPool: options.hookPool,
       bodies: options.bodies,
+      bodyPool: options.bodyPool,
       ctas: options.ctas,
+      ctaPool: options.ctaPool,
+      toneProfile: options.toneProfile,
+      captionStyleProfile: options.captionStyleProfile,
     });
 
     const batchPrefix = options.prefix || 'ad-variant';
@@ -2095,6 +2146,17 @@ async function handleRenderVariants(req, res, sessionId) {
       return saveSpecSnapshot(session, filename, variant);
     });
 
+    let scoreReport = null;
+    if (options.noScores !== true) {
+      const report = scoreVariantBatch(variants, {
+        batchLabel: options.campaignLabel || `session-${sessionId}-render-variants`,
+      });
+
+      scoreReport = await writeCampaignReport(session.rendersDir, report, {
+        prefix: options.scoresPrefix || `${batchPrefix}-intelligence`,
+      });
+    }
+
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({
       success: true,
@@ -2102,8 +2164,16 @@ async function handleRenderVariants(req, res, sessionId) {
       count: results.length,
       renders: results,
       specPaths,
+      migration: specResult.migration,
+      warnings: specResult.warnings,
+      scoreReport,
     }));
   } catch (error) {
+    if (error instanceof RemotionSpecValidationError) {
+      sendSpecValidationError(res, error);
+      return;
+    }
+
     console.error(`[${sessionId}] Render variants failed:`, error.message);
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: error.message }));
@@ -2129,7 +2199,9 @@ async function handleRenderFromSpec(req, res, sessionId) {
       return;
     }
 
-    const spec = normalizeSpec(options.spec);
+    const specResult = parseIncomingRemotionSpec(options.spec, `api:/session/${sessionId}/render-from-spec`);
+    const spec = specResult.spec;
+
     const preview = options.preview === true;
     const outputFilename = options.outputName
       ? options.outputName
@@ -2156,10 +2228,17 @@ async function handleRenderFromSpec(req, res, sessionId) {
       path: outputPath,
       size: outputStats.size,
       renderInfo,
+      migration: specResult.migration,
+      warnings: specResult.warnings,
       downloadUrl: `/session/${sessionId}/renders/${preview ? 'preview' : 'export'}`,
       duration: renderInfo.durationInFrames / (renderInfo.fps || 30),
     }));
   } catch (error) {
+    if (error instanceof RemotionSpecValidationError) {
+      sendSpecValidationError(res, error);
+      return;
+    }
+
     console.error(`[${sessionId}] Render from spec failed:`, error.message);
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: error.message }));
@@ -2364,14 +2443,19 @@ async function handleProjectRenderRemotion(req, res, sessionId) {
     }
 
     const preview = options.preview === true;
-    const spec = options.spec
-      ? normalizeSpec(options.spec)
-      : buildSessionRemotionSpec(session, sessionId, {
-        title: options.title,
-        brandTheme: options.brandTheme,
-        adTemplate: options.adTemplate,
-        defaultCaptionPreset: options.defaultCaptionPreset,
-      });
+    const specResult = options.spec
+      ? parseIncomingRemotionSpec(options.spec, `api:/session/${sessionId}/render`)
+      : {
+        spec: buildSessionRemotionSpec(session, sessionId, {
+          title: options.title,
+          brandTheme: options.brandTheme,
+          adTemplate: options.adTemplate,
+          defaultCaptionPreset: options.defaultCaptionPreset,
+        }),
+        migration: { migrated: false, fromVersion: '2.0', toVersion: '2.0' },
+        warnings: [],
+      };
+    const spec = specResult.spec;
 
     const outputFilename = preview
       ? 'preview.mp4'
@@ -2401,9 +2485,16 @@ async function handleProjectRenderRemotion(req, res, sessionId) {
       duration: renderInfo.durationInFrames / (renderInfo.fps || 30),
       renderInfo,
       specPath: specSnapshotPath,
+      migration: specResult.migration,
+      warnings: specResult.warnings,
       downloadUrl: `/session/${sessionId}/renders/${preview ? 'preview' : 'export'}`,
     }));
   } catch (error) {
+    if (error instanceof RemotionSpecValidationError) {
+      sendSpecValidationError(res, error);
+      return;
+    }
+
     console.error(`[${sessionId}] Remotion render error:`, error.message);
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: error.message }));

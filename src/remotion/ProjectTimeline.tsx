@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 import {
   AbsoluteFill,
   Audio,
+  Easing,
   Img,
   interpolate,
   OffthreadVideo,
@@ -14,6 +15,8 @@ import type {
   RemotionCaption,
   RemotionCaptionStyle,
   RemotionClip,
+  RemotionClipJunctionTransition,
+  RemotionEasing,
   RemotionProjectSpec,
   RemotionTrack,
 } from '../shared/remotion-core';
@@ -23,8 +26,27 @@ interface ProjectTimelineProps {
   spec: RemotionProjectSpec;
 }
 
+type ResolvedTransitionType = 'none' | 'crossfade' | 'slide-left' | 'slide-right' | 'dip-to-black';
+
+interface ResolvedJunctionTransition {
+  id: string;
+  fromClipId: string;
+  toClipId: string;
+  type: ResolvedTransitionType;
+  durationSec: number;
+  durationInFrames: number;
+  overlapSec: number;
+  startFrame: number;
+  easing: RemotionEasing;
+}
+
+interface ClipTransitionContext {
+  incoming?: ResolvedJunctionTransition;
+  outgoing?: ResolvedJunctionTransition;
+}
+
 const DEFAULT_SPEC: RemotionProjectSpec = {
-  version: '1.0',
+  version: '2.0',
   id: 'default-spec',
   title: 'Untitled',
   createdAt: new Date().toISOString(),
@@ -46,6 +68,7 @@ const DEFAULT_SPEC: RemotionProjectSpec = {
   clips: [],
   captions: [],
   voiceover: [],
+  transitions: [],
   brandTheme: {
     name: 'Default',
     fontFamily: 'Inter',
@@ -76,39 +99,177 @@ const resolveCaptionStyle = (style: RemotionCaptionStyle): RemotionCaptionStyle 
   } as RemotionCaptionStyle;
 };
 
-const transitionOpacity = (
-  frame: number,
-  durationInFrames: number,
-  transitionInFrames: number,
-  transitionOutFrames: number,
-): number => {
-  const inOpacity = transitionInFrames > 0
-    ? interpolate(frame, [0, transitionInFrames], [0, 1], {
-      extrapolateLeft: 'clamp',
-      extrapolateRight: 'clamp',
-    })
-    : 1;
-
-  const outOpacity = transitionOutFrames > 0
-    ? interpolate(frame, [durationInFrames - transitionOutFrames, durationInFrames], [1, 0], {
-      extrapolateLeft: 'clamp',
-      extrapolateRight: 'clamp',
-    })
-    : 1;
-
-  return inOpacity * outOpacity;
+const getTrackOrder = (trackId: string, tracks: RemotionTrack[]): number => {
+  const track = tracks.find((t) => t.id === trackId);
+  return track?.order ?? 999;
 };
 
-const clipTransformStyle = (clip: RemotionClip): React.CSSProperties => {
-  const scale = clip.transform?.scale ?? 1;
-  const rotation = clip.transform?.rotation ?? 0;
-  const x = clip.transform?.x ?? 0;
-  const y = clip.transform?.y ?? 0;
-  const opacity = clip.transform?.opacity ?? 1;
+const getEasing = (easing: RemotionEasing | undefined) => {
+  if (easing === 'ease-in') return Easing.in(Easing.cubic);
+  if (easing === 'ease-out') return Easing.out(Easing.cubic);
+  if (easing === 'linear') return Easing.linear;
+  return Easing.inOut(Easing.cubic);
+};
+
+const easedInterpolate = (
+  frame: number,
+  input: [number, number],
+  output: [number, number],
+  easing: RemotionEasing,
+): number => {
+  return interpolate(frame, input, output, {
+    easing: getEasing(easing),
+    extrapolateLeft: 'clamp',
+    extrapolateRight: 'clamp',
+  });
+};
+
+const clipTransformValues = (clip: RemotionClip) => {
+  return {
+    scale: clip.transform?.scale ?? 1,
+    rotation: clip.transform?.rotation ?? 0,
+    x: clip.transform?.x ?? 0,
+    y: clip.transform?.y ?? 0,
+    opacity: clip.transform?.opacity ?? 1,
+  };
+};
+
+const normalizeTransitionType = (type: string | undefined): ResolvedTransitionType => {
+  if (type === 'crossfade' || type === 'slide-left' || type === 'slide-right' || type === 'dip-to-black') {
+    return type;
+  }
+  return 'none';
+};
+
+const legacyTypeToV2 = (type: string | undefined): ResolvedTransitionType => {
+  if (type === 'fade') return 'crossfade';
+  if (type === 'slide-left') return 'slide-left';
+  if (type === 'slide-right') return 'slide-right';
+  return 'none';
+};
+
+const deriveLegacyJunctionTransitions = (clips: RemotionClip[]): RemotionClipJunctionTransition[] => {
+  const byTrack = new Map<string, RemotionClip[]>();
+
+  for (const clip of clips) {
+    const trackClips = byTrack.get(clip.trackId) ?? [];
+    trackClips.push(clip);
+    byTrack.set(clip.trackId, trackClips);
+  }
+
+  const transitions: RemotionClipJunctionTransition[] = [];
+
+  for (const trackClips of byTrack.values()) {
+    const sorted = [...trackClips].sort((a, b) => {
+      if (a.startSec !== b.startSec) return a.startSec - b.startSec;
+      return a.id.localeCompare(b.id);
+    });
+
+    for (let i = 0; i < sorted.length - 1; i += 1) {
+      const from = sorted[i];
+      const to = sorted[i + 1];
+
+      const preferred = to.transitionIn ?? from.transitionOut;
+      const type = legacyTypeToV2(preferred?.type);
+      const durationSec = preferred?.durationSec ?? 0;
+      const easing = preferred?.easing ?? 'ease-in-out';
+
+      if (type === 'none' || durationSec <= 0) {
+        continue;
+      }
+
+      transitions.push({
+        id: `legacy-${from.id}-${to.id}`,
+        fromClipId: from.id,
+        toClipId: to.id,
+        type,
+        durationSec,
+        easing,
+        fallbackBehavior: 'clamp',
+      });
+    }
+  }
+
+  return transitions;
+};
+
+const resolveJunctionTransitions = (
+  spec: RemotionProjectSpec,
+  fps: number,
+): {
+  transitionMap: Map<string, ClipTransitionContext>;
+  dipTransitions: ResolvedJunctionTransition[];
+} => {
+  const clipMap = new Map(spec.clips.map((clip) => [clip.id, clip]));
+  const transitionMap = new Map<string, ClipTransitionContext>();
+  const dipTransitions: ResolvedJunctionTransition[] = [];
+
+  const sourceTransitions = spec.transitions && spec.transitions.length > 0
+    ? spec.transitions
+    : deriveLegacyJunctionTransitions(spec.clips);
+
+  const upsert = (clipId: string) => {
+    const current = transitionMap.get(clipId);
+    if (current) return current;
+    const initial: ClipTransitionContext = {};
+    transitionMap.set(clipId, initial);
+    return initial;
+  };
+
+  for (const transition of sourceTransitions) {
+    const fromClip = clipMap.get(transition.fromClipId);
+    const toClip = clipMap.get(transition.toClipId);
+
+    if (!fromClip || !toClip) {
+      continue;
+    }
+
+    if (fromClip.trackId !== toClip.trackId) {
+      continue;
+    }
+
+    const fromEndSec = fromClip.startSec + fromClip.durationSec;
+    const overlapSec = fromEndSec - toClip.startSec;
+    if (overlapSec <= 0) {
+      // Invalid overlap constraints: graceful fallback to hard cut (skip transition).
+      continue;
+    }
+
+    const requestedDurationSec = Math.max(0, transition.durationSec ?? 0);
+    const resolvedDurationSec = Math.min(requestedDurationSec, overlapSec);
+    if (resolvedDurationSec <= 0) {
+      continue;
+    }
+
+    const resolvedType = normalizeTransitionType(transition.type);
+    if (resolvedType === 'none') {
+      continue;
+    }
+
+    const easing = transition.easing ?? 'ease-in-out';
+    const resolved: ResolvedJunctionTransition = {
+      id: transition.id,
+      fromClipId: fromClip.id,
+      toClipId: toClip.id,
+      type: resolvedType,
+      durationSec: resolvedDurationSec,
+      durationInFrames: Math.max(1, toFrames(resolvedDurationSec, fps)),
+      overlapSec,
+      startFrame: toFrames(toClip.startSec, fps),
+      easing,
+    };
+
+    upsert(fromClip.id).outgoing = resolved;
+    upsert(toClip.id).incoming = resolved;
+
+    if (resolved.type === 'dip-to-black') {
+      dipTransitions.push(resolved);
+    }
+  }
 
   return {
-    transform: `translate(${x}px, ${y}px) scale(${scale}) rotate(${rotation}deg)`,
-    opacity,
+    transitionMap,
+    dipTransitions,
   };
 };
 
@@ -208,23 +369,66 @@ const CaptionOverlay: React.FC<{
   );
 };
 
-const getTrackOrder = (trackId: string, tracks: RemotionTrack[]): number => {
-  const track = tracks.find((t) => t.id === trackId);
-  return track?.order ?? 999;
-};
-
 const VideoVisualClip: React.FC<{
   clip: RemotionClip;
   fps: number;
   tracks: RemotionTrack[];
-}> = ({ clip, fps, tracks }) => {
+  transitionContext?: ClipTransitionContext;
+}> = ({ clip, fps, tracks, transitionContext }) => {
   const frame = useCurrentFrame();
-  const durationInFrames = toFrames(clip.durationSec, fps);
-  const transitionInFrames = toFrames(clip.transitionIn?.durationSec ?? 0, fps);
-  const transitionOutFrames = toFrames(clip.transitionOut?.durationSec ?? 0, fps);
-
-  const layerOpacity = transitionOpacity(frame, durationInFrames, transitionInFrames, transitionOutFrames);
+  const durationInFrames = Math.max(1, toFrames(clip.durationSec, fps));
   const trackOrder = getTrackOrder(clip.trackId, tracks);
+  const transformValues = clipTransformValues(clip);
+
+  let opacity = transformValues.opacity;
+  let transitionTranslateXPercent = 0;
+
+  const incoming = transitionContext?.incoming;
+  const incomingFrames = incoming ? Math.min(incoming.durationInFrames, durationInFrames) : 0;
+  if (incoming && incomingFrames > 0) {
+    if (incoming.type === 'crossfade' || incoming.type === 'dip-to-black') {
+      opacity *= easedInterpolate(frame, [0, incomingFrames], [0, 1], incoming.easing);
+    }
+
+    if (incoming.type === 'slide-left') {
+      transitionTranslateXPercent += easedInterpolate(frame, [0, incomingFrames], [100, 0], incoming.easing);
+    }
+
+    if (incoming.type === 'slide-right') {
+      transitionTranslateXPercent += easedInterpolate(frame, [0, incomingFrames], [-100, 0], incoming.easing);
+    }
+  }
+
+  const outgoing = transitionContext?.outgoing;
+  const outgoingFrames = outgoing ? Math.min(outgoing.durationInFrames, durationInFrames) : 0;
+  if (outgoing && outgoingFrames > 0) {
+    if (outgoing.type === 'crossfade' || outgoing.type === 'dip-to-black') {
+      opacity *= easedInterpolate(
+        frame,
+        [durationInFrames - outgoingFrames, durationInFrames],
+        [1, 0],
+        outgoing.easing,
+      );
+    }
+
+    if (outgoing.type === 'slide-left') {
+      transitionTranslateXPercent += easedInterpolate(
+        frame,
+        [durationInFrames - outgoingFrames, durationInFrames],
+        [0, -100],
+        outgoing.easing,
+      );
+    }
+
+    if (outgoing.type === 'slide-right') {
+      transitionTranslateXPercent += easedInterpolate(
+        frame,
+        [durationInFrames - outgoingFrames, durationInFrames],
+        [0, 100],
+        outgoing.easing,
+      );
+    }
+  }
 
   const media = clip.assetType === 'video'
     ? (
@@ -248,12 +452,39 @@ const VideoVisualClip: React.FC<{
     <AbsoluteFill
       style={{
         zIndex: 1000 - trackOrder,
-        opacity: layerOpacity,
-        ...clipTransformStyle(clip),
+        opacity,
+        overflow: 'hidden',
+        transform: `translate3d(calc(${transformValues.x}px + ${transitionTranslateXPercent}%), ${transformValues.y}px, 0) scale(${transformValues.scale}) rotate(${transformValues.rotation}deg)`,
       }}
     >
       {media}
     </AbsoluteFill>
+  );
+};
+
+const DipToBlackOverlay: React.FC<{
+  transition: ResolvedJunctionTransition;
+}> = ({ transition }) => {
+  const frame = useCurrentFrame();
+
+  if (transition.durationInFrames <= 1) {
+    return null;
+  }
+
+  const half = transition.durationInFrames / 2;
+  const opacity = frame <= half
+    ? easedInterpolate(frame, [0, half], [0, 1], transition.easing)
+    : easedInterpolate(frame, [half, transition.durationInFrames], [1, 0], transition.easing);
+
+  return (
+    <AbsoluteFill
+      style={{
+        backgroundColor: '#000000',
+        opacity,
+        zIndex: 4000,
+        pointerEvents: 'none',
+      }}
+    />
   );
 };
 
@@ -293,6 +524,11 @@ export const ProjectTimeline: React.FC<ProjectTimelineProps> = ({ spec = DEFAULT
     [safeSpec],
   );
 
+  const { transitionMap, dipTransitions } = useMemo(
+    () => resolveJunctionTransitions(safeSpec, fps),
+    [safeSpec, fps],
+  );
+
   return (
     <AbsoluteFill
       style={{
@@ -305,7 +541,12 @@ export const ProjectTimeline: React.FC<ProjectTimelineProps> = ({ spec = DEFAULT
           from={toFrames(clip.startSec, fps)}
           durationInFrames={Math.max(1, toFrames(clip.durationSec, fps))}
         >
-          <VideoVisualClip clip={clip} fps={fps} tracks={safeSpec.tracks} />
+          <VideoVisualClip
+            clip={clip}
+            fps={fps}
+            tracks={safeSpec.tracks}
+            transitionContext={transitionMap.get(clip.id)}
+          />
         </Sequence>
       ))}
 
@@ -336,6 +577,16 @@ export const ProjectTimeline: React.FC<ProjectTimelineProps> = ({ spec = DEFAULT
           </Sequence>
         );
       })}
+
+      {dipTransitions.map((transition) => (
+        <Sequence
+          key={`dip-${transition.id}`}
+          from={transition.startFrame}
+          durationInFrames={transition.durationInFrames}
+        >
+          <DipToBlackOverlay transition={transition} />
+        </Sequence>
+      ))}
 
       {safeSpec.captions.map((caption) => (
         <Sequence

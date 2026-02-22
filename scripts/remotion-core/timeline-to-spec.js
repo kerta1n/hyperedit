@@ -161,7 +161,7 @@ export function timelineToRemotionSpec({
   }
 
   const spec = normalizeSpec({
-    version: '1.0',
+    version: '2.0',
     id: specId || `session-${sessionId || Date.now()}`,
     title: title || 'HyperEdit Remotion Project',
     createdAt: new Date().toISOString(),
