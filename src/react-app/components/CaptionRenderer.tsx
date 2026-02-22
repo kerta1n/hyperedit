@@ -92,6 +92,16 @@ export default function CaptionRenderer({ words, style, currentTime }: CaptionRe
           transition: 'color 0.1s ease',
         };
 
+      case 'highlight':
+        return {
+          color: isActive ? style.highlightColor || '#FDE047' : style.color,
+          backgroundColor: isActive ? 'rgba(0,0,0,0.45)' : 'transparent',
+          borderRadius: isActive ? '6px' : undefined,
+          padding: isActive ? '0 4px' : 0,
+          display: 'inline-block',
+          transition: 'all 0.12s ease',
+        };
+
       case 'fade':
         return {
           opacity: hasStarted ? 1 : 0.3,

@@ -1,4 +1,4 @@
-import z from "zod";
+export * from './remotion-core';
 
 /**
  * Types shared between the client and server go here.

@@ -64,7 +64,7 @@ export interface CaptionStyle {
   strokeColor?: string;
   strokeWidth?: number;
   position: 'bottom' | 'center' | 'top';
-  animation: 'none' | 'karaoke' | 'fade' | 'pop' | 'bounce' | 'typewriter';
+  animation: 'none' | 'karaoke' | 'fade' | 'pop' | 'bounce' | 'typewriter' | 'highlight';
   highlightColor?: string;
   timeOffset?: number; // Offset in seconds to adjust sync (negative = earlier, positive = later)
 }
@@ -87,6 +87,18 @@ export interface ProjectState {
   tracks: Track[];
   clips: TimelineClip[];
   settings: ProjectSettings;
+  captionData?: Record<string, CaptionData>;
+  brandTheme?: {
+    name?: string;
+    fontFamily?: string;
+    accentColor?: string;
+    secondaryColor?: string;
+    backgroundColor?: string;
+    textColor?: string;
+    glow?: number;
+    motionSpeed?: number;
+  };
+  adTemplate?: unknown;
 }
 
 // Timeline tab for editing clips in isolation
@@ -166,11 +178,13 @@ export function useProject() {
   const tracksRef = useRef(tracks);
   const clipsRef = useRef(clips);
   const settingsRef = useRef(settings);
+  const captionDataRef = useRef(captionData);
 
   // Keep refs in sync with state
   useEffect(() => { tracksRef.current = tracks; }, [tracks]);
   useEffect(() => { clipsRef.current = clips; }, [clips]);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
+  useEffect(() => { captionDataRef.current = captionData; }, [captionData]);
 
   // Wrapper to persist session to localStorage
   const setSession = useCallback((sessionOrUpdater: SessionInfo | null | ((prev: SessionInfo | null) => SessionInfo | null)) => {
@@ -621,13 +635,14 @@ export function useProject() {
   // Default caption style
   const defaultCaptionStyle: CaptionStyle = {
     fontFamily: 'Inter',
-    fontSize: 24,
+    fontSize: 52,
     fontWeight: 'bold',
     color: '#FFFFFF',
+    backgroundColor: 'rgba(0,0,0,0.45)',
     strokeColor: '#000000',
-    strokeWidth: 2,
+    strokeWidth: 4,
     position: 'bottom',
-    animation: 'karaoke',
+    animation: 'fade',
     highlightColor: '#FFD700',
   };
 
@@ -741,6 +756,7 @@ export function useProject() {
             tracks: tracksRef.current,
             clips: clipsRef.current,
             settings: settingsRef.current,
+            captionData: captionDataRef.current,
           }),
         });
         console.log('[Project] Saved');
@@ -796,6 +812,7 @@ export function useProject() {
         // Server tracks may be outdated (e.g., missing T1, V3, A2)
         if (data.clips) setClips(data.clips);
         if (data.settings) setSettings(data.settings);
+        if (data.captionData) setCaptionData(data.captionData);
       }
     } catch (error) {
       console.error('[Project] Load failed:', error);
@@ -819,6 +836,7 @@ export function useProject() {
           tracks: tracksRef.current,
           clips: clipsRef.current,
           settings: settingsRef.current,
+          captionData: captionDataRef.current,
         }),
       });
 

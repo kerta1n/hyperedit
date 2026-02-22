@@ -22,6 +22,7 @@ const FONT_OPTIONS = [
 const ANIMATION_OPTIONS = [
   { value: 'none', label: 'None' },
   { value: 'karaoke', label: 'Karaoke' },
+  { value: 'highlight', label: 'Highlight Mode' },
   { value: 'fade', label: 'Fade In' },
   { value: 'pop', label: 'Pop' },
   { value: 'bounce', label: 'Bounce' },
@@ -31,6 +32,41 @@ const POSITION_OPTIONS = [
   { value: 'top', label: 'Top' },
   { value: 'center', label: 'Center' },
   { value: 'bottom', label: 'Bottom' },
+];
+
+const CAPTION_PRESETS: Array<{ id: 'clean' | 'highlight'; label: string; style: Partial<CaptionStyle> }> = [
+  {
+    id: 'clean',
+    label: 'Clean Lower Third',
+    style: {
+      fontFamily: 'Inter',
+      fontSize: 52,
+      fontWeight: 'bold',
+      color: '#FFFFFF',
+      strokeColor: '#000000',
+      strokeWidth: 4,
+      position: 'bottom',
+      animation: 'fade',
+      backgroundColor: 'rgba(0,0,0,0.45)',
+      highlightColor: '#FFD700',
+    },
+  },
+  {
+    id: 'highlight',
+    label: 'Highlight Mode',
+    style: {
+      fontFamily: 'Inter',
+      fontSize: 60,
+      fontWeight: 'black',
+      color: '#FFFFFF',
+      strokeColor: '#0A0A0A',
+      strokeWidth: 5,
+      position: 'bottom',
+      animation: 'karaoke',
+      backgroundColor: 'rgba(0,0,0,0.38)',
+      highlightColor: '#FDE047',
+    },
+  },
 ];
 
 export default function CaptionPropertiesPanel({
@@ -76,6 +112,12 @@ export default function CaptionPropertiesPanel({
     onUpdateStyle({ highlightColor: value });
   }, [onUpdateStyle]);
 
+  const applyPreset = useCallback((presetId: 'clean' | 'highlight') => {
+    const preset = CAPTION_PRESETS.find((p) => p.id === presetId);
+    if (!preset) return;
+    onUpdateStyle(preset.style);
+  }, [onUpdateStyle]);
+
   // Get caption text preview
   const textPreview = captionData.words.slice(0, 3).map(w => w.text).join(' ') +
     (captionData.words.length > 3 ? '...' : '');
@@ -107,6 +149,22 @@ export default function CaptionPropertiesPanel({
 
       {/* Properties */}
       <div className="flex-1 overflow-auto p-3 space-y-4">
+        {/* Direct-response presets */}
+        <div>
+          <span className="text-xs font-medium text-zinc-300 block mb-2">Ad Presets</span>
+          <div className="grid grid-cols-1 gap-1.5">
+            {CAPTION_PRESETS.map((preset) => (
+              <button
+                key={preset.id}
+                onClick={() => applyPreset(preset.id)}
+                className="px-2.5 py-1.5 rounded bg-zinc-800 border border-zinc-700 text-xs text-zinc-200 hover:bg-zinc-700 transition-colors text-left"
+              >
+                {preset.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
         {/* Font Family */}
         <div>
           <div className="flex items-center gap-2 mb-2">
@@ -243,8 +301,8 @@ export default function CaptionPropertiesPanel({
           </select>
         </div>
 
-        {/* Highlight Color (for karaoke) */}
-        {style.animation === 'karaoke' && (
+        {/* Highlight Color (for karaoke/highlight modes) */}
+        {(style.animation === 'karaoke' || style.animation === 'highlight') && (
           <div>
             <label className="text-xs font-medium text-zinc-300 block mb-2">Highlight Color</label>
             <input

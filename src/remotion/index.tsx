@@ -8,4 +8,6 @@ registerRoot(RemotionRoot);
 // Re-export for use in the React app
 export { RemotionRoot } from './Root';
 export { DynamicAnimation } from './DynamicAnimation';
+export { ProjectTimeline } from './ProjectTimeline';
 export type { Scene, DynamicAnimationProps } from './Root';
+export type { RemotionProjectSpec } from '../shared/remotion-core';

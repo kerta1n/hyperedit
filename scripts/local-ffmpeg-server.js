@@ -7,6 +7,9 @@ import { randomUUID } from 'crypto';
 import formidable from 'formidable';
 import { GoogleGenAI } from '@google/genai';
 import { fal } from '@fal-ai/client';
+import { timelineToRemotionSpec } from './remotion-core/timeline-to-spec.js';
+import { normalizeSpec, generateAdVariants } from './remotion-core/spec.js';
+import { renderSpecWithRemotion, renderVariantBatch } from './remotion-core/render.js';
 
 // Load environment variables from .dev.vars
 function loadEnvVars() {
@@ -68,22 +71,11 @@ function restoreSessionsFromDisk() {
 
     // Restore project state from disk if it exists
     const projectPath = join(sessionDir, 'project.json');
-    let projectState = {
-      tracks: [
-        { id: 'T1', type: 'text', name: 'T1', order: 0 },
-        { id: 'V3', type: 'video', name: 'V3', order: 1 },
-        { id: 'V2', type: 'video', name: 'V2', order: 2 },
-        { id: 'V1', type: 'video', name: 'V1', order: 3 },
-        { id: 'A1', type: 'audio', name: 'A1', order: 4 },
-        { id: 'A2', type: 'audio', name: 'A2', order: 5 },
-      ],
-      clips: [],
-      settings: { width: 1920, height: 1080, fps: 30 },
-    };
+    let projectState = createDefaultProjectState();
 
     if (existsSync(projectPath)) {
       try {
-        projectState = JSON.parse(readFileSync(projectPath, 'utf-8'));
+        projectState = ensureProjectDefaults(JSON.parse(readFileSync(projectPath, 'utf-8')));
       } catch (e) {
         console.log(`[Session] Could not read project.json for ${sessionId}`);
       }
@@ -212,6 +204,82 @@ function saveAssetMetadata(session) {
   }
 }
 
+const DEFAULT_PROJECT_TRACKS = [
+  { id: 'T1', type: 'text', name: 'T1', order: 0 },
+  { id: 'V3', type: 'video', name: 'V3', order: 1 },
+  { id: 'V2', type: 'video', name: 'V2', order: 2 },
+  { id: 'V1', type: 'video', name: 'V1', order: 3 },
+  { id: 'A1', type: 'audio', name: 'A1', order: 4 },
+  { id: 'A2', type: 'audio', name: 'A2', order: 5 },
+];
+
+const DEFAULT_BRAND_THEME = {
+  name: 'HyperEdit Growth Theme',
+  fontFamily: 'Inter',
+  accentColor: '#f97316',
+  secondaryColor: '#22d3ee',
+  backgroundColor: '#0a0a0a',
+  textColor: '#ffffff',
+  glow: 0.4,
+  motionSpeed: 1,
+};
+
+function createDefaultProjectState() {
+  return {
+    tracks: [...DEFAULT_PROJECT_TRACKS],
+    clips: [],
+    settings: {
+      width: 1920,
+      height: 1080,
+      fps: 30,
+    },
+    captionData: {},
+    brandTheme: { ...DEFAULT_BRAND_THEME },
+    adTemplate: null,
+  };
+}
+
+function ensureProjectDefaults(project = {}) {
+  return {
+    ...createDefaultProjectState(),
+    ...project,
+    tracks: Array.isArray(project.tracks) && project.tracks.length > 0
+      ? project.tracks
+      : [...DEFAULT_PROJECT_TRACKS],
+    clips: Array.isArray(project.clips) ? project.clips : [],
+    settings: {
+      width: project.settings?.width || 1920,
+      height: project.settings?.height || 1080,
+      fps: project.settings?.fps || 30,
+    },
+    captionData: project.captionData || {},
+    brandTheme: {
+      ...DEFAULT_BRAND_THEME,
+      ...(project.brandTheme || {}),
+    },
+    adTemplate: project.adTemplate || null,
+  };
+}
+
+function serializeProjectForClient(project = {}) {
+  const normalized = ensureProjectDefaults(project);
+  return {
+    tracks: normalized.tracks,
+    clips: normalized.clips,
+    settings: normalized.settings,
+    captionData: normalized.captionData,
+    brandTheme: normalized.brandTheme,
+    adTemplate: normalized.adTemplate,
+  };
+}
+
+function getSessionAssetsAsArray(session) {
+  return Array.from(session.assets.values()).map((asset) => ({
+    ...asset,
+    publicPath: `/session/${session.id}/assets/${asset.id}/stream`,
+  }));
+}
+
 // Run restoration on module load
 restoreSessionsFromDisk();
 
@@ -226,23 +294,8 @@ function createSession(originalName) {
   mkdirSync(assetsDir, { recursive: true });
   mkdirSync(rendersDir, { recursive: true });
 
-  // Initialize project state with all 6 tracks
-  const projectState = {
-    tracks: [
-      { id: 'T1', type: 'text', name: 'T1', order: 0 },    // Captions/text track (top)
-      { id: 'V3', type: 'video', name: 'V3', order: 1 },   // Top overlay (B-roll)
-      { id: 'V2', type: 'video', name: 'V2', order: 2 },   // Overlay (GIFs)
-      { id: 'V1', type: 'video', name: 'V1', order: 3 },   // Base video track
-      { id: 'A1', type: 'audio', name: 'A1', order: 4 },   // Audio track 1
-      { id: 'A2', type: 'audio', name: 'A2', order: 5 },   // Audio track 2
-    ],
-    clips: [],
-    settings: {
-      width: 1920,
-      height: 1080,
-      fps: 30,
-    },
-  };
+  // Initialize project state with Remotion-first defaults
+  const projectState = createDefaultProjectState();
 
   const session = {
     id: sessionId,
@@ -1858,12 +1911,10 @@ function handleProjectGet(req, res, sessionId) {
     return;
   }
 
+  session.project = ensureProjectDefaults(session.project);
+
   res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-  res.end(JSON.stringify({
-    tracks: session.project.tracks,
-    clips: session.project.clips,
-    settings: session.project.settings,
-  }));
+  res.end(JSON.stringify(serializeProjectForClient(session.project)));
 }
 
 // Save project state
@@ -1880,13 +1931,23 @@ async function handleProjectSave(req, res, sessionId) {
     for await (const chunk of req) body += chunk;
     const data = JSON.parse(body);
 
+    session.project = ensureProjectDefaults(session.project);
+
     if (data.tracks) session.project.tracks = data.tracks;
     if (data.clips) session.project.clips = data.clips;
     if (data.settings) session.project.settings = { ...session.project.settings, ...data.settings };
+    if (data.captionData) session.project.captionData = data.captionData;
+    if (data.brandTheme) {
+      session.project.brandTheme = {
+        ...session.project.brandTheme,
+        ...data.brandTheme,
+      };
+    }
+    if (data.adTemplate) session.project.adTemplate = data.adTemplate;
 
     // Save to disk for persistence
     const projectPath = join(session.dir, 'project.json');
-    writeFileSync(projectPath, JSON.stringify(session.project, null, 2));
+    writeFileSync(projectPath, JSON.stringify(ensureProjectDefaults(session.project), null, 2));
 
     console.log(`[${sessionId}] Project saved: ${session.project.clips.length} clips`);
 
@@ -1899,7 +1960,213 @@ async function handleProjectSave(req, res, sessionId) {
   }
 }
 
-// Render project to video
+function buildSessionRemotionSpec(session, sessionId, options = {}) {
+  session.project = ensureProjectDefaults(session.project);
+
+  const spec = timelineToRemotionSpec({
+    project: session.project,
+    assets: getSessionAssetsAsArray(session),
+    captionData: session.project.captionData || {},
+    sessionId,
+    baseUrl: `http://localhost:${PORT}`,
+    specId: options.specId,
+    title: options.title,
+    brandTheme: options.brandTheme || session.project.brandTheme,
+    adTemplate: options.adTemplate || session.project.adTemplate,
+    defaultCaptionPreset: options.defaultCaptionPreset,
+  });
+
+  return normalizeSpec(spec);
+}
+
+function saveSpecSnapshot(session, filename, spec) {
+  const outputPath = join(session.rendersDir, filename);
+  writeFileSync(outputPath, JSON.stringify(spec, null, 2));
+  return outputPath;
+}
+
+async function handleGetRemotionSpec(req, res, sessionId) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+
+  try {
+    const spec = buildSessionRemotionSpec(session, sessionId);
+    const specPath = saveSpecSnapshot(session, `spec-${Date.now()}.json`, spec);
+
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({
+      success: true,
+      spec,
+      specPath,
+    }));
+  } catch (error) {
+    console.error(`[${sessionId}] Failed to build remotion spec:`, error.message);
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: error.message }));
+  }
+}
+
+async function handleGenerateRemotionVariants(req, res, sessionId) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+
+  try {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    const options = body ? JSON.parse(body) : {};
+
+    const baseSpec = options.baseSpec
+      ? normalizeSpec(options.baseSpec)
+      : buildSessionRemotionSpec(session, sessionId, {
+        defaultCaptionPreset: options.defaultCaptionPreset,
+      });
+
+    const variants = generateAdVariants(baseSpec, {
+      count: options.count || 3,
+      hooks: options.hooks,
+      bodies: options.bodies,
+      ctas: options.ctas,
+    });
+
+    const variantPaths = variants.map((variant, index) => {
+      const filename = `variant-spec-${String(index + 1).padStart(2, '0')}-${Date.now()}.json`;
+      return saveSpecSnapshot(session, filename, variant);
+    });
+
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({
+      success: true,
+      count: variants.length,
+      variants,
+      variantPaths,
+    }));
+  } catch (error) {
+    console.error(`[${sessionId}] Variant generation failed:`, error.message);
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: error.message }));
+  }
+}
+
+async function handleRenderVariants(req, res, sessionId) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+
+  try {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    const options = body ? JSON.parse(body) : {};
+
+    const baseSpec = options.baseSpec
+      ? normalizeSpec(options.baseSpec)
+      : buildSessionRemotionSpec(session, sessionId, {
+        defaultCaptionPreset: options.defaultCaptionPreset,
+      });
+
+    const variants = generateAdVariants(baseSpec, {
+      count: options.count || 3,
+      hooks: options.hooks,
+      bodies: options.bodies,
+      ctas: options.ctas,
+    });
+
+    const batchPrefix = options.prefix || 'ad-variant';
+    const results = await renderVariantBatch({
+      variants,
+      outDir: session.rendersDir,
+      prefix: batchPrefix,
+      preview: options.preview === true,
+      logLevel: 'warn',
+    });
+
+    const specPaths = variants.map((variant, index) => {
+      const filename = `${batchPrefix}-${String(index + 1).padStart(2, '0')}.spec.json`;
+      return saveSpecSnapshot(session, filename, variant);
+    });
+
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({
+      success: true,
+      engine: 'remotion',
+      count: results.length,
+      renders: results,
+      specPaths,
+    }));
+  } catch (error) {
+    console.error(`[${sessionId}] Render variants failed:`, error.message);
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: error.message }));
+  }
+}
+
+async function handleRenderFromSpec(req, res, sessionId) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+
+  try {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    const options = body ? JSON.parse(body) : {};
+
+    if (!options.spec) {
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'spec is required' }));
+      return;
+    }
+
+    const spec = normalizeSpec(options.spec);
+    const preview = options.preview === true;
+    const outputFilename = options.outputName
+      ? options.outputName
+      : preview
+        ? 'preview.mp4'
+        : `export-${Date.now()}.mp4`;
+    const outputPath = join(session.rendersDir, outputFilename);
+
+    const renderInfo = await renderSpecWithRemotion({
+      spec,
+      outputPath,
+      preview,
+      logLevel: 'warn',
+    });
+
+    const { stat } = await import('fs/promises');
+    const outputStats = await stat(outputPath);
+    saveSpecSnapshot(session, `${outputFilename.replace(/\.mp4$/, '')}.spec.json`, spec);
+
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({
+      success: true,
+      engine: 'remotion',
+      path: outputPath,
+      size: outputStats.size,
+      renderInfo,
+      downloadUrl: `/session/${sessionId}/renders/${preview ? 'preview' : 'export'}`,
+      duration: renderInfo.durationInFrames / (renderInfo.fps || 30),
+    }));
+  } catch (error) {
+    console.error(`[${sessionId}] Render from spec failed:`, error.message);
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: error.message }));
+  }
+}
+
+// Render project to video with FFmpeg (legacy compositor)
 async function handleProjectRender(req, res, sessionId) {
   const session = getSession(sessionId);
   if (!session) {
@@ -2069,6 +2336,75 @@ async function handleProjectRender(req, res, sessionId) {
 
   } catch (error) {
     console.error(`[${sessionId}] Render error:`, error.message);
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: error.message }));
+  }
+}
+
+// Render project to video with Remotion-first deterministic core
+async function handleProjectRenderRemotion(req, res, sessionId) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+
+  try {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    const options = body ? JSON.parse(body) : {};
+
+    session.project = ensureProjectDefaults(session.project);
+
+    if ((session.project.clips || []).length === 0 && !options.spec) {
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'No clips in timeline' }));
+      return;
+    }
+
+    const preview = options.preview === true;
+    const spec = options.spec
+      ? normalizeSpec(options.spec)
+      : buildSessionRemotionSpec(session, sessionId, {
+        title: options.title,
+        brandTheme: options.brandTheme,
+        adTemplate: options.adTemplate,
+        defaultCaptionPreset: options.defaultCaptionPreset,
+      });
+
+    const outputFilename = preview
+      ? 'preview.mp4'
+      : `export-${Date.now()}.mp4`;
+    const outputPath = join(session.rendersDir, outputFilename);
+
+    console.log(`\n[${sessionId}] === REMOTION ${preview ? 'PREVIEW' : 'EXPORT'} ===`);
+    console.log(`[${sessionId}] Clips: ${spec.clips.length} | Captions: ${spec.captions.length}`);
+
+    const renderInfo = await renderSpecWithRemotion({
+      spec,
+      outputPath,
+      preview,
+      logLevel: 'warn',
+    });
+
+    const { stat } = await import('fs/promises');
+    const outputStats = await stat(outputPath);
+    const specSnapshotPath = saveSpecSnapshot(session, `${outputFilename.replace(/\.mp4$/, '')}.spec.json`, spec);
+
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({
+      success: true,
+      engine: 'remotion',
+      path: outputPath,
+      size: outputStats.size,
+      duration: renderInfo.durationInFrames / (renderInfo.fps || 30),
+      renderInfo,
+      specPath: specSnapshotPath,
+      downloadUrl: `/session/${sessionId}/renders/${preview ? 'preview' : 'export'}`,
+    }));
+  } catch (error) {
+    console.error(`[${sessionId}] Remotion render error:`, error.message);
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: error.message }));
   }
@@ -7693,8 +8029,24 @@ const server = http.createServer(async (req, res) => {
     } else if (req.method === 'PUT' && action === 'project') {
       await handleProjectSave(req, res, sessionId);
     }
+    // Remotion-first project spec endpoints
+    else if (req.method === 'GET' && action === 'remotion-spec') {
+      await handleGetRemotionSpec(req, res, sessionId);
+    }
+    else if (req.method === 'POST' && action === 'remotion-spec/variants') {
+      await handleGenerateRemotionVariants(req, res, sessionId);
+    }
     // Render endpoints
     else if (req.method === 'POST' && action === 'render') {
+      await handleProjectRenderRemotion(req, res, sessionId);
+    }
+    else if (req.method === 'POST' && action === 'render-from-spec') {
+      await handleRenderFromSpec(req, res, sessionId);
+    }
+    else if (req.method === 'POST' && action === 'render-variants') {
+      await handleRenderVariants(req, res, sessionId);
+    }
+    else if (req.method === 'POST' && action === 'render-ffmpeg') {
       await handleProjectRender(req, res, sessionId);
     }
     // GIF creation
@@ -7828,10 +8180,15 @@ server.listen(PORT, () => {
   console.log(`   DELETE /session/:id/assets/:assetId - Delete asset`);
   console.log(`   GET  /session/:id/assets/:assetId/thumbnail - Get thumbnail`);
   console.log(`   GET  /session/:id/assets/:assetId/stream - Stream asset`);
-  console.log(`\n   Project API:`);
+  console.log(`\n   Project API (Remotion-first):`);
   console.log(`   GET  /session/:id/project - Get project state`);
   console.log(`   PUT  /session/:id/project - Save project state`);
-  console.log(`   POST /session/:id/render - Render project to video`);
+  console.log(`   GET  /session/:id/remotion-spec - Build normalized Remotion spec`);
+  console.log(`   POST /session/:id/remotion-spec/variants - Generate ad variants`);
+  console.log(`   POST /session/:id/render - Render project via Remotion core`);
+  console.log(`   POST /session/:id/render-from-spec - Render directly from spec JSON`);
+  console.log(`   POST /session/:id/render-variants - Batch render generated variants`);
+  console.log(`   POST /session/:id/render-ffmpeg - Legacy FFmpeg timeline render`);
   console.log(`   GET  /session/:id/renders/preview - Download preview`);
   console.log(`   GET  /session/:id/renders/export - Download export`);
   console.log(`\n   AI/Auto GIF API:`);

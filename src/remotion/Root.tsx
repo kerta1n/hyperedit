@@ -1,6 +1,8 @@
 import React from 'react';
 import { Composition } from 'remotion';
 import { DynamicAnimation } from './DynamicAnimation';
+import { ProjectTimeline } from './ProjectTimeline';
+import type { RemotionProjectSpec } from '../shared/remotion-core';
 
 // Props passed from the CLI via --props
 export interface DynamicAnimationProps {
@@ -171,6 +173,69 @@ const calculateDuration = (props: DynamicAnimationProps): number => {
   return 300; // Default fallback
 };
 
+const defaultProjectSpec: RemotionProjectSpec = {
+  version: '1.0',
+  id: 'default-spec',
+  title: 'Untitled Project',
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
+  settings: {
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    backgroundColor: '#000000',
+  },
+  tracks: [
+    { id: 'T1', type: 'text', name: 'T1', order: 0 },
+    { id: 'V3', type: 'video', name: 'V3', order: 1 },
+    { id: 'V2', type: 'video', name: 'V2', order: 2 },
+    { id: 'V1', type: 'video', name: 'V1', order: 3 },
+    { id: 'A1', type: 'audio', name: 'A1', order: 4 },
+    { id: 'A2', type: 'audio', name: 'A2', order: 5 },
+  ],
+  clips: [],
+  captions: [],
+  voiceover: [],
+  brandTheme: {
+    name: 'Default Theme',
+    fontFamily: 'Inter',
+    accentColor: '#f97316',
+    secondaryColor: '#3b82f6',
+    backgroundColor: '#000000',
+    textColor: '#ffffff',
+    glow: 0.3,
+    motionSpeed: 1,
+  },
+  adTemplate: {
+    name: 'hook-body-cta',
+    segments: {
+      hook: { id: 'hook', startSec: 0, endSec: 2, textOptions: ['Hook'], captionPreset: 'highlight-mode' },
+      body: { id: 'body', startSec: 2, endSec: 6, textOptions: ['Body'], captionPreset: 'clean-lower-third' },
+      cta: { id: 'cta', startSec: 6, endSec: 8, textOptions: ['CTA'], captionPreset: 'highlight-mode' },
+    },
+  },
+};
+
+const calculateProjectDuration = (spec: RemotionProjectSpec): number => {
+  const fps = spec.settings.fps || 30;
+
+  const clipMax = spec.clips.reduce((max, clip) => {
+    return Math.max(max, clip.startSec + clip.durationSec);
+  }, 0);
+
+  const captionMax = spec.captions.reduce((max, caption) => {
+    return Math.max(max, caption.endSec);
+  }, 0);
+
+  const voiceoverMax = (spec.voiceover || []).reduce((max, voice) => {
+    const end = voice.startSec + (voice.durationSec || 0);
+    return Math.max(max, end);
+  }, 0);
+
+  const durationSec = Math.max(2, clipMax, captionMax, voiceoverMax);
+  return Math.max(1, Math.ceil(durationSec * fps));
+};
+
 export const RemotionRoot: React.FC = () => {
   return (
     <>
@@ -187,7 +252,27 @@ export const RemotionRoot: React.FC = () => {
         }}
         calculateMetadata={({ props }) => {
           return {
-            durationInFrames: calculateDuration(props),
+            durationInFrames: calculateDuration(props as DynamicAnimationProps),
+          };
+        }}
+      />
+      <Composition
+        id="ProjectTimeline"
+        component={ProjectTimeline}
+        durationInFrames={300}
+        fps={30}
+        width={1920}
+        height={1080}
+        defaultProps={{
+          spec: defaultProjectSpec,
+        }}
+        calculateMetadata={({ props }) => {
+          const spec = ((props as { spec?: RemotionProjectSpec })?.spec) ?? defaultProjectSpec;
+          return {
+            durationInFrames: calculateProjectDuration(spec),
+            width: spec.settings.width,
+            height: spec.settings.height,
+            fps: spec.settings.fps,
           };
         }}
       />
