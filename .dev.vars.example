@@ -1,0 +1,30 @@
+# --- LLM Provider Configuration ---
+# Choose "google" (default) or "openai" (for Ollama or any OpenAI-compatible API)
+# LLM_PROVIDER=google
+
+# Google GenAI (default provider)
+GEMINI_API_KEY=your-gemini-api-key-here
+
+# OpenAI-compatible provider (e.g. Ollama)
+# LLM_PROVIDER=openai
+# OPENAI_API_BASE_URL=http://localhost:11434/v1
+# OPENAI_API_KEY=ollama
+# LLM_MODEL=qwen3.5:9b
+
+# --- Other API Keys ---
+# FAL_API_KEY=your-fal-ai-key-here
+# GIPHY_API_KEY=your-giphy-key-here
+
+# --- Local Whisper Configuration ---
+# Model name (without .pt): tiny, base, small, medium, large, turbo
+# WHISPER_MODEL=turbo
+# Directory containing pre-downloaded model files (e.g. turbo.pt)
+# WHISPER_MODEL_DIR=D:/models/whisper
+# Set to false to prevent hallucination loops on silence/music (default: true)
+# WHISPER_CONDITION_ON_PREV_TEXT=false
+
+# --- FFmpeg Server Directories ---
+# Ephemeral scratch files (extracted audio for Whisper, etc.) — safe for a RAM disk
+# HYPEREDIT_TEMP_DIR=R:/temp
+# Persistent session storage (uploaded videos, images, renders) — needs real disk space
+# HYPEREDIT_SESSIONS_DIR=D:/coding/hyperedit/sessions

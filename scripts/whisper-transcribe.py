@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Local Whisper transcription script with word-level timestamps.
-Usage: python3 whisper-transcribe.py <audio_file> [model_size]
+Usage: python3 whisper-transcribe.py <audio_file> [model_size] [--model-dir <path>]
 Output: JSON with transcript and word timestamps
 """
 
@@ -9,6 +9,7 @@ import sys
 import json
 import io
 import contextlib
+import argparse
 
 # Suppress Whisper's stdout output (like "Detected language: English")
 @contextlib.contextmanager
@@ -23,15 +24,19 @@ def suppress_stdout():
 
 import whisper
 
-def transcribe(audio_path, model_size="base"):
+def transcribe(audio_path, model_size="base", model_dir=None, condition_on_previous_text=True):
     """Transcribe audio file with word-level timestamps."""
 
     # Load model (will download on first use)
-    # Models: tiny, base, small, medium, large
+    # Models: tiny, base, small, medium, large, turbo
     # base is a good balance of speed and accuracy
     # Note: MPS (Apple GPU) doesn't work with Whisper's sparse tensors, so we use CPU
-    print(f"Loading Whisper model '{model_size}'...", file=sys.stderr)
-    model = whisper.load_model(model_size)
+    load_kwargs = {}
+    if model_dir:
+        load_kwargs['download_root'] = model_dir
+
+    print(f"Loading Whisper model '{model_size}'" + (f" from {model_dir}" if model_dir else "") + "...", file=sys.stderr)
+    model = whisper.load_model(model_size, **load_kwargs)
 
     print(f"Transcribing {audio_path}...", file=sys.stderr)
 
@@ -40,6 +45,7 @@ def transcribe(audio_path, model_size="base"):
         result = model.transcribe(
             audio_path,
             word_timestamps=True,
+            condition_on_previous_text=condition_on_previous_text,
             verbose=False
         )
 
@@ -63,15 +69,16 @@ def transcribe(audio_path, model_size="base"):
     print(json.dumps(output))
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python3 whisper-transcribe.py <audio_file> [model_size]", file=sys.stderr)
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Transcribe audio with Whisper")
+    parser.add_argument("audio_file", help="Path to audio file")
+    parser.add_argument("model_size", nargs="?", default="base", help="Whisper model size (tiny, base, small, medium, large, turbo)")
+    parser.add_argument("--model-dir", default=None, help="Directory containing pre-downloaded Whisper model files")
+    parser.add_argument("--no-condition-on-previous-text", action="store_true", help="Disable conditioning on previous text (reduces hallucination loops)")
 
-    audio_file = sys.argv[1]
-    model_size = sys.argv[2] if len(sys.argv) > 2 else "base"
+    args = parser.parse_args()
 
     try:
-        transcribe(audio_file, model_size)
+        transcribe(args.audio_file, args.model_size, args.model_dir, not args.no_condition_on_previous_text)
     except Exception as e:
         error_msg = str(e)
         print(f"Error: {error_msg}", file=sys.stderr)

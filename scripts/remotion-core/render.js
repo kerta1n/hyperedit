@@ -108,6 +108,72 @@ export async function renderSpecWithRemotion({
   };
 }
 
+export async function renderDynamicAnimation({
+  sceneData,
+  outputPath,
+  width = 1920,
+  height = 1080,
+  fps = 30,
+  logLevel = 'info',
+  onProgress,
+}) {
+  if (!sceneData || !sceneData.scenes) {
+    throw new Error('sceneData with scenes array is required for renderDynamicAnimation');
+  }
+
+  if (!outputPath) {
+    throw new Error('outputPath is required for renderDynamicAnimation');
+  }
+
+  await mkdir(dirname(outputPath), { recursive: true });
+
+  const serveUrl = await getBundleUrl();
+  const inputProps = sceneData;
+
+  const composition = await selectComposition({
+    id: 'DynamicAnimation',
+    serveUrl,
+    inputProps,
+  });
+
+  // Override composition settings with caller-specified values
+  const finalComposition = {
+    ...composition,
+    width,
+    height,
+    fps,
+  };
+
+  const renderOptions = {
+    serveUrl,
+    composition: finalComposition,
+    codec: 'h264',
+    outputLocation: outputPath,
+    inputProps,
+    imageFormat: 'jpeg',
+    overwrite: true,
+    logLevel,
+    crf: 20,
+    audioCodec: 'aac',
+  };
+
+  if (onProgress) {
+    renderOptions.onProgress = onProgress;
+  }
+
+  await renderMedia(renderOptions);
+
+  return {
+    outputPath,
+    compositionId: 'DynamicAnimation',
+    width: finalComposition.width,
+    height: finalComposition.height,
+    fps: finalComposition.fps,
+    durationInFrames: finalComposition.durationInFrames,
+    durationInSeconds: finalComposition.durationInFrames / finalComposition.fps,
+  };
+}
+
 export async function renderVariantBatch({
   variants,
   outDir,

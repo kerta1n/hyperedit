@@ -14,7 +14,7 @@ import {
   parseSpecInput,
   RemotionSpecValidationError,
 } from './remotion-core/spec.js';
-import { renderSpecWithRemotion, renderVariantBatch } from './remotion-core/render.js';
+import { renderSpecWithRemotion, renderDynamicAnimation, renderVariantBatch } from './remotion-core/render.js';
 import { scoreVariantBatch, writeCampaignReport } from './remotion-core/ad-intelligence.js';
 
 // Load environment variables from .dev.vars
@@ -42,9 +42,136 @@ if (process.env.FAL_API_KEY && !process.env.FAL_KEY) {
   process.env.FAL_KEY = process.env.FAL_API_KEY;
 }
 
+// ============== LLM PROVIDER ABSTRACTION ==============
+
+// Determine which LLM provider to use for text/code generation
+function getLLMProvider() {
+  const explicit = process.env.LLM_PROVIDER;
+  if (explicit) return explicit; // 'google' or 'openai'
+  if (process.env.GEMINI_API_KEY) return 'google';
+  if (process.env.OPENAI_API_BASE_URL) return 'openai';
+  return null;
+}
+
+// Check if any LLM provider is configured
+function hasLLMProvider() {
+  return !!getLLMProvider();
+}
+
+// Call OpenAI-compatible API (Ollama, etc.) via fetch
+async function callOpenAICompat(messages, options = {}) {
+  const baseUrl = process.env.OPENAI_API_BASE_URL;
+  if (!baseUrl) throw new Error('OPENAI_API_BASE_URL not configured');
+
+  const model = options.model || process.env.LLM_MODEL || 'qwen3.5:9b';
+  const apiKey = process.env.OPENAI_API_KEY || '';
+
+  const body = {
+    model,
+    messages,
+  };
+
+  if (options.responseMimeType === 'application/json') {
+    body.response_format = { type: 'json_object' };
+  }
+
+  const response = await fetch(`${baseUrl.replace(/\/$/, '')}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text().catch(() => '');
+    throw new Error(`OpenAI API error ${response.status}: ${errText.substring(0, 200)}`);
+  }
+
+  const result = await response.json();
+  return result.choices?.[0]?.message?.content || '';
+}
+
+// Call Google GenAI SDK
+async function callGeminiSDK(contents, options = {}) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
+
+  const ai = new GoogleGenAI({ apiKey });
+  const config = {};
+  if (options.responseMimeType) {
+    config.responseMimeType = options.responseMimeType;
+  }
+
+  const response = await ai.models.generateContent({
+    model: options.model || 'gemini-2.0-flash',
+    contents,
+    ...(Object.keys(config).length ? { config } : {}),
+  });
+
+  // Handle different SDK response formats
+  if (typeof response.text === 'function') return await response.text();
+  if (response.text) return response.text;
+  if (response.candidates?.[0]?.content?.parts?.[0]?.text) {
+    return response.candidates[0].content.parts[0].text;
+  }
+  return '';
+}
+
+/**
+ * Unified LLM call for text-only generation.
+ * Routes to Google GenAI or OpenAI-compatible API based on env vars.
+ *
+ * @param {string} prompt - The user prompt text
+ * @param {Object} options
+ * @param {string} [options.systemPrompt] - Optional system prompt
+ * @param {string} [options.responseMimeType] - 'application/json' for JSON output
+ * @returns {Promise<string>} The LLM response text
+ */
+async function generateWithLLM(prompt, options = {}) {
+  const provider = getLLMProvider();
+  if (!provider) throw new Error('No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars');
+
+  if (provider === 'openai') {
+    const messages = [];
+    if (options.systemPrompt) {
+      messages.push({ role: 'system', content: options.systemPrompt });
+    }
+    messages.push({ role: 'user', content: prompt });
+    return callOpenAICompat(messages, options);
+  } else {
+    // Google GenAI
+    const parts = [{ text: prompt }];
+    const contents = [{ role: 'user', parts }];
+    // For Gemini, embed system prompt as a preceding user message
+    if (options.systemPrompt) {
+      contents.unshift({ role: 'user', parts: [{ text: options.systemPrompt }] });
+    }
+    return callGeminiSDK(contents, options);
+  }
+}
+
+// Helper to parse JSON from LLM response (handles markdown fences)
+function parseLLMJson(text) {
+  // Try direct parse first
+  try { return JSON.parse(text); } catch { }
+  // Strip markdown code fences
+  const stripped = text.replace(/```(?:json)?\s*/g, '').replace(/```\s*/g, '').trim();
+  try { return JSON.parse(stripped); } catch { }
+  // Try to extract JSON object/array
+  const objMatch = stripped.match(/\{[\s\S]*\}/);
+  if (objMatch) { try { return JSON.parse(objMatch[0]); } catch { } }
+  const arrMatch = stripped.match(/\[[\s\S]*\]/);
+  if (arrMatch) { try { return JSON.parse(arrMatch[0]); } catch { } }
+  throw new Error(`Failed to parse LLM JSON: ${text.substring(0, 200)}`);
+}
+
 const PORT = 3333;
-const TEMP_DIR = join(tmpdir(), 'hyperedit-ffmpeg');
-const SESSIONS_DIR = join(TEMP_DIR, 'sessions');
+const TEMP_DIR = process.env.HYPEREDIT_TEMP_DIR
+  ? join(process.env.HYPEREDIT_TEMP_DIR, 'hyperedit-ffmpeg')
+  : join(tmpdir(), 'hyperedit-ffmpeg');
+const SESSIONS_DIR = process.env.HYPEREDIT_SESSIONS_DIR || join(TEMP_DIR, 'sessions');
 
 // Active video sessions - keeps videos on disk between edits
 const sessions = new Map();
@@ -617,7 +744,7 @@ async function handleRemoveDeadAir(req, res) {
         unlinkSync(inputPath);
         unlinkSync(outputPath);
         unlinkSync(concatListPath);
-        segmentPaths.forEach(p => { try { unlinkSync(p); } catch {} });
+        segmentPaths.forEach(p => { try { unlinkSync(p); } catch { } });
         console.log(`[${jobId}] Cleaned up temp files`);
       } catch (e) {
         console.error(`[${jobId}] Cleanup error:`, e.message);
@@ -628,10 +755,10 @@ async function handleRemoveDeadAir(req, res) {
     console.error(`[${jobId}] Error:`, error.message);
 
     // Cleanup on error
-    try { unlinkSync(inputPath); } catch {}
-    try { unlinkSync(outputPath); } catch {}
-    try { unlinkSync(concatListPath); } catch {}
-    segmentPaths.forEach(p => { try { unlinkSync(p); } catch {} });
+    try { unlinkSync(inputPath); } catch { }
+    try { unlinkSync(outputPath); } catch { }
+    try { unlinkSync(concatListPath); } catch { }
+    segmentPaths.forEach(p => { try { unlinkSync(p); } catch { } });
 
     res.writeHead(500, {
       'Content-Type': 'application/json',
@@ -779,8 +906,8 @@ async function handleProcess(req, res) {
     console.error(`[${jobId}] Error:`, error.message);
 
     // Cleanup on error
-    try { unlinkSync(inputPath); } catch {}
-    try { unlinkSync(outputPath); } catch {}
+    try { unlinkSync(inputPath); } catch { }
+    try { unlinkSync(outputPath); } catch { }
 
     res.writeHead(500, {
       'Content-Type': 'application/json',
@@ -965,8 +1092,8 @@ Only return the JSON, no other text.`
     console.error(`[${jobId}] Error:`, error.message);
 
     // Cleanup on error
-    try { unlinkSync(inputPath); } catch {}
-    try { unlinkSync(audioPath); } catch {}
+    try { unlinkSync(inputPath); } catch { }
+    try { unlinkSync(audioPath); } catch { }
 
     res.writeHead(500, {
       'Content-Type': 'application/json',
@@ -1322,8 +1449,8 @@ async function handleSessionRemoveDeadAir(req, res, sessionId) {
     console.log(`🔍 [${jobId}]   Original streams: ${origProbe.trim().split('\n').join(', ')}`);
 
     // Cleanup segments
-    segmentPaths.forEach(p => { try { unlinkSync(p); } catch {} });
-    try { unlinkSync(concatListPath); } catch {}
+    segmentPaths.forEach(p => { try { unlinkSync(p); } catch { } });
+    try { unlinkSync(concatListPath); } catch { }
 
     // Replace the video asset file
     const { rename, stat } = await import('fs/promises');
@@ -1331,8 +1458,8 @@ async function handleSessionRemoveDeadAir(req, res, sessionId) {
     await rename(outputPath, videoAsset.path);
 
     // Cleanup segments
-    segmentPaths.forEach(p => { try { unlinkSync(p); } catch {} });
-    try { unlinkSync(concatListPath); } catch {}
+    segmentPaths.forEach(p => { try { unlinkSync(p); } catch { } });
+    try { unlinkSync(concatListPath); } catch { }
 
     const newStats = await stat(videoAsset.path);
 
@@ -1356,7 +1483,7 @@ async function handleSessionRemoveDeadAir(req, res, sessionId) {
 
   } catch (error) {
     console.error(`[${jobId}] Error:`, error.message);
-    segmentPaths.forEach(p => { try { unlinkSync(p); } catch {} });
+    segmentPaths.forEach(p => { try { unlinkSync(p); } catch { } });
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: error.message }));
   }
@@ -1437,7 +1564,8 @@ async function handleSessionChapters(req, res, sessionId) {
         role: 'user',
         parts: [
           { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
-          { text: `Analyze this audio from a video that is ${totalDuration.toFixed(1)} seconds long.
+          {
+            text: `Analyze this audio from a video that is ${totalDuration.toFixed(1)} seconds long.
 
 Identify logical chapter breaks based on topic changes or natural transitions.
 
@@ -1504,7 +1632,7 @@ Return JSON: {"chapters": [{"start": 0, "title": "Introduction"}], "summary": "B
       .join('\n');
 
     // Cleanup
-    try { unlinkSync(audioPath); } catch {}
+    try { unlinkSync(audioPath); } catch { }
 
     console.log(`[${jobId}] Generated ${result.chapters?.length || 0} chapters`);
 
@@ -1519,7 +1647,7 @@ Return JSON: {"chapters": [{"start": 0, "title": "Introduction"}], "summary": "B
 
   } catch (error) {
     console.error(`[${jobId}] Error:`, error.message);
-    try { unlinkSync(audioPath); } catch {}
+    try { unlinkSync(audioPath); } catch { }
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: error.message }));
   }
@@ -2836,7 +2964,7 @@ async function transcribeVideo(videoPath, jobId) {
     console.log(`[${jobId}] Transcription complete: ${result.text?.length || 0} characters`);
 
     // Cleanup
-    try { unlinkSync(audioPath); } catch {}
+    try { unlinkSync(audioPath); } catch { }
 
     return {
       text: result.text || '',
@@ -2845,7 +2973,7 @@ async function transcribeVideo(videoPath, jobId) {
     };
 
   } catch (error) {
-    try { unlinkSync(audioPath); } catch {}
+    try { unlinkSync(audioPath); } catch { }
     throw error;
   }
 }
@@ -2927,8 +3055,8 @@ async function downloadGifAsAsset(session, gifUrl, keyword, timestamp) {
     return asset;
 
   } catch (error) {
-    try { unlinkSync(gifPath); } catch {}
-    try { unlinkSync(thumbPath); } catch {}
+    try { unlinkSync(gifPath); } catch { }
+    try { unlinkSync(thumbPath); } catch { }
     throw error;
   }
 }
@@ -3083,10 +3211,12 @@ async function handleGiphyAdd(req, res, sessionId) {
 }
 
 // Handle simple transcription for captions using Gemini (returns word-level timestamps)
-// Check if local Whisper is available
-async function checkLocalWhisper() {
+// Check if local Whisper is available (tries python3 first, then python for Windows)
+let _pythonCmd = null; // cached after first successful check
+
+function tryPythonWhisper(cmd) {
   return new Promise((resolve) => {
-    const check = spawn('python3', ['-c', 'import whisper; print("ok")']);
+    const check = spawn(cmd, ['-c', 'import whisper; print("ok")']);
     let output = '';
     check.stdout.on('data', (data) => { output += data.toString(); });
     check.on('close', (code) => {
@@ -3096,13 +3226,40 @@ async function checkLocalWhisper() {
   });
 }
 
+async function checkLocalWhisper() {
+  // If we already know which python works, reuse it
+  if (_pythonCmd) return true;
+
+  // Try python3 first (Linux/macOS), then python (Windows/venv)
+  for (const cmd of ['python3', 'python']) {
+    if (await tryPythonWhisper(cmd)) {
+      _pythonCmd = cmd;
+      console.log(`[whisper] Using '${cmd}' for local Whisper`);
+      return true;
+    }
+  }
+  return false;
+}
+
 // Run local Whisper transcription
 async function runLocalWhisper(audioPath, jobId) {
   const scriptPath = join(process.cwd(), 'scripts', 'whisper-transcribe.py');
+  const pythonCmd = _pythonCmd || 'python3';
+  const whisperModel = process.env.WHISPER_MODEL || 'base';
+  const whisperModelDir = process.env.WHISPER_MODEL_DIR || '';
+  const conditionOnPrev = (process.env.WHISPER_CONDITION_ON_PREV_TEXT || 'true').toLowerCase();
+
+  const args = [scriptPath, audioPath, whisperModel];
+  if (whisperModelDir) {
+    args.push('--model-dir', whisperModelDir);
+  }
+  if (conditionOnPrev === 'false') {
+    args.push('--no-condition-on-previous-text');
+  }
 
   return new Promise((resolve, reject) => {
-    console.log(`[${jobId}] Running local Whisper...`);
-    const whisperProcess = spawn('python3', [scriptPath, audioPath, 'base']);
+    console.log(`[${jobId}] Running local Whisper (${pythonCmd}, model=${whisperModel}${whisperModelDir ? ', dir=' + whisperModelDir : ''})...`);
+    const whisperProcess = spawn(pythonCmd, args);
 
     let stdout = '';
     let stderr = '';
@@ -3248,7 +3405,7 @@ async function getOrTranscribeVideo(session, videoAsset, jobId) {
   }
 
   // Clean up audio file
-  try { unlinkSync(audioPath); } catch {}
+  try { unlinkSync(audioPath); } catch { }
 
   // Cache the transcript
   session.transcriptCache.set(videoAsset.id, {
@@ -3463,10 +3620,12 @@ async function handleTranscribe(req, res, sessionId) {
 
           const response = await ai.models.generateContent({
             model: 'gemini-2.0-flash',
-            contents: [{ role: 'user', parts: [
-              { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
-              { text: `Transcribe this audio with word-level timestamps. Duration: ${totalDuration.toFixed(1)}s. Return JSON: {"text": "full text", "words": [{"text": "word", "start": 0.0, "end": 0.5}]}` }
-            ]}]
+            contents: [{
+              role: 'user', parts: [
+                { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
+                { text: `Transcribe this audio with word-level timestamps. Duration: ${totalDuration.toFixed(1)}s. Return JSON: {"text": "full text", "words": [{"text": "word", "start": 0.0, "end": 0.5}]}` }
+              ]
+            }]
           });
 
           const responseText = response.text || '';
@@ -3619,7 +3778,7 @@ Guidelines:
     }
 
     // Cleanup
-    try { unlinkSync(audioPath); } catch {}
+    try { unlinkSync(audioPath); } catch { }
 
     const words = (transcription.words || []).map(w => ({
       text: w.text || '',
@@ -3658,7 +3817,7 @@ Guidelines:
 
   } catch (error) {
     console.error(`[${jobId}] Error:`, error.message);
-    try { unlinkSync(audioPath); } catch {}
+    try { unlinkSync(audioPath); } catch { }
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: error.message }));
   }
@@ -3718,7 +3877,7 @@ async function handleTranscribeAndExtract(req, res, sessionId) {
         if (gifs.length > 0) {
           // Get the fixed height small GIF URL
           const gifUrl = gifs[0].images?.fixed_height?.url ||
-                         gifs[0].images?.original?.url;
+            gifs[0].images?.original?.url;
 
           if (gifUrl) {
             const asset = await downloadGifAsAsset(session, gifUrl, kw.keyword, kw.timestamp);
@@ -3765,15 +3924,9 @@ async function parseBody(req) {
 }
 
 // Analyze transcript for B-roll opportunities using Gemini
-async function analyzeBrollOpportunities(transcript, words, totalDuration, apiKey) {
-  const ai = new GoogleGenAI({ apiKey });
-
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.0-flash',
-    contents: [{
-      role: 'user',
-      parts: [{
-        text: `Analyze this video transcript and identify 3-5 key moments that would benefit from a visual B-roll image overlay. Consider:
+// Analyze transcript for B-roll opportunities using LLM
+async function analyzeBrollOpportunities(transcript, words, totalDuration) {
+  const prompt = `Analyze this video transcript and identify 3-5 key moments that would benefit from a visual B-roll image overlay. Consider:
 - Keywords or products mentioned (e.g., "iPhone", "Claude AI", "Tesla")
 - Funny or emphatic moments
 - Important concepts being explained
@@ -3803,28 +3956,13 @@ Guidelines for prompts:
 - Avoid complex scenes - prefer single subjects with clean backgrounds
 - Images will be 1:1 square format
 
-IMPORTANT: Return ONLY valid JSON array, no markdown, no explanation.`
-      }]
-    }],
-    config: { responseMimeType: 'application/json' }
-  });
-
-  const responseText = response.text || '[]';
+IMPORTANT: Return ONLY valid JSON array, no markdown, no explanation.`;
 
   try {
-    // Try to parse directly
-    const parsed = JSON.parse(responseText);
+    const responseText = await generateWithLLM(prompt, { responseMimeType: 'application/json' });
+    const parsed = parseLLMJson(responseText);
     return Array.isArray(parsed) ? parsed : [];
   } catch {
-    // Try to extract JSON from response
-    const match = responseText.match(/\[[\s\S]*\]/);
-    if (match) {
-      try {
-        return JSON.parse(match[0]);
-      } catch {
-        return [];
-      }
-    }
     return [];
   }
 }
@@ -3895,11 +4033,10 @@ async function handleGenerateBroll(req, res, sessionId) {
   try {
     console.log(`\n[${jobId}] === GENERATE B-ROLL IMAGES ===`);
 
-    // Check for Gemini API key
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
+    // Check for LLM provider
+    if (!hasLLMProvider()) {
       res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'GEMINI_API_KEY not configured in .dev.vars' }));
+      res.end(JSON.stringify({ error: 'No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars' }));
       return;
     }
 
@@ -3955,10 +4092,12 @@ async function handleGenerateBroll(req, res, sessionId) {
         const ai = new GoogleGenAI({ apiKey });
         const response = await ai.models.generateContent({
           model: 'gemini-2.0-flash',
-          contents: [{ role: 'user', parts: [
-            { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
-            { text: `Transcribe this audio with word timestamps. Duration: ${totalDuration}s. Return JSON: {"text": "...", "words": [{"text": "word", "start": 0.0, "end": 0.5}]}` }
-          ]}]
+          contents: [{
+            role: 'user', parts: [
+              { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
+              { text: `Transcribe this audio with word timestamps. Duration: ${totalDuration}s. Return JSON: {"text": "...", "words": [{"text": "word", "start": 0.0, "end": 0.5}]}` }
+            ]
+          }]
         });
         const respText = response.text || '';
         try {
@@ -4026,7 +4165,7 @@ async function handleGenerateBroll(req, res, sessionId) {
       }
     }
 
-    try { unlinkSync(audioPath); } catch {}
+    try { unlinkSync(audioPath); } catch { }
 
     console.log(`[${jobId}]    Transcript: "${transcription.text.substring(0, 100)}..."`);
     console.log(`[${jobId}]    Words: ${transcription.words?.length || 0}`);
@@ -4036,8 +4175,7 @@ async function handleGenerateBroll(req, res, sessionId) {
     const opportunities = await analyzeBrollOpportunities(
       transcription.text,
       transcription.words || [],
-      totalDuration,
-      apiKey
+      totalDuration
     );
 
     console.log(`[${jobId}]    Found ${opportunities.length} B-roll opportunities`);
@@ -4240,10 +4378,9 @@ async function handleGenerateAnimation(req, res, sessionId) {
     return;
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
+  if (!hasLLMProvider()) {
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'GEMINI_API_KEY not configured' }));
+    res.end(JSON.stringify({ error: 'No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars' }));
     return;
   }
 
@@ -4294,13 +4431,7 @@ async function handleGenerateAnimation(req, res, sessionId) {
               // Use AI to identify the relevant part of the video based on the description
               console.log(`[${jobId}] Using AI to identify relevant video segment...`);
 
-              const ai = new GoogleGenAI({ apiKey });
-              const segmentResult = await ai.models.generateContent({
-                model: 'gemini-2.0-flash',
-                contents: [{
-                  role: 'user',
-                  parts: [{
-                    text: `Given this video transcript and an animation request, identify the most relevant time segment.
+              const segmentPrompt = `Given this video transcript and an animation request, identify the most relevant time segment.
 
 VIDEO TRANSCRIPT (with word timestamps):
 ${transcription.words?.slice(0, 200).map(w => `[${w.start.toFixed(1)}s] ${w.text}`).join(' ') || transcription.text.substring(0, 2000)}
@@ -4323,15 +4454,11 @@ Return ONLY JSON (no markdown):
 If the animation seems to be for the intro (beginning), use startTime: 0.
 If it's for the outro (ending), use times near the end.
 If it's about a specific topic mentioned in the transcript, find where that topic is discussed.
-If unclear or general, use the middle third of the video.`
-                  }]
-                }],
-              });
+If unclear or general, use the middle third of the video.`;
 
               try {
-                const segmentText = segmentResult.candidates[0].content.parts[0].text;
-                const cleanedSegment = segmentText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-                const segmentData = JSON.parse(cleanedSegment);
+                const segmentText = await generateWithLLM(segmentPrompt, { responseMimeType: 'application/json' });
+                const segmentData = parseLLMJson(segmentText);
 
                 if (segmentData.startTime !== undefined && segmentData.endTime !== undefined) {
                   detectedTimeRange = {
@@ -4426,10 +4553,8 @@ CRITICAL REQUIREMENTS:
       }
     }
 
-    // Step 1: Use Gemini to generate scene data
-    console.log(`[${jobId}] Generating scenes with Gemini...`);
-
-    const ai = new GoogleGenAI({ apiKey });
+    // Step 1: Use LLM to generate scene data
+    console.log(`[${jobId}] Generating scenes with AI...`);
 
     const prompt = `You are a motion graphics designer. Create a JSON scene structure for an animated video based on this description:
 
@@ -4605,22 +4730,12 @@ ${attachedAssetIds?.length ? `- IMPORTANT: Include media scenes to showcase the 
 - For product shots, use "phone-frame" or "circle" mediaStyle
 - For videos, consider using slow-mo (videoPlaybackRate: 0.5) for dramatic moments` : ''}`;
 
-    const result = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    });
-
     let sceneData;
     try {
-      const responseText = result.candidates[0].content.parts[0].text;
-      // Clean up response - remove markdown code blocks if present
-      const cleanedResponse = responseText
-        .replace(/```json\n?/g, '')
-        .replace(/```\n?/g, '')
-        .trim();
-      sceneData = JSON.parse(cleanedResponse);
+      const responseText = await generateWithLLM(prompt);
+      sceneData = parseLLMJson(responseText);
     } catch (parseError) {
-      console.error(`[${jobId}] Failed to parse Gemini response:`, parseError);
+      console.error(`[${jobId}] Failed to parse AI response:`, parseError);
       throw new Error('Failed to parse AI-generated scene data');
     }
 
@@ -4821,47 +4936,16 @@ ${attachedAssetIds?.length ? `- IMPORTANT: Include media scenes to showcase the 
     writeFileSync(propsPath, JSON.stringify(sceneData, null, 2));
     console.log(`[${jobId}] Props written to ${propsPath}`);
 
-    // Step 3: Render with Remotion CLI
+    // Step 3: Render with Remotion Node API
     console.log(`[${jobId}] Rendering with Remotion...`);
 
-    const remotionArgs = [
-      'remotion', 'render',
-      'src/remotion/index.tsx',
-      'DynamicAnimation',
+    await renderDynamicAnimation({
+      sceneData,
       outputPath,
-      '--props', propsPath,
-      '--frames', `0-${totalDuration - 1}`,
-      '--fps', String(fps),
-      '--width', String(width),
-      '--height', String(height),
-      '--codec', 'h264',
-      '--overwrite',
-      '--gl=angle', // Use Metal GPU acceleration on macOS
-    ];
-
-    await new Promise((resolve, reject) => {
-      const proc = spawn('npx', remotionArgs, {
-        cwd: process.cwd(),
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-
-      let stderr = '';
-      proc.stderr.on('data', (data) => {
-        stderr += data.toString();
-        console.log(`[${jobId}] Remotion: ${data.toString().trim()}`);
-      });
-
-      proc.on('close', (code) => {
-        if (code === 0) {
-          resolve();
-        } else {
-          reject(new Error(`Remotion render failed with code ${code}: ${stderr}`));
-        }
-      });
-
-      proc.on('error', (err) => {
-        reject(new Error(`Failed to start Remotion: ${err.message}`));
-      });
+      width,
+      height,
+      fps,
+      logLevel: 'warn',
     });
 
     // Step 4: Generate thumbnail
@@ -4940,10 +5024,9 @@ async function handleEditAnimation(req, res, sessionId) {
     return;
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
+  if (!hasLLMProvider()) {
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'GEMINI_API_KEY not configured' }));
+    res.end(JSON.stringify({ error: 'No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars' }));
     return;
   }
 
@@ -5081,10 +5164,8 @@ To include an asset in a scene, use:
 }`;
     }
 
-    // Use Gemini to modify the scene data
-    console.log(`[${jobId}] Modifying scenes with Gemini...`);
-
-    const ai = new GoogleGenAI({ apiKey });
+    // Use LLM to modify the scene data
+    console.log(`[${jobId}] Modifying scenes with AI...`);
 
     const prompt = `You are editing an EXISTING Remotion animation. The user wants to make a SPECIFIC change.
 
@@ -5200,22 +5281,13 @@ When transcript context is available, you can use it to:
 
 Return ONLY the complete JSON structure with your minimal change applied. No markdown, no explanation.`;
 
-    // Use Gemini 3.0 Pro for better instruction following on edits
-    const result = await ai.models.generateContent({
-      model: 'gemini-3-pro-preview',
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    });
-
+    // Use LLM for better instruction following on edits
     let newSceneData;
     try {
-      const responseText = result.candidates[0].content.parts[0].text;
-      const cleanedResponse = responseText
-        .replace(/```json\n?/g, '')
-        .replace(/```\n?/g, '')
-        .trim();
-      newSceneData = JSON.parse(cleanedResponse);
+      const responseText = await generateWithLLM(prompt);
+      newSceneData = parseLLMJson(responseText);
     } catch (parseError) {
-      console.error(`[${jobId}] Failed to parse Gemini response:`, parseError);
+      console.error(`[${jobId}] Failed to parse AI response:`, parseError);
       throw new Error('Failed to parse AI-modified scene data');
     }
 
@@ -5239,47 +5311,16 @@ Return ONLY the complete JSON structure with your minimal change applied. No mar
     writeFileSync(propsPath, JSON.stringify(newSceneData, null, 2));
     console.log(`[${jobId}] Props written to ${propsPath}`);
 
-    // Render with Remotion
+    // Render with Remotion Node API
     console.log(`[${jobId}] Rendering with Remotion...`);
 
-    const remotionArgs = [
-      'remotion', 'render',
-      'src/remotion/index.tsx',
-      'DynamicAnimation',
+    await renderDynamicAnimation({
+      sceneData: newSceneData,
       outputPath,
-      '--props', propsPath,
-      '--frames', `0-${totalDuration - 1}`,
-      '--fps', String(fps),
-      '--width', String(width),
-      '--height', String(height),
-      '--codec', 'h264',
-      '--overwrite',
-      '--gl=angle', // Use Metal GPU acceleration on macOS
-    ];
-
-    await new Promise((resolve, reject) => {
-      const proc = spawn('npx', remotionArgs, {
-        cwd: process.cwd(),
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-
-      let stderr = '';
-      proc.stderr.on('data', (data) => {
-        stderr += data.toString();
-        console.log(`[${jobId}] Remotion: ${data.toString().trim()}`);
-      });
-
-      proc.on('close', (code) => {
-        if (code === 0) {
-          resolve();
-        } else {
-          reject(new Error(`Remotion render failed with code ${code}: ${stderr}`));
-        }
-      });
-
-      proc.on('error', (err) => {
-        reject(new Error(`Failed to start Remotion: ${err.message}`));
-      });
+      width,
+      height,
+      fps,
+      logLevel: 'warn',
     });
 
     // Generate thumbnail
@@ -5293,7 +5334,7 @@ Return ONLY the complete JSON structure with your minimal change applied. No mar
     // Clean up props file
     try {
       unlinkSync(propsPath);
-    } catch (e) {}
+    } catch (e) { }
 
     const { stat } = await import('fs/promises');
     const stats = await stat(outputPath);
@@ -5359,8 +5400,6 @@ async function handleGenerateImage(req, res, sessionId) {
     return;
   }
 
-  const geminiApiKey = process.env.GEMINI_API_KEY;
-
   try {
     const body = await parseBody(req);
     const {
@@ -5381,12 +5420,11 @@ async function handleGenerateImage(req, res, sessionId) {
     console.log(`[${jobId}] User prompt: ${prompt}`);
     console.log(`[${jobId}] Aspect ratio: ${aspectRatio}, Resolution: ${resolution}`);
 
-    // Enhance prompt using Gemini for better image generation results
+    // Enhance prompt using LLM for better image generation results
     let enhancedPrompt = prompt;
-    if (geminiApiKey) {
+    if (hasLLMProvider()) {
       try {
         console.log(`[${jobId}] Enhancing prompt with Picasso AI...`);
-        const ai = new GoogleGenAI({ apiKey: geminiApiKey });
 
         const systemPrompt = `You are Picasso, an expert AI prompt engineer specializing in image generation. Your role is to transform simple user requests into detailed, visually compelling prompts that produce stunning images.
 
@@ -5411,38 +5449,18 @@ async function handleGenerateImage(req, res, sessionId) {
 - Preserve the user's core intent - don't change WHAT they want, enhance HOW it looks
 - Don't add text/words to appear in the image unless requested
 - Output ONLY the enhanced prompt, no explanations or markdown
-- Make every image feel premium, professional, and visually striking
+- Make every image feel premium, professional, and visually striking`;
 
-## Examples
-
-User: "a cat sitting on a windowsill"
-Enhanced: "A majestic tabby cat lounging on a sun-drenched windowsill, soft golden hour light streaming through sheer curtains, dust particles floating in the warm light beams, cozy interior with potted plants, shallow depth of field, photorealistic, intimate portrait style, warm amber and cream color palette, highly detailed fur texture"
-
-User: "cyberpunk city"
-Enhanced: "Sprawling cyberpunk metropolis at night, towering neon-lit skyscrapers piercing through low-hanging smog, holographic advertisements reflecting off rain-slicked streets, flying vehicles with glowing thrusters, diverse crowd of augmented humans, pink and cyan neon color scheme, cinematic wide-angle shot, blade runner aesthetic, volumetric fog, raytraced reflections, 8K ultra detailed"
-
-User: "a peaceful forest"
-Enhanced: "Ancient moss-covered forest with towering redwood trees, ethereal morning mist weaving between massive trunks, soft dappled sunlight filtering through the dense canopy, ferns and wildflowers carpeting the forest floor, a gentle stream with crystal-clear water, mystical and serene atmosphere, nature photography style, rich greens and earth tones, depth and scale, photorealistic, National Geographic quality"`;
-
-        const result = await ai.models.generateContent({
-          model: 'gemini-2.0-flash',
-          contents: [{
-            role: 'user',
-            parts: [{ text: `Enhance this image prompt:\n\n"${prompt}"` }]
-          }],
-          systemInstruction: systemPrompt,
-        });
-
-        const enhanced = result.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-        if (enhanced && enhanced.length > 10) {
-          enhancedPrompt = enhanced;
+        const enhanced = await generateWithLLM(`Enhance this image prompt:\n\n"${prompt}"`, { systemPrompt });
+        if (enhanced && enhanced.trim().length > 10) {
+          enhancedPrompt = enhanced.trim();
           console.log(`[${jobId}] Enhanced prompt: ${enhancedPrompt.substring(0, 100)}...`);
         }
       } catch (enhanceError) {
         console.warn(`[${jobId}] Prompt enhancement failed, using original:`, enhanceError.message);
       }
     } else {
-      console.log(`[${jobId}] No GEMINI_API_KEY, using original prompt`);
+      console.log(`[${jobId}] No LLM provider, using original prompt`);
     }
 
     // Call fal.ai nano-banana-pro API with enhanced prompt
@@ -5565,8 +5583,6 @@ async function handleGenerateVideo(req, res, sessionId) {
     return;
   }
 
-  const geminiApiKey = process.env.GEMINI_API_KEY;
-
   try {
     const body = await parseBody(req);
     const { prompt, imageAssetId, duration = 5 } = body;
@@ -5597,12 +5613,11 @@ async function handleGenerateVideo(req, res, sessionId) {
     console.log(`[${jobId}] Source image: ${imageAsset.filename}`);
     console.log(`[${jobId}] Duration: ${duration}s`);
 
-    // Enhance prompt using Gemini for better video generation
+    // Enhance prompt using LLM for better video generation
     let enhancedPrompt = prompt;
-    if (geminiApiKey) {
+    if (hasLLMProvider()) {
       try {
         console.log(`[${jobId}] Enhancing prompt with DiCaprio AI...`);
-        const ai = new GoogleGenAI({ apiKey: geminiApiKey });
 
         const systemPrompt = `You are DiCaprio, an expert AI prompt engineer specializing in image-to-video generation. Your role is to transform simple motion requests into detailed, cinematic prompts that produce stunning videos.
 
@@ -5621,24 +5636,9 @@ async function handleGenerateVideo(req, res, sessionId) {
 5. **Timing**: Use terms like "gradual", "sudden", "rhythmic", "smooth", "cinematic"
 
 ## Response Format
-Return ONLY the enhanced prompt text. No explanations, no quotes, no markdown.
+Return ONLY the enhanced prompt text. No explanations, no quotes, no markdown.`;
 
-## Example Input -> Output
-Input: "make it move"
-Output: "Cinematic slow zoom in with subtle parallax movement, gentle ambient motion with soft light rays drifting through the scene, atmospheric particles floating in the air, smooth and dreamlike camera drift"
-
-Input: "zoom out"
-Output: "Epic reveal shot with slow cinematic zoom out, camera gently pulling back to reveal the full scene, subtle atmospheric haze and soft light flares, smooth dolly movement with slight vertical lift"`;
-
-        const result = await ai.models.generateContent({
-          model: 'gemini-2.0-flash',
-          contents: [
-            { role: 'user', parts: [{ text: systemPrompt }] },
-            { role: 'user', parts: [{ text: `Enhance this video motion prompt: "${prompt}"` }] }
-          ],
-        });
-
-        enhancedPrompt = result.candidates[0].content.parts[0].text.trim();
+        enhancedPrompt = (await generateWithLLM(`Enhance this video motion prompt: "${prompt}"`, { systemPrompt })).trim();
         console.log(`[${jobId}] Enhanced prompt: ${enhancedPrompt.substring(0, 100)}...`);
       } catch (e) {
         console.log(`[${jobId}] Prompt enhancement failed, using original: ${e.message}`);
@@ -5797,8 +5797,6 @@ async function handleRestyleVideo(req, res, sessionId) {
     return;
   }
 
-  const geminiApiKey = process.env.GEMINI_API_KEY;
-
   try {
     const body = await parseBody(req);
     const { prompt, videoAssetId } = body;
@@ -5828,19 +5826,13 @@ async function handleRestyleVideo(req, res, sessionId) {
     console.log(`[${jobId}] User prompt: ${prompt}`);
     console.log(`[${jobId}] Source video: ${videoAsset.filename}`);
 
-    // Enhance prompt using Gemini for better style transfer
+    // Enhance prompt using LLM for better style transfer
     let enhancedPrompt = prompt;
-    if (geminiApiKey) {
+    if (hasLLMProvider()) {
       try {
         console.log(`[${jobId}] Enhancing style prompt with AI...`);
-        const ai = new GoogleGenAI({ apiKey: geminiApiKey });
 
-        const result = await ai.models.generateContent({
-          model: 'gemini-2.0-flash',
-          contents: [{
-            role: 'user',
-            parts: [{
-              text: `You are an expert at writing prompts for AI video style transfer. Transform this simple style request into a detailed, cinematic prompt that will produce stunning results.
+        enhancedPrompt = (await generateWithLLM(`You are an expert at writing prompts for AI video style transfer. Transform this simple style request into a detailed, cinematic prompt that will produce stunning results.
 
 User request: "${prompt}"
 
@@ -5851,12 +5843,7 @@ Write a detailed prompt describing the visual style. Include:
 - Overall aesthetic
 - Any specific visual effects
 
-Return ONLY the enhanced prompt, no explanations.`
-            }]
-          }],
-        });
-
-        enhancedPrompt = result.candidates[0].content.parts[0].text.trim();
+Return ONLY the enhanced prompt, no explanations.`)).trim();
         console.log(`[${jobId}] Enhanced prompt: ${enhancedPrompt.substring(0, 100)}...`);
       } catch (e) {
         console.log(`[${jobId}] Prompt enhancement failed, using original: ${e.message}`);
@@ -5891,7 +5878,7 @@ Return ONLY the enhanced prompt, no explanations.`
     console.log(`[${jobId}] Video uploaded: ${uploadedVideoUrl.substring(0, 50)}...`);
 
     // Clean up compressed file
-    try { unlinkSync(compressedPath); } catch (e) {}
+    try { unlinkSync(compressedPath); } catch (e) { }
 
     console.log(`[${jobId}] Calling fal.ai LTX-2 video-to-video...`);
 
@@ -6076,7 +6063,7 @@ async function handleRemoveVideoBg(req, res, sessionId) {
     console.log(`[${jobId}] Video uploaded: ${uploadedVideoUrl.substring(0, 50)}...`);
 
     // Clean up compressed file
-    try { unlinkSync(compressedPath); } catch (e) {}
+    try { unlinkSync(compressedPath); } catch (e) { }
 
     console.log(`[${jobId}] Calling fal.ai Bria video background removal...`);
 
@@ -6199,10 +6186,9 @@ async function handleGenerateBatchAnimations(req, res, sessionId) {
     return;
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
+  if (!hasLLMProvider()) {
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'GEMINI_API_KEY not configured' }));
+    res.end(JSON.stringify({ error: 'No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars' }));
     return;
   }
 
@@ -6246,13 +6232,7 @@ async function handleGenerateBatchAnimations(req, res, sessionId) {
     // Step 2: Use Gemini to plan animations across the video
     console.log(`[${jobId}] Step 2: Planning ${count} animations with AI...`);
 
-    const ai = new GoogleGenAI({ apiKey });
-    const planResult = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
-      contents: [{
-        role: 'user',
-        parts: [{
-          text: `You are a video editor planning motion graphics animations for a video. Analyze this transcript and plan exactly ${count} animations that would enhance the video.
+    const planPrompt = `You are a video editor planning motion graphics animations for a video. Analyze this transcript and plan exactly ${count} animations that would enhance the video.
 
 VIDEO TRANSCRIPT:
 "${transcription.text}"
@@ -6286,16 +6266,12 @@ Guidelines:
 - Last animation could be an outro or call-to-action
 - Space animations throughout the video, not clustered together
 - Each animation should enhance understanding or engagement
-- Be specific about visual style, colors, and text content`
-        }]
-      }],
-    });
+- Be specific about visual style, colors, and text content`;
 
     let animationPlan;
     try {
-      const planText = planResult.candidates[0].content.parts[0].text;
-      const cleanedPlan = planText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-      animationPlan = JSON.parse(cleanedPlan);
+      const planText = await generateWithLLM(planPrompt, { responseMimeType: 'application/json' });
+      animationPlan = parseLLMJson(planText);
     } catch (parseError) {
       console.error(`[${jobId}] Failed to parse animation plan:`, parseError);
       throw new Error('Failed to parse AI animation plan');
@@ -6320,13 +6296,8 @@ Guidelines:
       const propsPath = join(session.dir, `${jobId}-batch-${i}-props.json`);
       const sceneDataPath = join(session.dir, `${assetId}-scenes.json`);
 
-      // Generate scene data with Gemini
-      const sceneResult = await ai.models.generateContent({
-        model: 'gemini-2.0-flash',
-        contents: [{
-          role: 'user',
-          parts: [{
-            text: `Create a Remotion animation for this video moment.
+      // Generate scene data with LLM
+      const scenePromptText = `Create a Remotion animation for this video moment.
 
 ANIMATION TYPE: ${plan.type}
 TITLE: ${plan.title}
@@ -6359,16 +6330,12 @@ Generate a scene-based animation. Return ONLY valid JSON:
   "backgroundColor": "#1a1a2e"
 }
 
-Make it visually engaging with good color choices. Use 2-4 scenes for variety.`
-          }]
-        }],
-      });
+Make it visually engaging with good color choices. Use 2-4 scenes for variety.`;
 
       let sceneData;
       try {
-        const sceneText = sceneResult.candidates[0].content.parts[0].text;
-        const cleanedScene = sceneText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-        sceneData = JSON.parse(cleanedScene);
+        const sceneText = await generateWithLLM(scenePromptText);
+        sceneData = parseLLMJson(sceneText);
       } catch (parseError) {
         console.error(`[${jobId}] Failed to parse scene data for animation ${i + 1}, using fallback`);
         // Create a simple fallback animation
@@ -6397,44 +6364,14 @@ Make it visually engaging with good color choices. Use 2-4 scenes for variety.`
       const totalDuration = sceneData.totalDuration || sceneData.scenes.reduce((sum, s) => sum + s.duration, 0);
       const durationInSeconds = totalDuration / fps;
 
-      // Render with Remotion
-      const remotionArgs = [
-        'remotion', 'render',
-        'src/remotion/index.tsx',
-        'DynamicAnimation',
+      // Render with Remotion Node API
+      await renderDynamicAnimation({
+        sceneData,
         outputPath,
-        '--props', propsPath,
-        '--frames', `0-${totalDuration - 1}`,
-        '--fps', String(fps),
-        '--width', String(width),
-        '--height', String(height),
-        '--codec', 'h264',
-        '--overwrite',
-        '--gl=angle', // Use Metal GPU acceleration on macOS
-      ];
-
-      await new Promise((resolve, reject) => {
-        const proc = spawn('npx', remotionArgs, {
-          cwd: process.cwd(),
-          stdio: ['pipe', 'pipe', 'pipe'],
-        });
-
-        let stderr = '';
-        proc.stderr.on('data', (data) => {
-          stderr += data.toString();
-        });
-
-        proc.on('close', (code) => {
-          if (code === 0) {
-            resolve();
-          } else {
-            reject(new Error(`Remotion render failed: ${stderr.substring(0, 200)}`));
-          }
-        });
-
-        proc.on('error', (err) => {
-          reject(new Error(`Failed to start Remotion: ${err.message}`));
-        });
+        width,
+        height,
+        fps,
+        logLevel: 'warn',
       });
 
       // Generate thumbnail
@@ -6450,7 +6387,7 @@ Make it visually engaging with good color choices. Use 2-4 scenes for variety.`
       }
 
       // Clean up props file
-      try { unlinkSync(propsPath); } catch (e) {}
+      try { unlinkSync(propsPath); } catch (e) { }
 
       const { stat } = await import('fs/promises');
       const stats = await stat(outputPath);
@@ -6516,12 +6453,12 @@ async function handleAnalyzeForAnimation(req, res, sessionId) {
     return;
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
+  if (!hasLLMProvider()) {
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'GEMINI_API_KEY not configured' }));
+    res.end(JSON.stringify({ error: 'No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars' }));
     return;
   }
+  const apiKey = process.env.GEMINI_API_KEY;
 
   try {
     const body = await parseBody(req);
@@ -6669,12 +6606,10 @@ async function handleAnalyzeForAnimation(req, res, sessionId) {
     console.log(`[${jobId}] Transcription complete: ${transcription.text.substring(0, 100)}...`);
 
     // Clean up audio file
-    try { unlinkSync(audioPath); } catch (e) {}
+    try { unlinkSync(audioPath); } catch (e) { }
 
     // Step 2: Generate animation concept (scenes) without rendering
     console.log(`[${jobId}] Step 2: Generating animation concept...`);
-
-    const genAI = new GoogleGenAI({ apiKey });
 
     const typePrompts = {
       intro: `Create an engaging INTRO animation that hooks viewers and introduces the video topic.
@@ -6756,21 +6691,12 @@ IMPORTANT: The animation content should directly relate to the video's actual to
 Use specific terms, concepts, and themes from the transcript.
 Feel free to add a GIF scene for reactions or emphasis when appropriate!`;
 
-    const sceneResult = await genAI.models.generateContent({
-      model: 'gemini-2.0-flash',
-      contents: [{ role: 'user', parts: [{ text: scenePrompt }] }],
-    });
-
     let sceneData;
     try {
-      const responseText = sceneResult.candidates[0].content.parts[0].text;
-      const cleanedResponse = responseText
-        .replace(/```json\n?/g, '')
-        .replace(/```\n?/g, '')
-        .trim();
-      sceneData = JSON.parse(cleanedResponse);
+      const responseText = await generateWithLLM(scenePrompt);
+      sceneData = parseLLMJson(responseText);
     } catch (parseError) {
-      console.error(`[${jobId}] Failed to parse Gemini response:`, parseError);
+      console.error(`[${jobId}] Failed to parse AI response:`, parseError);
       throw new Error('Failed to parse AI-generated scene data');
     }
 
@@ -6939,57 +6865,16 @@ async function handleRenderFromConcept(req, res, sessionId) {
     console.log(`[${jobId}] Props written to ${propsPath}`);
     console.log(`[${jobId}] Scene data:`, JSON.stringify(sceneData, null, 2));
 
-    // Render with Remotion CLI
+    // Render with Remotion Node API
     console.log(`[${jobId}] Rendering with Remotion...`);
 
-    const remotionArgs = [
-      'remotion', 'render',
-      'src/remotion/index.tsx',
-      'DynamicAnimation',
+    await renderDynamicAnimation({
+      sceneData,
       outputPath,
-      '--props', propsPath,
-      '--frames', `0-${animationTotalDuration - 1}`,
-      '--fps', String(fps),
-      '--width', String(width),
-      '--height', String(height),
-      '--codec', 'h264',
-      '--overwrite',
-      '--gl=angle', // Use Metal GPU acceleration on macOS
-    ];
-
-    console.log(`[${jobId}] Remotion command: npx ${remotionArgs.join(' ')}`);
-
-    await new Promise((resolve, reject) => {
-      const proc = spawn('npx', remotionArgs, {
-        cwd: process.cwd(),
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-
-      let stdout = '';
-      let stderr = '';
-
-      proc.stdout.on('data', (data) => {
-        stdout += data.toString();
-        console.log(`[${jobId}] Remotion stdout: ${data.toString().trim()}`);
-      });
-
-      proc.stderr.on('data', (data) => {
-        stderr += data.toString();
-        const lines = data.toString().trim().split('\n');
-        lines.forEach(line => {
-          console.log(`[${jobId}] Remotion: ${line}`);
-        });
-      });
-
-      proc.on('close', (code) => {
-        if (code === 0) resolve();
-        else {
-          console.error(`[${jobId}] Remotion failed. stderr: ${stderr.slice(-1000)}`);
-          reject(new Error(`Remotion render failed with code ${code}: ${stderr.slice(-500)}`));
-        }
-      });
-
-      proc.on('error', (err) => reject(new Error(`Failed to start Remotion: ${err.message}`)));
+      width,
+      height,
+      fps,
+      logLevel: 'warn',
     });
 
     // Generate thumbnail
@@ -7001,7 +6886,7 @@ async function handleRenderFromConcept(req, res, sessionId) {
     ], jobId);
 
     // Clean up props file
-    try { unlinkSync(propsPath); } catch (e) {}
+    try { unlinkSync(propsPath); } catch (e) { }
 
     const { stat } = await import('fs/promises');
     const stats = await stat(outputPath);
@@ -7062,12 +6947,12 @@ async function handleGenerateTranscriptAnimation(req, res, sessionId) {
     return;
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
+  if (!hasLLMProvider()) {
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'GEMINI_API_KEY not configured' }));
+    res.end(JSON.stringify({ error: 'No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars' }));
     return;
   }
+  const apiKey = process.env.GEMINI_API_KEY;
 
   try {
     const body = await parseBody(req);
@@ -7116,10 +7001,12 @@ async function handleGenerateTranscriptAnimation(req, res, sessionId) {
       const ai = new GoogleGenAI({ apiKey });
       const geminiResponse = await ai.models.generateContent({
         model: 'gemini-2.0-flash',
-        contents: [{ role: 'user', parts: [
-          { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
-          { text: `Transcribe this audio with word timestamps. Duration: ${totalDuration}s. Return JSON: {"text": "...", "words": [{"text": "word", "start": 0.0, "end": 0.5}]}` }
-        ]}]
+        contents: [{
+          role: 'user', parts: [
+            { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
+            { text: `Transcribe this audio with word timestamps. Duration: ${totalDuration}s. Return JSON: {"text": "...", "words": [{"text": "word", "start": 0.0, "end": 0.5}]}` }
+          ]
+        }]
       });
       const respText = geminiResponse.text || '';
       try {
@@ -7175,14 +7062,13 @@ async function handleGenerateTranscriptAnimation(req, res, sessionId) {
       transcription = await transcribeWithGeminiForAnimation();
     }
 
-    try { unlinkSync(audioPath); } catch {}
+    try { unlinkSync(audioPath); } catch { }
 
     console.log(`[${jobId}]    Transcript: "${transcription.text.substring(0, 100)}..."`);
     console.log(`[${jobId}]    Words: ${transcription.words?.length || 0}`);
 
-    // Step 2: Use Gemini to identify key phrases for animation
+    // Step 2: Use LLM to identify key phrases for animation
     console.log(`[${jobId}] Step 2: Identifying key phrases...`);
-    const ai = new GoogleGenAI({ apiKey });
 
     const analysisPrompt = `Analyze this video transcript and identify 5-8 KEY PHRASES that would make great kinetic typography animations. These should be:
 - Important or impactful statements
@@ -7209,18 +7095,11 @@ Return JSON array of phrases to animate:
 
 Pick phrases that are spread throughout the video. Each phrase should be 2-6 words.`;
 
-    const analysisResponse = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
-      contents: [{ role: 'user', parts: [{ text: analysisPrompt }] }]
-    });
-
     let keyPhrases = [];
     try {
-      const respText = analysisResponse.text || '';
-      const jsonMatch = respText.match(/\[[\s\S]*\]/);
-      if (jsonMatch) {
-        keyPhrases = JSON.parse(jsonMatch[0]);
-      }
+      const respText = await generateWithLLM(analysisPrompt, { responseMimeType: 'application/json' });
+      const parsed = parseLLMJson(respText);
+      keyPhrases = Array.isArray(parsed) ? parsed : [];
     } catch (e) {
       console.error(`[${jobId}] Failed to parse key phrases:`, e.message);
     }
@@ -7300,44 +7179,14 @@ Pick phrases that are spread throughout the video. Each phrase should be 2-6 wor
 
     writeFileSync(propsPath, JSON.stringify(sceneData, null, 2));
 
-    const remotionArgs = [
-      'remotion', 'render',
-      'src/remotion/index.tsx',
-      'DynamicAnimation',
+    // Render with Remotion Node API
+    await renderDynamicAnimation({
+      sceneData,
       outputPath,
-      '--props', propsPath,
-      '--frames', `0-${animationTotalDuration - 1}`,
-      '--fps', String(fps),
-      '--width', String(width),
-      '--height', String(height),
-      '--codec', 'h264',
-      '--overwrite',
-      '--gl=angle', // Use Metal GPU acceleration on macOS
-    ];
-
-    console.log(`[${jobId}] Remotion command: npx ${remotionArgs.join(' ')}`);
-
-    await new Promise((resolve, reject) => {
-      const proc = spawn('npx', remotionArgs, {
-        cwd: process.cwd(),
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-
-      proc.stdout.on('data', (data) => {
-        console.log(`[${jobId}] Remotion: ${data.toString().trim()}`);
-      });
-
-      proc.stderr.on('data', (data) => {
-        const lines = data.toString().trim().split('\n');
-        lines.forEach(line => console.log(`[${jobId}] Remotion: ${line}`));
-      });
-
-      proc.on('close', (code) => {
-        if (code === 0) resolve();
-        else reject(new Error(`Remotion render failed with code ${code}`));
-      });
-
-      proc.on('error', (err) => reject(new Error(`Failed to start Remotion: ${err.message}`)));
+      width,
+      height,
+      fps,
+      logLevel: 'warn',
     });
 
     // Generate thumbnail
@@ -7347,8 +7196,6 @@ Pick phrases that are spread throughout the video. Each phrase should be 2-6 wor
       '-frames:v', '1',
       thumbPath
     ], jobId);
-
-    try { unlinkSync(propsPath); } catch {}
 
     const { stat } = await import('fs/promises');
     const stats = await stat(outputPath);
@@ -7408,12 +7255,12 @@ async function handleGenerateContextualAnimation(req, res, sessionId) {
     return;
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
+  if (!hasLLMProvider()) {
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'GEMINI_API_KEY not configured' }));
+    res.end(JSON.stringify({ error: 'No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars' }));
     return;
   }
+  const apiKey = process.env.GEMINI_API_KEY;
 
   try {
     const body = await parseBody(req);
@@ -7541,12 +7388,10 @@ async function handleGenerateContextualAnimation(req, res, sessionId) {
     console.log(`[${jobId}] Transcription complete: ${transcription.text.substring(0, 100)}...`);
 
     // Clean up audio file
-    try { unlinkSync(audioPath); } catch (e) {}
+    try { unlinkSync(audioPath); } catch (e) { }
 
     // Step 2: Analyze content and generate contextual scene data
     console.log(`[${jobId}] Step 2: Analyzing content and generating scenes...`);
-
-    const genAI = new GoogleGenAI({ apiKey });
 
     const typePrompts = {
       intro: `Create an engaging INTRO animation that hooks viewers and introduces the video topic.
@@ -7610,21 +7455,12 @@ Based on the video content above, return ONLY valid JSON (no markdown) with this
 IMPORTANT: The animation content should directly relate to the video's actual topic and message.
 Use specific terms, concepts, and themes from the transcript.`;
 
-    const sceneResult = await genAI.models.generateContent({
-      model: 'gemini-2.0-flash',
-      contents: [{ role: 'user', parts: [{ text: scenePrompt }] }],
-    });
-
     let sceneData;
     try {
-      const responseText = sceneResult.candidates[0].content.parts[0].text;
-      const cleanedResponse = responseText
-        .replace(/```json\n?/g, '')
-        .replace(/```\n?/g, '')
-        .trim();
-      sceneData = JSON.parse(cleanedResponse);
+      const responseText = await generateWithLLM(scenePrompt);
+      sceneData = parseLLMJson(responseText);
     } catch (parseError) {
-      console.error(`[${jobId}] Failed to parse Gemini response:`, parseError);
+      console.error(`[${jobId}] Failed to parse AI response:`, parseError);
       throw new Error('Failed to parse AI-generated scene data');
     }
 
@@ -7647,57 +7483,16 @@ Use specific terms, concepts, and themes from the transcript.`;
     writeFileSync(sceneDataPath, JSON.stringify(sceneData, null, 2));
     console.log(`[${jobId}] Scene data saved to ${sceneDataPath} for future editing`);
 
-    // Step 3: Write props and render with Remotion
+    // Step 3: Render with Remotion Node API
     console.log(`[${jobId}] Step 3: Rendering with Remotion...`);
 
-    writeFileSync(propsPath, JSON.stringify(sceneData, null, 2));
-
-    const remotionArgs = [
-      'remotion', 'render',
-      'src/remotion/index.tsx',
-      'DynamicAnimation',
+    await renderDynamicAnimation({
+      sceneData,
       outputPath,
-      '--props', propsPath,
-      '--frames', `0-${animationTotalDuration - 1}`,
-      '--fps', String(fps),
-      '--width', String(width),
-      '--height', String(height),
-      '--codec', 'h264',
-      '--overwrite',
-      '--gl=angle', // Use Metal GPU acceleration on macOS
-    ];
-
-    await new Promise((resolve, reject) => {
-      const proc = spawn('npx', remotionArgs, {
-        cwd: process.cwd(),
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-
-      let stdout = '';
-      let stderr = '';
-
-      proc.stdout.on('data', (data) => {
-        stdout += data.toString();
-        console.log(`[${jobId}] Remotion stdout: ${data.toString().trim()}`);
-      });
-
-      proc.stderr.on('data', (data) => {
-        stderr += data.toString();
-        const lines = data.toString().trim().split('\n');
-        lines.forEach(line => {
-          console.log(`[${jobId}] Remotion: ${line}`);
-        });
-      });
-
-      proc.on('close', (code) => {
-        if (code === 0) resolve();
-        else {
-          console.error(`[${jobId}] Remotion failed. stderr: ${stderr.slice(-1000)}`);
-          reject(new Error(`Remotion render failed with code ${code}: ${stderr.slice(-500)}`));
-        }
-      });
-
-      proc.on('error', (err) => reject(new Error(`Failed to start Remotion: ${err.message}`)));
+      width,
+      height,
+      fps,
+      logLevel: 'warn',
     });
 
     // Step 4: Generate thumbnail
@@ -7709,7 +7504,7 @@ Use specific terms, concepts, and themes from the transcript.`;
     ], jobId);
 
     // Clean up
-    try { unlinkSync(propsPath); } catch (e) {}
+    try { unlinkSync(propsPath); } catch (e) { }
 
     const { stat } = await import('fs/promises');
     const stats = await stat(outputPath);

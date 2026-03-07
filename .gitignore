@@ -3,4 +3,7 @@ node_modules/
 .wrangler/
 .dev.vars
 worker-configuration.d.ts
+sessions/
 tmp/
+diff_output.txt
+.claude/settings.local.json
