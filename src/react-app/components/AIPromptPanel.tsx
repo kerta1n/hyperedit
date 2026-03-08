@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
-import { Sparkles, Send, Wand2, Clock, Terminal, CheckCircle, Loader2, VolumeX, FileVideo, Type, Image, Zap, X, Scissors, Plus, Film, Music, MapPin, Timer, ImagePlus, Move } from 'lucide-react';
-import type { TimelineClip, Track, Asset } from '@/react-app/hooks/useProject';
+import { Sparkles, Send, Wand2, Clock, Terminal, CheckCircle, Loader2, VolumeX, FileVideo, Type, Image, Zap, X, Scissors, Plus, Film, Music, MapPin, Timer, ImagePlus, Move, ChevronDown, ChevronRight } from 'lucide-react';
+import type { TimelineClip, Track, Asset, CaptionStyle } from '@/react-app/hooks/useProject';
 import { MOTION_TEMPLATES, type TemplateId } from '@/remotion/templates';
 import MotionGraphicsPanel from './MotionGraphicsPanel';
 
@@ -63,6 +63,14 @@ interface ChatMessage {
 interface CaptionOptions {
   highlightColor: string;
   fontFamily: string;
+  color: string;
+  fontSize: number;
+  fontWeight: 'normal' | 'bold' | 'black';
+  strokeColor: string;
+  strokeWidth: number;
+  backgroundColor: string;
+  position: 'bottom' | 'center' | 'top';
+  animation: CaptionStyle['animation'];
 }
 
 interface ChapterCutResult {
@@ -166,7 +174,7 @@ interface EditTabV1Context {
 interface AIPromptPanelProps {
   onApplyEdit?: (command: string) => Promise<void>;
   onExtractKeywordsAndAddGifs?: () => Promise<void>;
-  onTranscribeAndAddCaptions?: (options?: CaptionOptions) => Promise<void>;
+  onTranscribeAndAddCaptions?: (options?: Partial<CaptionStyle>) => Promise<void>;
   onGenerateBroll?: () => Promise<void>;
   onRemoveDeadAir?: () => Promise<{ duration: number; removedDuration: number }>;
   onChapterCuts?: () => Promise<ChapterCutResult>;
@@ -251,7 +259,16 @@ export default function AIPromptPanel({
   const [captionOptions, setCaptionOptions] = useState<CaptionOptions>({
     highlightColor: '#FFD700',
     fontFamily: 'Inter',
+    color: '#FFFFFF',
+    fontSize: 52,
+    fontWeight: 'bold',
+    strokeColor: '#000000',
+    strokeWidth: 4,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    position: 'bottom',
+    animation: 'fade',
   });
+  const [showAdvancedCaptionOptions, setShowAdvancedCaptionOptions] = useState(false);
   const [pendingQuestion, setPendingQuestion] = useState<ClarifyingQuestion | null>(null);
   const [pendingAnimationConcept, setPendingAnimationConcept] = useState<AnimationConcept | null>(null);
 
@@ -2082,6 +2099,7 @@ export default function AIPromptPanel({
         text: 'Configure your caption style below, then click "Add Captions" to start.',
       }]);
       setShowCaptionOptions(true);
+      setShowAdvancedCaptionOptions(false);
       return;
     }
 
@@ -2572,6 +2590,128 @@ export default function AIPromptPanel({
               />
               <span className="text-xs text-zinc-500">{captionOptions.highlightColor}</span>
             </div>
+
+            {/* Advanced Options Toggle */}
+            <button
+              onClick={() => setShowAdvancedCaptionOptions(prev => !prev)}
+              className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-200 transition-colors w-full"
+            >
+              {showAdvancedCaptionOptions
+                ? <ChevronDown className="w-3.5 h-3.5" />
+                : <ChevronRight className="w-3.5 h-3.5" />
+              }
+              <span>More options</span>
+            </button>
+
+            {/* Advanced Options (collapsible) */}
+            {showAdvancedCaptionOptions && (
+              <div className="space-y-3 pl-1 border-l-2 border-zinc-700/50 ml-1">
+                {/* Text Color */}
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-zinc-400 w-20">Text:</label>
+                  <input
+                    type="color"
+                    value={captionOptions.color}
+                    onChange={(e) => setCaptionOptions(prev => ({ ...prev, color: e.target.value }))}
+                    className="w-8 h-8 rounded cursor-pointer bg-zinc-700 border border-zinc-600"
+                  />
+                  <span className="text-xs text-zinc-500">{captionOptions.color}</span>
+                </div>
+
+                {/* Font Size */}
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-zinc-400 w-20">Size:</label>
+                  <input
+                    type="range"
+                    min="24"
+                    max="96"
+                    step="2"
+                    value={captionOptions.fontSize}
+                    onChange={(e) => setCaptionOptions(prev => ({ ...prev, fontSize: parseInt(e.target.value) }))}
+                    className="flex-1 h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                  />
+                  <span className="text-xs text-zinc-500 w-10 text-right">{captionOptions.fontSize}px</span>
+                </div>
+
+                {/* Font Weight */}
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-zinc-400 w-20">Weight:</label>
+                  <div className="flex gap-1 flex-1">
+                    {(['normal', 'bold', 'black'] as const).map(weight => (
+                      <button
+                        key={weight}
+                        onClick={() => setCaptionOptions(prev => ({ ...prev, fontWeight: weight }))}
+                        className={`flex-1 px-1.5 py-1 text-[10px] rounded transition-colors ${
+                          captionOptions.fontWeight === weight
+                            ? 'bg-purple-500 text-white'
+                            : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
+                        }`}
+                      >
+                        {weight.charAt(0).toUpperCase() + weight.slice(1)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Stroke Color + Width */}
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-zinc-400 w-20">Stroke:</label>
+                  <input
+                    type="color"
+                    value={captionOptions.strokeColor}
+                    onChange={(e) => setCaptionOptions(prev => ({ ...prev, strokeColor: e.target.value }))}
+                    className="w-8 h-8 rounded cursor-pointer bg-zinc-700 border border-zinc-600"
+                  />
+                  <input
+                    type="range"
+                    min="0"
+                    max="6"
+                    step="1"
+                    value={captionOptions.strokeWidth}
+                    onChange={(e) => setCaptionOptions(prev => ({ ...prev, strokeWidth: parseInt(e.target.value) }))}
+                    className="flex-1 h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                  />
+                  <span className="text-xs text-zinc-500 w-8 text-right">{captionOptions.strokeWidth}px</span>
+                </div>
+
+                {/* Position */}
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-zinc-400 w-20">Position:</label>
+                  <div className="flex gap-1 flex-1">
+                    {(['top', 'center', 'bottom'] as const).map(pos => (
+                      <button
+                        key={pos}
+                        onClick={() => setCaptionOptions(prev => ({ ...prev, position: pos }))}
+                        className={`flex-1 px-1.5 py-1 text-[10px] rounded transition-colors ${
+                          captionOptions.position === pos
+                            ? 'bg-purple-500 text-white'
+                            : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
+                        }`}
+                      >
+                        {pos.charAt(0).toUpperCase() + pos.slice(1)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Animation */}
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-zinc-400 w-20">Animation:</label>
+                  <select
+                    value={captionOptions.animation}
+                    onChange={(e) => setCaptionOptions(prev => ({ ...prev, animation: e.target.value as CaptionStyle['animation'] }))}
+                    className="flex-1 px-2 py-1.5 bg-zinc-700 border border-zinc-600 rounded text-xs text-white"
+                  >
+                    <option value="none">None</option>
+                    <option value="karaoke">Karaoke</option>
+                    <option value="highlight">Highlight</option>
+                    <option value="fade">Fade In</option>
+                    <option value="pop">Pop</option>
+                    <option value="bounce">Bounce</option>
+                  </select>
+                </div>
+              </div>
+            )}
 
             {/* Action Buttons */}
             <div className="flex gap-2 pt-2">

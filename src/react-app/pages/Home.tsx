@@ -931,7 +931,7 @@ export default function Home() {
   }, [session, assets, clips, refreshAssets, updateClip, saveProject]);
 
   // Handle transcribing video and adding captions
-  const handleTranscribeAndAddCaptions = useCallback(async (options?: { highlightColor?: string; fontFamily?: string }) => {
+  const handleTranscribeAndAddCaptions = useCallback(async (options?: Partial<CaptionStyle>) => {
     if (!session) {
       throw new Error('No session available');
     }
@@ -1012,10 +1012,7 @@ export default function Home() {
           words: relativeWords,
           start: chunk.start,
           duration,
-          style: {
-            ...(options?.highlightColor && { highlightColor: options.highlightColor }),
-            ...(options?.fontFamily && { fontFamily: options.fontFamily }),
-          },
+          style: options ? { ...options } : {},
         };
       });
 
