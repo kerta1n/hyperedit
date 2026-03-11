@@ -64,12 +64,18 @@ interface CaptionOptions {
   highlightColor: string;
   fontFamily: string;
   color: string;
+  textOpacity: number;
   fontSize: number;
   fontWeight: 'normal' | 'bold' | 'black';
   strokeColor: string;
   strokeWidth: number;
-  backgroundColor: string;
+  backgroundEnabled: boolean;
+  backgroundPadding: number;
+  backgroundRadius: number;
+  backgroundOpacity: number;
   position: 'bottom' | 'center' | 'top';
+  positionX: number;
+  positionY: number;
   animation: CaptionStyle['animation'];
 }
 
@@ -260,12 +266,18 @@ export default function AIPromptPanel({
     highlightColor: '#FFD700',
     fontFamily: 'Inter',
     color: '#FFFFFF',
+    textOpacity: 100,
     fontSize: 52,
     fontWeight: 'bold',
     strokeColor: '#000000',
     strokeWidth: 4,
-    backgroundColor: 'rgba(0,0,0,0.45)',
+    backgroundEnabled: true,
+    backgroundPadding: 100,
+    backgroundRadius: 10,
+    backgroundOpacity: 45,
     position: 'bottom',
+    positionX: 0,
+    positionY: 0,
     animation: 'fade',
   });
   const [showAdvancedCaptionOptions, setShowAdvancedCaptionOptions] = useState(false);
@@ -2561,9 +2573,11 @@ export default function AIPromptPanel({
 
       {/* Caption Options UI */}
       {showCaptionOptions && (
-        <div className="p-4 border-t border-zinc-800/50 bg-zinc-800/50">
+        <div className="p-4 border-t border-zinc-800/50 bg-zinc-800/50 max-h-[50vh] overflow-y-auto custom-scrollbar">
           <div className="space-y-3">
-            <div className="text-xs font-medium text-zinc-300">Caption Style</div>
+            <div className="text-xs font-medium text-zinc-300 flex items-center justify-between sticky top-0 bg-zinc-800/50 backdrop-blur-md pb-2 z-10">
+              <span>Caption Style</span>
+            </div>
 
             {/* Font Selection */}
             <div className="flex items-center gap-2">
@@ -2616,6 +2630,21 @@ export default function AIPromptPanel({
                     className="w-8 h-8 rounded cursor-pointer bg-zinc-700 border border-zinc-600"
                   />
                   <span className="text-xs text-zinc-500">{captionOptions.color}</span>
+                </div>
+
+                {/* Text Opacity */}
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-zinc-400 w-20">Opacity:</label>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value={captionOptions.textOpacity}
+                    onChange={(e) => setCaptionOptions(prev => ({ ...prev, textOpacity: parseInt(e.target.value) }))}
+                    className="flex-1 h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                  />
+                  <span className="text-xs text-zinc-500 w-10 text-right">{captionOptions.textOpacity}%</span>
                 </div>
 
                 {/* Font Size */}
@@ -2694,6 +2723,35 @@ export default function AIPromptPanel({
                   </div>
                 </div>
 
+                {/* X/Y Position Offset */}
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-zinc-400 w-20">X Offset:</label>
+                  <input
+                    type="range"
+                    min="-50"
+                    max="50"
+                    step="1"
+                    value={captionOptions.positionX}
+                    onChange={(e) => setCaptionOptions(prev => ({ ...prev, positionX: parseInt(e.target.value) }))}
+                    className="flex-1 h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                  />
+                  <span className="text-xs text-zinc-500 w-10 text-right">{captionOptions.positionX}%</span>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-zinc-400 w-20">Y Offset:</label>
+                  <input
+                    type="range"
+                    min="-50"
+                    max="50"
+                    step="1"
+                    value={captionOptions.positionY}
+                    onChange={(e) => setCaptionOptions(prev => ({ ...prev, positionY: parseInt(e.target.value) }))}
+                    className="flex-1 h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                  />
+                  <span className="text-xs text-zinc-500 w-10 text-right">{captionOptions.positionY}%</span>
+                </div>
+
                 {/* Animation */}
                 <div className="flex items-center gap-2">
                   <label className="text-xs text-zinc-400 w-20">Animation:</label>
@@ -2710,6 +2768,68 @@ export default function AIPromptPanel({
                     <option value="bounce">Bounce</option>
                   </select>
                 </div>
+
+                {/* Background Box Toggle */}
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-zinc-400 w-20">Background:</label>
+                  <button
+                    onClick={() => setCaptionOptions(prev => ({ ...prev, backgroundEnabled: !prev.backgroundEnabled }))}
+                    className={`px-2.5 py-1 text-[10px] rounded transition-colors ${
+                      captionOptions.backgroundEnabled
+                        ? 'bg-purple-500 text-white'
+                        : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
+                    }`}
+                  >
+                    {captionOptions.backgroundEnabled ? 'On' : 'Off'}
+                  </button>
+                </div>
+
+                {/* Background sub-options (only if enabled) */}
+                {captionOptions.backgroundEnabled && (
+                  <>
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs text-zinc-400 w-20">BG Size:</label>
+                      <input
+                        type="range"
+                        min="0"
+                        max="200"
+                        step="5"
+                        value={captionOptions.backgroundPadding}
+                        onChange={(e) => setCaptionOptions(prev => ({ ...prev, backgroundPadding: parseInt(e.target.value) }))}
+                        className="flex-1 h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                      />
+                      <span className="text-xs text-zinc-500 w-10 text-right">{captionOptions.backgroundPadding}%</span>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs text-zinc-400 w-20">BG Round:</label>
+                      <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        step="1"
+                        value={captionOptions.backgroundRadius}
+                        onChange={(e) => setCaptionOptions(prev => ({ ...prev, backgroundRadius: parseInt(e.target.value) }))}
+                        className="flex-1 h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                      />
+                      <span className="text-xs text-zinc-500 w-10 text-right">{captionOptions.backgroundRadius}%</span>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs text-zinc-400 w-20">BG Opacity:</label>
+                      <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        step="1"
+                        value={captionOptions.backgroundOpacity}
+                        onChange={(e) => setCaptionOptions(prev => ({ ...prev, backgroundOpacity: parseInt(e.target.value) }))}
+                        className="flex-1 h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                      />
+                      <span className="text-xs text-zinc-500 w-10 text-right">{captionOptions.backgroundOpacity}%</span>
+                    </div>
+                  </>
+                )}
               </div>
             )}
 

@@ -88,6 +88,28 @@ export default function Timeline({
     return () => tracksContainer.removeEventListener('scroll', handleScroll);
   }, []);
 
+  // Shift + Scroll to zoom timeline
+  useEffect(() => {
+    const tracksContainer = tracksContainerRef.current;
+    if (!tracksContainer) return;
+
+    const handleWheel = (e: WheelEvent) => {
+      if (!e.shiftKey) return;
+      e.preventDefault();
+      // deltaY > 0 = scroll down = zoom out, deltaY < 0 = scroll up = zoom in
+      setZoom(prev => {
+        if (e.deltaY > 0) {
+          return Math.max(0.25, prev - 0.25);
+        } else {
+          return Math.min(4, prev + 0.25);
+        }
+      });
+    };
+
+    tracksContainer.addEventListener('wheel', handleWheel, { passive: false });
+    return () => tracksContainer.removeEventListener('wheel', handleWheel);
+  }, []);
+
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {

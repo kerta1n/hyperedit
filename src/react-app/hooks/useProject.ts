@@ -60,10 +60,17 @@ export interface CaptionStyle {
   fontSize: number;
   fontWeight: 'normal' | 'bold' | 'black';
   color: string;
+  textOpacity?: number; // 0-100 (percentage), default 100
   backgroundColor?: string;
+  backgroundEnabled?: boolean; // Toggle background box on/off
+  backgroundPadding?: number; // 0-200 (percentage), scales default padding
+  backgroundRadius?: number; // 0-100 (percentage), 0=square, 100=oval, linear mapping
+  backgroundOpacity?: number; // 0-100 (percentage), alpha of background color
   strokeColor?: string;
   strokeWidth?: number;
   position: 'bottom' | 'center' | 'top';
+  positionX?: number; // -50 to 50 (percentage offset from center)
+  positionY?: number; // -50 to 50 (percentage offset from base position)
   animation: 'none' | 'karaoke' | 'fade' | 'pop' | 'bounce' | 'typewriter' | 'highlight';
   highlightColor?: string;
   timeOffset?: number; // Offset in seconds to adjust sync (negative = earlier, positive = later)
@@ -638,10 +645,17 @@ export function useProject() {
     fontSize: 52,
     fontWeight: 'bold',
     color: '#FFFFFF',
+    textOpacity: 100,
     backgroundColor: 'rgba(0,0,0,0.45)',
+    backgroundEnabled: true,
+    backgroundPadding: 100,
+    backgroundRadius: 10,
+    backgroundOpacity: 45,
     strokeColor: '#000000',
     strokeWidth: 4,
     position: 'bottom',
+    positionX: 0,
+    positionY: 0,
     animation: 'fade',
     highlightColor: '#FFD700',
   };

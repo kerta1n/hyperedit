@@ -72,10 +72,17 @@ export interface RemotionCaptionStyle {
   fontSize: number;
   fontWeight: 'normal' | 'bold' | 'black';
   color: string;
+  textOpacity?: number; // 0-100
   backgroundColor?: string;
+  backgroundEnabled?: boolean;
+  backgroundPadding?: number; // 0-200 (percentage), scales default padding
+  backgroundRadius?: number; // 0-100 (percentage), 0=square, 100=oval, linear
+  backgroundOpacity?: number; // 0-100 (percentage)
   strokeColor?: string;
   strokeWidth?: number;
   position: 'top' | 'center' | 'bottom';
+  positionX?: number; // -50 to 50 (percentage offset from center)
+  positionY?: number; // -50 to 50 (percentage offset from base position)
   animation: 'none' | 'karaoke' | 'fade' | 'pop' | 'bounce' | 'typewriter' | 'highlight';
   highlightColor?: string;
   textCase?: 'none' | 'upper';

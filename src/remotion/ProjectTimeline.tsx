@@ -291,14 +291,17 @@ const CaptionOverlay: React.FC<{
     durationInFrames: Math.min(12, Math.max(6, toFrames(0.4, fps))),
   });
 
+  const offsetX = style.positionX ?? 0;
+  const offsetY = style.positionY ?? 0;
+
   const positionStyle: React.CSSProperties = (() => {
     if (style.position === 'top') {
-      return { top: '7%' };
+      return { top: `${7 + offsetY}%` };
     }
     if (style.position === 'center') {
-      return { top: '50%', transform: 'translate(-50%, -50%)' };
+      return { top: `${50 + offsetY}%`, transform: 'translate(-50%, -50%)' };
     }
-    return { bottom: '7%' };
+    return { bottom: `${7 - offsetY}%` };
   })();
 
   const computedText = style.textCase === 'upper' ? caption.text.toUpperCase() : caption.text;
@@ -330,16 +333,25 @@ const CaptionOverlay: React.FC<{
 
   const fontWeight = style.fontWeight === 'black' ? 900 : style.fontWeight === 'bold' ? 700 : 400;
 
+  const textOpacity = (style.textOpacity ?? 100) / 100;
+  const bgEnabled = style.backgroundEnabled !== false;
+  const bgPaddingScale = (style.backgroundPadding ?? 100) / 100;
+  const basePadV = 6 * bgPaddingScale;
+  const basePadH = 14 * bgPaddingScale;
+  const bgRadius = ((style.backgroundRadius ?? 10) / 100) * 50;
+  const bgOpacity = (style.backgroundOpacity ?? 45) / 100;
+  const resolvedBgColor = bgEnabled ? `rgba(0,0,0,${bgOpacity})` : undefined;
+
   return (
     <AbsoluteFill style={{ pointerEvents: 'none' }}>
       <div
         style={{
           position: 'absolute',
-          left: '50%',
+          left: `${50 + offsetX}%`,
           width: `${style.maxWidthPercent ?? 88}%`,
           textAlign: 'center',
           ...positionStyle,
-          opacity: enter,
+          opacity: enter * textOpacity,
         }}
       >
         <div
@@ -351,9 +363,9 @@ const CaptionOverlay: React.FC<{
             lineHeight: style.lineHeight ?? 1.2,
             letterSpacing: style.letterSpacing,
             color: style.color,
-            backgroundColor: style.backgroundColor,
-            padding: style.backgroundColor ? '6px 14px' : 0,
-            borderRadius: style.backgroundColor ? 10 : 0,
+            backgroundColor: resolvedBgColor,
+            padding: resolvedBgColor ? `${basePadV}px ${basePadH}px` : 0,
+            borderRadius: resolvedBgColor ? bgRadius : 0,
             textShadow: style.shadow
               ? `0 2px 12px rgba(0,0,0,0.75), 0 0 ${Math.max(8, style.fontSize * 0.2)}px rgba(0,0,0,0.35)`
               : undefined,

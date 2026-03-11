@@ -36,12 +36,21 @@ export default function CaptionRenderer({ words, style, currentTime }: CaptionRe
     return { visibleWords: visible, activeWordIndex: activeIndex };
   }, [words, adjustedTime, style.animation]);
 
-  // Get position styles
+  // Compute background color with opacity control
+  const resolvedBgColor = useMemo(() => {
+    const enabled = style.backgroundEnabled !== false; // default true
+    if (!enabled) return undefined;
+    const bgOpacity = (style.backgroundOpacity ?? 45) / 100;
+    return `rgba(0,0,0,${bgOpacity})`;
+  }, [style.backgroundEnabled, style.backgroundOpacity]);
+
+  // Get position styles with X/Y offsets
   const positionStyles = useMemo((): React.CSSProperties => {
+    const offsetX = style.positionX ?? 0;
+    const offsetY = style.positionY ?? 0;
+
     const base: React.CSSProperties = {
       position: 'absolute',
-      left: '50%',
-      transform: 'translateX(-50%)',
       textAlign: 'center',
       width: '90%',
       maxWidth: '90%',
@@ -49,22 +58,48 @@ export default function CaptionRenderer({ words, style, currentTime }: CaptionRe
 
     switch (style.position) {
       case 'top':
-        return { ...base, top: '8%' };
+        return {
+          ...base,
+          left: `${50 + offsetX}%`,
+          top: `${8 + offsetY}%`,
+          transform: 'translateX(-50%)',
+        };
       case 'center':
-        return { ...base, top: '50%', transform: 'translate(-50%, -50%)' };
+        return {
+          ...base,
+          left: `${50 + offsetX}%`,
+          top: `${50 + offsetY}%`,
+          transform: 'translate(-50%, -50%)',
+        };
       case 'bottom':
       default:
-        return { ...base, bottom: '8%' };
+        return {
+          ...base,
+          left: `${50 + offsetX}%`,
+          bottom: `${8 - offsetY}%`,
+          transform: 'translateX(-50%)',
+        };
     }
-  }, [style.position]);
+  }, [style.position, style.positionX, style.positionY]);
 
   // Get text styles
   const textStyles = useMemo((): React.CSSProperties => {
+    const textOpacity = (style.textOpacity ?? 100) / 100;
+    const bgEnabled = style.backgroundEnabled !== false;
+    const bgPaddingScale = (style.backgroundPadding ?? 100) / 100;
+    // Default padding: 4px 12px, scaled by backgroundPadding percentage
+    const basePadV = 4 * bgPaddingScale;
+    const basePadH = 12 * bgPaddingScale;
+    // backgroundRadius: 0-100 linear, map to 0px-50px (50px is enough for oval effect)
+    const bgRadius = ((style.backgroundRadius ?? 10) / 100) * 50;
+
     return {
+      display: 'inline-block',
       fontFamily: style.fontFamily,
       fontSize: `${style.fontSize}px`,
       fontWeight: style.fontWeight === 'black' ? 900 : style.fontWeight === 'bold' ? 700 : 400,
       color: style.color,
+      opacity: textOpacity,
       textShadow: style.strokeWidth
         ? `
           -${style.strokeWidth}px -${style.strokeWidth}px 0 ${style.strokeColor},
@@ -73,12 +108,12 @@ export default function CaptionRenderer({ words, style, currentTime }: CaptionRe
           ${style.strokeWidth}px ${style.strokeWidth}px 0 ${style.strokeColor}
         `
         : undefined,
-      backgroundColor: style.backgroundColor,
-      padding: style.backgroundColor ? '4px 12px' : undefined,
-      borderRadius: style.backgroundColor ? '4px' : undefined,
+      backgroundColor: bgEnabled ? resolvedBgColor : undefined,
+      padding: bgEnabled && resolvedBgColor ? `${basePadV}px ${basePadH}px` : undefined,
+      borderRadius: bgEnabled && resolvedBgColor ? `${bgRadius}px` : undefined,
       lineHeight: 1.4,
     };
-  }, [style]);
+  }, [style, resolvedBgColor]);
 
   // Get animation class/style for a word
   const getWordStyle = (wordIndex: number, word: CaptionWord): React.CSSProperties => {

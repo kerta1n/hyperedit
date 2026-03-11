@@ -1,5 +1,5 @@
 import { useCallback } from 'react';
-import { Type, X, Palette, AlignCenter } from 'lucide-react';
+import { Type, X, Palette, AlignCenter, Move } from 'lucide-react';
 import type { CaptionStyle, CaptionData } from '@/react-app/hooks/useProject';
 
 interface CaptionPropertiesPanelProps {
@@ -43,11 +43,17 @@ const CAPTION_PRESETS: Array<{ id: 'clean' | 'highlight'; label: string; style: 
       fontSize: 52,
       fontWeight: 'bold',
       color: '#FFFFFF',
+      textOpacity: 100,
       strokeColor: '#000000',
       strokeWidth: 4,
       position: 'bottom',
+      positionX: 0,
+      positionY: 0,
       animation: 'fade',
-      backgroundColor: 'rgba(0,0,0,0.45)',
+      backgroundEnabled: true,
+      backgroundPadding: 100,
+      backgroundRadius: 10,
+      backgroundOpacity: 45,
       highlightColor: '#FFD700',
     },
   },
@@ -59,11 +65,17 @@ const CAPTION_PRESETS: Array<{ id: 'clean' | 'highlight'; label: string; style: 
       fontSize: 60,
       fontWeight: 'black',
       color: '#FFFFFF',
+      textOpacity: 100,
       strokeColor: '#0A0A0A',
       strokeWidth: 5,
       position: 'bottom',
+      positionX: 0,
+      positionY: 0,
       animation: 'karaoke',
-      backgroundColor: 'rgba(0,0,0,0.38)',
+      backgroundEnabled: true,
+      backgroundPadding: 100,
+      backgroundRadius: 10,
+      backgroundOpacity: 38,
       highlightColor: '#FDE047',
     },
   },
@@ -247,6 +259,23 @@ export default function CaptionPropertiesPanel({
           </div>
         </div>
 
+        {/* Text Opacity */}
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-medium text-zinc-300">Text Opacity</span>
+            <span className="text-xs text-zinc-400">{style.textOpacity ?? 100}%</span>
+          </div>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            value={style.textOpacity ?? 100}
+            onChange={(e) => onUpdateStyle({ textOpacity: parseInt(e.target.value) })}
+            className="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+          />
+        </div>
+
         {/* Stroke Width */}
         <div>
           <div className="flex items-center justify-between mb-2">
@@ -287,6 +316,42 @@ export default function CaptionPropertiesPanel({
           </div>
         </div>
 
+        {/* X/Y Position Offset */}
+        <div>
+          <div className="flex items-center gap-2 mb-2">
+            <Move className="w-3.5 h-3.5 text-zinc-500" />
+            <span className="text-xs font-medium text-zinc-300">Position Offset</span>
+          </div>
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-zinc-500 w-4">X</span>
+              <input
+                type="range"
+                min="-50"
+                max="50"
+                step="1"
+                value={style.positionX ?? 0}
+                onChange={(e) => onUpdateStyle({ positionX: parseInt(e.target.value) })}
+                className="flex-1 h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+              />
+              <span className="text-xs text-zinc-400 w-10 text-right">{style.positionX ?? 0}%</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-zinc-500 w-4">Y</span>
+              <input
+                type="range"
+                min="-50"
+                max="50"
+                step="1"
+                value={style.positionY ?? 0}
+                onChange={(e) => onUpdateStyle({ positionY: parseInt(e.target.value) })}
+                className="flex-1 h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+              />
+              <span className="text-xs text-zinc-400 w-10 text-right">{style.positionY ?? 0}%</span>
+            </div>
+          </div>
+        </div>
+
         {/* Animation */}
         <div>
           <span className="text-xs font-medium text-zinc-300 block mb-2">Animation</span>
@@ -313,6 +378,73 @@ export default function CaptionPropertiesPanel({
             />
           </div>
         )}
+
+        {/* Background Box */}
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-medium text-zinc-300">Background Box</span>
+            <button
+              onClick={() => onUpdateStyle({ backgroundEnabled: !(style.backgroundEnabled !== false) })}
+              className={`px-2 py-0.5 text-[10px] rounded transition-colors ${
+                style.backgroundEnabled !== false
+                  ? 'bg-purple-500 text-white'
+                  : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
+              }`}
+            >
+              {style.backgroundEnabled !== false ? 'On' : 'Off'}
+            </button>
+          </div>
+
+          {style.backgroundEnabled !== false && (
+            <div className="space-y-3 pl-2 border-l-2 border-zinc-700/50">
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[10px] text-zinc-500">Padding</span>
+                  <span className="text-[10px] text-zinc-500">{style.backgroundPadding ?? 100}%</span>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="200"
+                  step="5"
+                  value={style.backgroundPadding ?? 100}
+                  onChange={(e) => onUpdateStyle({ backgroundPadding: parseInt(e.target.value) })}
+                  className="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                />
+              </div>
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[10px] text-zinc-500">Rounding</span>
+                  <span className="text-[10px] text-zinc-500">{style.backgroundRadius ?? 10}%</span>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value={style.backgroundRadius ?? 10}
+                  onChange={(e) => onUpdateStyle({ backgroundRadius: parseInt(e.target.value) })}
+                  className="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                />
+              </div>
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[10px] text-zinc-500">Opacity</span>
+                  <span className="text-[10px] text-zinc-500">{style.backgroundOpacity ?? 45}%</span>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value={style.backgroundOpacity ?? 45}
+                  onChange={(e) => onUpdateStyle({ backgroundOpacity: parseInt(e.target.value) })}
+                  className="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                />
+              </div>
+            </div>
+          )}
+        </div>
 
         {/* Time Offset */}
         <div>
