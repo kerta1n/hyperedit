@@ -89,12 +89,26 @@ export interface ProjectSettings {
   fps: number;
 }
 
+// Junction transition between two clips (V2 spec)
+export type JunctionTransitionType = 'none' | 'crossfade' | 'slide-left' | 'slide-right' | 'dip-to-black';
+
+export interface JunctionTransition {
+  id: string;
+  fromClipId: string;
+  toClipId: string;
+  type: JunctionTransitionType;
+  durationSec: number;
+  easing?: 'linear' | 'ease-in' | 'ease-out' | 'ease-in-out';
+  fallbackBehavior?: 'cut' | 'clamp' | 'crossfade';
+}
+
 // Project state
 export interface ProjectState {
   tracks: Track[];
   clips: TimelineClip[];
   settings: ProjectSettings;
   captionData?: Record<string, CaptionData>;
+  transitions?: JunctionTransition[];
   brandTheme?: {
     name?: string;
     fontFamily?: string;
@@ -149,6 +163,7 @@ export function useProject() {
     { id: 'A2', type: 'audio', name: 'A2', order: 5 },  // Audio track 2
   ]);
   const [clips, setClips] = useState<TimelineClip[]>([]);
+  const [transitions, setTransitions] = useState<JunctionTransition[]>([]);
   const [captionData, setCaptionData] = useState<Record<string, CaptionData>>({});
 
   // Timeline tabs for editing clips in isolation
@@ -186,12 +201,14 @@ export function useProject() {
   const clipsRef = useRef(clips);
   const settingsRef = useRef(settings);
   const captionDataRef = useRef(captionData);
+  const transitionsRef = useRef(transitions);
 
   // Keep refs in sync with state
   useEffect(() => { tracksRef.current = tracks; }, [tracks]);
   useEffect(() => { clipsRef.current = clips; }, [clips]);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
   useEffect(() => { captionDataRef.current = captionData; }, [captionData]);
+  useEffect(() => { transitionsRef.current = transitions; }, [transitions]);
 
   // Wrapper to persist session to localStorage
   const setSession = useCallback((sessionOrUpdater: SessionInfo | null | ((prev: SessionInfo | null) => SessionInfo | null)) => {
@@ -243,6 +260,7 @@ export function useProject() {
           setSessionInternal(null);
           setAssets([]);
           setClips([]);
+          setTransitions([]);
           setCaptionData({});
         }
       } catch (error) {
@@ -461,6 +479,10 @@ export function useProject() {
         return c;
       });
     });
+    // Clean up orphaned transitions referencing the deleted clip
+    setTransitions(prev => prev.filter(
+      t => t.fromClipId !== clipId && t.toClipId !== clipId
+    ));
   }, []);
 
   // Move clip
@@ -529,6 +551,15 @@ export function useProject() {
       }),
       secondClip,
     ]);
+
+    // Re-wire transitions: any transition where the original clip was the "from" clip
+    // should now reference the second clip (which ends where the original ended)
+    setTransitions(prev => prev.map(t => {
+      if (t.fromClipId === clipId) {
+        return { ...t, fromClipId: secondClip.id };
+      }
+      return t;
+    }));
 
     return secondClip.id;
   }, [clips]);
@@ -750,6 +781,47 @@ export function useProject() {
     return captionData[clipId] || null;
   }, [captionData]);
 
+  // Add a junction transition between two adjacent clips
+  const addTransition = useCallback((
+    fromClipId: string,
+    toClipId: string,
+    type: JunctionTransitionType = 'crossfade',
+    durationSec: number = 0.5
+  ): JunctionTransition => {
+    const transition: JunctionTransition = {
+      id: crypto.randomUUID(),
+      fromClipId,
+      toClipId,
+      type,
+      durationSec,
+      easing: 'ease-in-out',
+      fallbackBehavior: 'clamp',
+    };
+    setTransitions(prev => {
+      // Replace any existing transition between these same two clips
+      const filtered = prev.filter(
+        t => !(t.fromClipId === fromClipId && t.toClipId === toClipId)
+      );
+      return [...filtered, transition];
+    });
+    return transition;
+  }, []);
+
+  // Update an existing transition
+  const updateTransition = useCallback((
+    transitionId: string,
+    updates: Partial<Omit<JunctionTransition, 'id'>>
+  ): void => {
+    setTransitions(prev => prev.map(t =>
+      t.id === transitionId ? { ...t, ...updates } : t
+    ));
+  }, []);
+
+  // Remove a transition
+  const removeTransition = useCallback((transitionId: string): void => {
+    setTransitions(prev => prev.filter(t => t.id !== transitionId));
+  }, []);
+
   // Save project to server (debounced)
   // Uses refs to always get latest state, avoiding stale closure issues
   const saveProject = useCallback(async (): Promise<void> => {
@@ -771,6 +843,7 @@ export function useProject() {
             clips: clipsRef.current,
             settings: settingsRef.current,
             captionData: captionDataRef.current,
+            transitions: transitionsRef.current,
           }),
         });
         console.log('[Project] Saved');
@@ -827,6 +900,7 @@ export function useProject() {
         if (data.clips) setClips(data.clips);
         if (data.settings) setSettings(data.settings);
         if (data.captionData) setCaptionData(data.captionData);
+        if (data.transitions) setTransitions(data.transitions);
       }
     } catch (error) {
       console.error('[Project] Load failed:', error);
@@ -851,6 +925,7 @@ export function useProject() {
           clips: clipsRef.current,
           settings: settingsRef.current,
           captionData: captionDataRef.current,
+          transitions: transitionsRef.current,
         }),
       });
 
@@ -861,11 +936,24 @@ export function useProject() {
       });
 
       if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || 'Render failed');
+        const errorData = await response.json();
+        if (response.status === 422) {
+          // Spec validation error — surface structured details
+          const details = (errorData.details || [])
+            .map((d: { path: string; message: string }) => `${d.path}: ${d.message}`)
+            .join('; ');
+          throw new Error(`Spec validation failed: ${details || errorData.message}`);
+        }
+        throw new Error(errorData.error || 'Render failed');
       }
 
       const result = await response.json();
+
+      // Log migration/transition warnings if any
+      if (result.warnings?.length > 0) {
+        console.warn('[Render] Transition warnings:', result.warnings);
+      }
+
       setStatus('Render complete!');
 
       // Return download URL
@@ -948,6 +1036,7 @@ export function useProject() {
     setSession(null);
     setAssets([]);
     setClips([]);
+    setTransitions([]);
   }, [session]);
 
   // Auto-save when clips change
@@ -995,6 +1084,13 @@ export function useProject() {
     addCaptionClipsBatch,
     updateCaptionStyle,
     getCaptionData,
+
+    // Transitions
+    transitions,
+    addTransition,
+    updateTransition,
+    removeTransition,
+    setTransitions,
 
     // Project
     saveProject,

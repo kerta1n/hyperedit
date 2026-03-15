@@ -66,6 +66,11 @@ export default function Home() {
     addCaptionClipsBatch,
     updateCaptionStyle,
     getCaptionData,
+    // Transitions
+    transitions,
+    addTransition,
+    updateTransition,
+    removeTransition,
     // Timeline tabs
     timelineTabs,
     activeTabId,
@@ -387,9 +392,19 @@ export default function Home() {
         updateTabClips(activeTabId, updatedClips);
       }
     } else {
+      // If moving to a different track, remove transitions for this clip
+      // (transitions must be between clips on the same track)
+      if (newTrackId) {
+        const clip = clips.find(c => c.id === clipId);
+        if (clip && clip.trackId !== newTrackId) {
+          transitions
+            .filter(t => t.fromClipId === clipId || t.toClipId === clipId)
+            .forEach(t => removeTransition(t.id));
+        }
+      }
       moveClip(clipId, newStart, newTrackId);
     }
-  }, [moveClip, activeTabId, timelineTabs, updateTabClips]);
+  }, [moveClip, activeTabId, timelineTabs, updateTabClips, clips, transitions, removeTransition]);
 
   // Handle resizing clip
   const handleResizeClip = useCallback((clipId: string, newInPoint: number, newOutPoint: number, newStart?: number) => {
@@ -1874,6 +1889,10 @@ export default function Home() {
               onDropAsset={handleDropAsset}
               onSave={saveProject}
               getCaptionData={getCaptionData}
+              transitions={activeTabId === 'main' ? transitions : []}
+              onAddTransition={addTransition}
+              onUpdateTransition={updateTransition}
+              onRemoveTransition={removeTransition}
             />
           </ResizableVerticalPanel>
         </div>

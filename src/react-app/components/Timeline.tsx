@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import { ZoomIn, ZoomOut, Play, Pause, SkipBack, Scissors, Trash2, Type, RectangleHorizontal, RectangleVertical, Link, Unlink } from 'lucide-react';
 import TimelineClip from './TimelineClip';
-import type { Track, TimelineClip as TimelineClipType, Asset, CaptionData } from '@/react-app/hooks/useProject';
+import type { Track, TimelineClip as TimelineClipType, Asset, CaptionData, JunctionTransition, JunctionTransitionType } from '@/react-app/hooks/useProject';
 
 interface TimelineProps {
   tracks: Track[];
@@ -27,6 +27,10 @@ interface TimelineProps {
   onDropAsset: (asset: Asset, trackId: string, time: number) => void;
   onSave: () => void;
   getCaptionData?: (clipId: string) => CaptionData | null;
+  transitions: JunctionTransition[];
+  onAddTransition: (fromClipId: string, toClipId: string, type?: JunctionTransitionType, durationSec?: number) => JunctionTransition;
+  onUpdateTransition: (transitionId: string, updates: Partial<Omit<JunctionTransition, 'id'>>) => void;
+  onRemoveTransition: (transitionId: string) => void;
 }
 
 const TRACK_HEIGHTS: Record<string, number> = {
@@ -65,6 +69,10 @@ export default function Timeline({
   onDropAsset,
   onSave,
   getCaptionData,
+  transitions,
+  onAddTransition,
+  onUpdateTransition,
+  onRemoveTransition,
 }: TimelineProps) {
   const [zoom, setZoom] = useState(1);
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
@@ -237,6 +245,38 @@ export default function Timeline({
     assets.find(a => a.id === clip.assetId),
     [assets]
   );
+
+  // Find adjacent clip pairs on a track for transition indicators
+  const getAdjacentPairs = useCallback((trackId: string) => {
+    const trackClips = clips
+      .filter(c => c.trackId === trackId)
+      .sort((a, b) => a.start - b.start);
+
+    const pairs: Array<{
+      fromClip: TimelineClipType;
+      toClip: TimelineClipType;
+      junctionX: number;
+      transition: JunctionTransition | null;
+    }> = [];
+
+    for (let i = 0; i < trackClips.length - 1; i++) {
+      const fromClip = trackClips[i];
+      const toClip = trackClips[i + 1];
+      const fromEnd = fromClip.start + fromClip.duration;
+      const gapSec = toClip.start - fromEnd;
+      const junctionX = fromEnd * pixelsPerSecond;
+
+      // Only show transition indicators for clips within 2s of each other
+      if (gapSec <= 2) {
+        const existing = transitions.find(
+          t => t.fromClipId === fromClip.id && t.toClipId === toClip.id
+        );
+        pairs.push({ fromClip, toClip, junctionX, transition: existing || null });
+      }
+    }
+
+    return pairs;
+  }, [clips, transitions, pixelsPerSecond]);
 
   return (
     <div
@@ -506,6 +546,33 @@ export default function Timeline({
                         />
                       );
                     })}
+
+                    {/* Transition indicators between adjacent clips (video tracks only) */}
+                    {track.type === 'video' && getAdjacentPairs(track.id).map(({ fromClip, toClip, junctionX, transition }) => (
+                      <TransitionIndicator
+                        key={`tr-${fromClip.id}-${toClip.id}`}
+                        junctionX={junctionX}
+                        trackHeight={TRACK_HEIGHTS[track.type]}
+                        transition={transition}
+                        pixelsPerSecond={pixelsPerSecond}
+                        onAdd={() => {
+                          onAddTransition(fromClip.id, toClip.id, 'crossfade', 0.5);
+                          onSave();
+                        }}
+                        onRemove={() => {
+                          if (transition) {
+                            onRemoveTransition(transition.id);
+                            onSave();
+                          }
+                        }}
+                        onUpdate={(updates) => {
+                          if (transition) {
+                            onUpdateTransition(transition.id, updates);
+                            onSave();
+                          }
+                        }}
+                      />
+                    ))}
                   </div>
                 );
               })}
@@ -527,6 +594,135 @@ export default function Timeline({
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+const TRANSITION_LABELS: Record<string, string> = {
+  crossfade: 'XF',
+  'slide-left': 'SL',
+  'slide-right': 'SR',
+  'dip-to-black': 'DB',
+};
+
+const TRANSITION_TYPES: JunctionTransitionType[] = ['crossfade', 'slide-left', 'slide-right', 'dip-to-black'];
+const DURATION_PRESETS = [0.25, 0.5, 1.0, 1.5];
+
+function TransitionIndicator({
+  junctionX,
+  trackHeight,
+  transition,
+  pixelsPerSecond,
+  onAdd,
+  onRemove,
+  onUpdate,
+}: {
+  junctionX: number;
+  trackHeight: number;
+  transition: JunctionTransition | null;
+  pixelsPerSecond: number;
+  onAdd: () => void;
+  onRemove: () => void;
+  onUpdate: (updates: Partial<Omit<JunctionTransition, 'id'>>) => void;
+}) {
+  const [showMenu, setShowMenu] = useState(false);
+  const indicatorWidth = transition
+    ? Math.max(transition.durationSec * pixelsPerSecond, 20)
+    : 20;
+
+  return (
+    <div
+      className="absolute z-20 flex items-center justify-center group"
+      style={{
+        left: `${junctionX - indicatorWidth / 2}px`,
+        width: `${indicatorWidth}px`,
+        top: '2px',
+        height: `${trackHeight - 4}px`,
+      }}
+    >
+      {transition ? (
+        <div
+          className="w-full h-full bg-orange-500/20 border border-orange-500/50 rounded flex items-center justify-center cursor-pointer hover:bg-orange-500/30 transition-colors relative"
+          onClick={(e) => {
+            e.stopPropagation();
+            setShowMenu(!showMenu);
+          }}
+        >
+          <span className="text-[9px] font-bold text-orange-400 select-none">
+            {TRANSITION_LABELS[transition.type] || '?'}
+          </span>
+
+          {showMenu && (
+            <div
+              className="absolute top-full mt-1 left-0 bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl p-2 z-50 min-w-[140px]"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="text-[10px] text-zinc-400 mb-1 px-1">Type</div>
+              {TRANSITION_TYPES.map(type => (
+                <button
+                  key={type}
+                  onClick={() => {
+                    onUpdate({ type });
+                    setShowMenu(false);
+                  }}
+                  className={`w-full text-left px-2 py-1 text-xs rounded ${
+                    transition.type === type
+                      ? 'bg-orange-500/20 text-orange-400'
+                      : 'hover:bg-zinc-700 text-zinc-300'
+                  }`}
+                >
+                  {type}
+                </button>
+              ))}
+
+              <div className="border-t border-zinc-700 mt-1 pt-1">
+                <div className="text-[10px] text-zinc-400 mb-1 px-1">Duration</div>
+                <div className="flex gap-1 px-1">
+                  {DURATION_PRESETS.map(dur => (
+                    <button
+                      key={dur}
+                      onClick={() => {
+                        onUpdate({ durationSec: dur });
+                        setShowMenu(false);
+                      }}
+                      className={`px-1.5 py-0.5 text-[10px] rounded ${
+                        transition.durationSec === dur
+                          ? 'bg-orange-500/20 text-orange-400'
+                          : 'hover:bg-zinc-700 text-zinc-300'
+                      }`}
+                    >
+                      {dur}s
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="border-t border-zinc-700 mt-1 pt-1">
+                <button
+                  onClick={() => {
+                    onRemove();
+                    setShowMenu(false);
+                  }}
+                  className="w-full text-left px-2 py-1 text-xs text-red-400 hover:bg-red-500/10 rounded"
+                >
+                  Remove transition
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      ) : (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onAdd();
+          }}
+          className="opacity-0 group-hover:opacity-100 w-5 h-5 bg-zinc-700 hover:bg-orange-500 rounded-full flex items-center justify-center transition-all text-zinc-400 hover:text-white"
+          title="Add transition"
+        >
+          <span className="text-xs font-bold">+</span>
+        </button>
+      )}
     </div>
   );
 }

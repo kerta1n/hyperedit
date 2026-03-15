@@ -367,6 +367,7 @@ function createDefaultProjectState() {
       fps: 30,
     },
     captionData: {},
+    transitions: [],
     brandTheme: { ...DEFAULT_BRAND_THEME },
     adTemplate: null,
   };
@@ -386,6 +387,7 @@ function ensureProjectDefaults(project = {}) {
       fps: project.settings?.fps || 30,
     },
     captionData: project.captionData || {},
+    transitions: Array.isArray(project.transitions) ? project.transitions : [],
     brandTheme: {
       ...DEFAULT_BRAND_THEME,
       ...(project.brandTheme || {}),
@@ -401,6 +403,7 @@ function serializeProjectForClient(project = {}) {
     clips: normalized.clips,
     settings: normalized.settings,
     captionData: normalized.captionData,
+    transitions: normalized.transitions || [],
     brandTheme: normalized.brandTheme,
     adTemplate: normalized.adTemplate,
   };
@@ -2078,6 +2081,7 @@ async function handleProjectSave(req, res, sessionId) {
       };
     }
     if (data.adTemplate) session.project.adTemplate = data.adTemplate;
+    if (data.transitions) session.project.transitions = data.transitions;
 
     // Save to disk for persistence
     const projectPath = join(session.dir, 'project.json');
@@ -2101,6 +2105,7 @@ function buildSessionRemotionSpec(session, sessionId, options = {}) {
     project: session.project,
     assets: getSessionAssetsAsArray(session),
     captionData: session.project.captionData || {},
+    transitions: session.project.transitions || [],
     sessionId,
     baseUrl: `http://localhost:${PORT}`,
     specId: options.specId,
