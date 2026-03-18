@@ -4,7 +4,7 @@ export const SPEC_VERSION_V1 = '1.0';
 export const SPEC_VERSION_V2 = '2.0';
 
 const LEGACY_TRANSITION_TYPES = new Set(['none', 'fade', 'slide-left', 'slide-right', 'zoom']);
-const JUNCTION_TRANSITION_TYPES = new Set(['none', 'crossfade', 'slide-left', 'slide-right', 'dip-to-black']);
+const JUNCTION_TRANSITION_TYPES = new Set(['none', 'crossfade', 'slide-left', 'slide-right', 'dip-to-black', 'custom']);
 const EASING_TYPES = new Set(['linear', 'ease-in', 'ease-out', 'ease-in-out']);
 
 const CAPTION_PRESETS = {
@@ -106,11 +106,15 @@ const zJunctionTransition = z.object({
   id: z.string().min(1),
   fromClipId: z.string().min(1),
   toClipId: z.string().min(1),
-  type: z.enum(['none', 'crossfade', 'slide-left', 'slide-right', 'dip-to-black']),
+  type: z.enum(['none', 'crossfade', 'slide-left', 'slide-right', 'dip-to-black', 'custom']),
   durationSec: z.number().finite().min(0),
   easing: z.enum(['linear', 'ease-in', 'ease-out', 'ease-in-out']).optional(),
   fallbackBehavior: z.enum(['cut', 'clamp', 'crossfade']).optional(),
-}).passthrough();
+  customTransitionId: z.string().min(1).optional(),
+}).passthrough().refine(
+  (t) => t.type !== 'custom' || !!t.customTransitionId,
+  { message: 'customTransitionId is required when type is "custom"', path: ['customTransitionId'] }
+);
 
 const zCaptionStyle = z.object({
   presetId: z.enum(['clean-lower-third', 'highlight-mode']),
@@ -261,10 +265,10 @@ const zSpecV2 = z.object({
       });
     }
 
-    if (from && to && from.trackId !== to.trackId) {
+    if (from && to && from.trackId !== to.trackId && transition.type !== 'custom') {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: `Transition clips must be on same track (${from.trackId} vs ${to.trackId})`,
+        message: `Non-custom transitions require same-track clips (${from.trackId} vs ${to.trackId})`,
         path: ['transitions', index],
       });
     }
@@ -304,7 +308,7 @@ function ensureLegacyTransition(value, fallbackType = 'none') {
 
 function ensureJunctionTransition(value, index = 0) {
   const type = JUNCTION_TRANSITION_TYPES.has(value?.type) ? value.type : 'none';
-  return {
+  const result = {
     id: stringOr(value?.id, `transition-${index + 1}`),
     fromClipId: stringOr(value?.fromClipId, ''),
     toClipId: stringOr(value?.toClipId, ''),
@@ -313,6 +317,10 @@ function ensureJunctionTransition(value, index = 0) {
     easing: EASING_TYPES.has(value?.easing) ? value.easing : 'ease-in-out',
     fallbackBehavior: value?.fallbackBehavior === 'cut' || value?.fallbackBehavior === 'crossfade' ? value.fallbackBehavior : 'clamp',
   };
+  if (type === 'custom' && value?.customTransitionId) {
+    result.customTransitionId = value.customTransitionId;
+  }
+  return result;
 }
 
 function mapLegacyTransitionToJunction(type) {

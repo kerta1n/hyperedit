@@ -8,11 +8,12 @@ interface TimelineProps {
   clips: TimelineClipType[];
   assets: Asset[];
   selectedClipId: string | null;
+  selectedClipIds?: string[];
   currentTime: number;
   duration: number;
   isPlaying: boolean;
   aspectRatio: '16:9' | '9:16';
-  onSelectClip: (id: string | null) => void;
+  onSelectClip: (id: string | null, shiftKey?: boolean) => void;
   onTimeChange: (time: number) => void;
   onPlayPause: () => void;
   onStop: () => void;
@@ -50,6 +51,7 @@ export default function Timeline({
   clips,
   assets,
   selectedClipId,
+  selectedClipIds = [],
   currentTime,
   duration,
   isPlaying,
@@ -532,9 +534,9 @@ export default function Timeline({
                           clip={clip}
                           asset={getAssetForClip(clip)}
                           pixelsPerSecond={pixelsPerSecond}
-                          isSelected={selectedClipId === clip.id}
+                          isSelected={selectedClipIds?.includes(clip.id) || selectedClipId === clip.id}
                           trackHeight={TRACK_HEIGHTS[track.type]}
-                          onClick={() => onSelectClip(clip.id)}
+                          onClick={(e?: React.MouseEvent) => onSelectClip(clip.id, e?.shiftKey)}
                           onMove={(newStart) => onMoveClip(clip.id, newStart)}
                           onResize={(inPoint, outPoint, newStart) =>
                             onResizeClip(clip.id, inPoint, outPoint, newStart)
@@ -603,6 +605,7 @@ const TRANSITION_LABELS: Record<string, string> = {
   'slide-left': 'SL',
   'slide-right': 'SR',
   'dip-to-black': 'DB',
+  custom: 'CT',
 };
 
 const TRANSITION_TYPES: JunctionTransitionType[] = ['crossfade', 'slide-left', 'slide-right', 'dip-to-black'];

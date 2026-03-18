@@ -8,7 +8,7 @@ export type RemotionEasing = 'linear' | 'ease-in' | 'ease-out' | 'ease-in-out';
 
 export type LegacyTransitionType = 'none' | 'fade' | 'slide-left' | 'slide-right' | 'zoom';
 
-export type RemotionJunctionTransitionType = 'none' | 'crossfade' | 'slide-left' | 'slide-right' | 'dip-to-black';
+export type RemotionJunctionTransitionType = 'none' | 'crossfade' | 'slide-left' | 'slide-right' | 'dip-to-black' | 'custom';
 
 export interface RemotionTransition {
   type: LegacyTransitionType;
@@ -24,6 +24,7 @@ export interface RemotionClipJunctionTransition {
   durationSec: number;
   easing?: RemotionEasing;
   fallbackBehavior?: 'cut' | 'clamp' | 'crossfade';
+  customTransitionId?: string;
 }
 
 export interface RemotionClipTransform {

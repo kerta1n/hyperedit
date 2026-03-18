@@ -90,7 +90,7 @@ export interface ProjectSettings {
 }
 
 // Junction transition between two clips (V2 spec)
-export type JunctionTransitionType = 'none' | 'crossfade' | 'slide-left' | 'slide-right' | 'dip-to-black';
+export type JunctionTransitionType = 'none' | 'crossfade' | 'slide-left' | 'slide-right' | 'dip-to-black' | 'custom';
 
 export interface JunctionTransition {
   id: string;
@@ -100,6 +100,14 @@ export interface JunctionTransition {
   durationSec: number;
   easing?: 'linear' | 'ease-in' | 'ease-out' | 'ease-in-out';
   fallbackBehavior?: 'cut' | 'clamp' | 'crossfade';
+  customTransitionId?: string;
+}
+
+export interface CustomTransitionMeta {
+  id: string;
+  name: string;
+  filename: string;
+  installedAt: string | null;
 }
 
 // Project state
@@ -786,7 +794,8 @@ export function useProject() {
     fromClipId: string,
     toClipId: string,
     type: JunctionTransitionType = 'crossfade',
-    durationSec: number = 0.5
+    durationSec: number = 0.5,
+    customTransitionId?: string
   ): JunctionTransition => {
     const transition: JunctionTransition = {
       id: crypto.randomUUID(),
@@ -796,6 +805,7 @@ export function useProject() {
       durationSec,
       easing: 'ease-in-out',
       fallbackBehavior: 'clamp',
+      ...(customTransitionId ? { customTransitionId } : {}),
     };
     setTransitions(prev => {
       // Replace any existing transition between these same two clips

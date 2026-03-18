@@ -8,7 +8,7 @@ interface TimelineClipProps {
   pixelsPerSecond: number;
   isSelected: boolean;
   trackHeight: number;
-  onClick: () => void;
+  onClick: (e?: React.MouseEvent) => void;
   onMove: (newStart: number) => void;
   onResize: (newInPoint: number, newOutPoint: number, newStart?: number) => void;
   onDragEnd: () => void;
@@ -165,7 +165,7 @@ export default function TimelineClip({
       ref={clipRef}
       onClick={(e) => {
         e.stopPropagation();
-        onClick();
+        onClick(e);
       }}
       onMouseDown={handleMouseDown}
       className={`absolute rounded-md bg-gradient-to-r ${colorClass} ${

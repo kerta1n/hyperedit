@@ -11,3 +11,4 @@ export { DynamicAnimation } from './DynamicAnimation';
 export { ProjectTimeline } from './ProjectTimeline';
 export type { Scene, DynamicAnimationProps } from './Root';
 export type { RemotionProjectSpec } from '../shared/remotion-core';
+export type { CustomTransitionProps } from './transitions/types';

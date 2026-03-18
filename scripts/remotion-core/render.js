@@ -1,5 +1,5 @@
-import { mkdir } from 'fs/promises';
-import { dirname, resolve } from 'path';
+import { copyFile, link, mkdir } from 'fs/promises';
+import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { bundle } from '@remotion/bundler';
 import { renderMedia, selectComposition } from '@remotion/renderer';
@@ -11,13 +11,25 @@ const projectRoot = resolve(__dirname, '..', '..');
 const remotionEntry = resolve(projectRoot, 'src/remotion/index.tsx');
 
 let cachedBundlePromise = null;
+let bundledTransitionSet = '';
 
-async function getBundleUrl() {
+export function invalidateBundleCache() {
+  cachedBundlePromise = null;
+  bundledTransitionSet = '';
+}
+
+async function getBundleUrl(customTransitionIds = []) {
+  const key = [...customTransitionIds].sort().join(',');
+  if (key !== bundledTransitionSet) {
+    cachedBundlePromise = null;
+    bundledTransitionSet = key;
+  }
   if (!cachedBundlePromise) {
+    const hasCustom = customTransitionIds.length > 0;
     cachedBundlePromise = bundle({
       entryPoint: remotionEntry,
       webpackOverride: (config) => config,
-      enableCaching: true,
+      enableCaching: !hasCustom,
       onProgress: ({ progress }) => {
         if (progress === 1) {
           console.log('[Remotion] Bundle ready');
@@ -27,6 +39,50 @@ async function getBundleUrl() {
   }
 
   return cachedBundlePromise;
+}
+
+/**
+ * Copy session assets into the Remotion bundle directory so the bundle server
+ * can serve them directly — avoids a proxy deadlock when the FFmpeg server is
+ * blocked during renderMedia().
+ *
+ * ONLY called when custom transitions are present in the spec.
+ */
+async function copyAssetsToBundle(bundlePath, spec, assetPathMap) {
+  if (!assetPathMap || assetPathMap.size === 0) return;
+
+  for (const clip of spec.clips || []) {
+    if (!clip.src) continue;
+    // clip.src is a full URL like "http://localhost:3333/session/{id}/assets/{assetId}/stream"
+    // Extract the path portion after the origin
+    let urlPath;
+    try {
+      urlPath = new URL(clip.src).pathname; // e.g. "/session/{id}/assets/{assetId}/stream"
+    } catch {
+      // Not a valid URL — might already be a relative path
+      urlPath = clip.src;
+    }
+
+    const match = urlPath.match(/\/assets\/([^/]+)\//);
+    if (!match) continue;
+    const assetId = match[1];
+    const sourcePath = assetPathMap.get(assetId);
+    if (!sourcePath) continue;
+
+    // Construct destination inside the bundle directory using the URL path
+    const destPath = join(bundlePath, urlPath);
+    try {
+      await mkdir(dirname(destPath), { recursive: true });
+      try {
+        await link(sourcePath, destPath);
+      } catch {
+        await copyFile(sourcePath, destPath);
+      }
+    } catch (err) {
+      // Non-fatal: the render can still try the proxy approach
+      console.warn(`[Remotion] Failed to copy asset ${assetId} to bundle: ${err.message}`);
+    }
+  }
 }
 
 function withDefaults(spec) {
@@ -59,6 +115,7 @@ export async function renderSpecWithRemotion({
   imageFormat = 'jpeg',
   logLevel = 'info',
   concurrency,
+  assetPathMap,
 }) {
   if (!spec) {
     throw new Error('spec is required for renderSpecWithRemotion');
@@ -71,7 +128,20 @@ export async function renderSpecWithRemotion({
   const normalizedSpec = withDefaults(spec);
   await mkdir(dirname(outputPath), { recursive: true });
 
-  const serveUrl = await getBundleUrl();
+  const customIds = (normalizedSpec.transitions || [])
+    .filter(t => t.type === 'custom' && t.customTransitionId)
+    .map(t => t.customTransitionId);
+
+  const serveUrl = await getBundleUrl(customIds);
+
+  // Only copy assets into the bundle when custom transitions are present.
+  // This prevents a proxy deadlock where Remotion's compositor tries to fetch
+  // assets from the FFmpeg server while it's blocked waiting for the render.
+  // For normal renders (no custom transitions), the existing proxy approach works fine.
+  if (assetPathMap) {
+    await copyAssetsToBundle(serveUrl, normalizedSpec, assetPathMap);
+  }
+
   const inputProps = { spec: normalizedSpec };
 
   const composition = await selectComposition({

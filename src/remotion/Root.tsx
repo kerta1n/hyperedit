@@ -3,6 +3,7 @@ import { Composition } from 'remotion';
 import { DynamicAnimation } from './DynamicAnimation';
 import { ProjectTimeline } from './ProjectTimeline';
 import type { RemotionProjectSpec } from '../shared/remotion-core';
+import './transitions/registry'; // ensures custom transitions are registered
 
 // Props passed from the CLI via --props
 export interface DynamicAnimationProps {

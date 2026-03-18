@@ -205,6 +205,12 @@ interface AIPromptPanelProps {
   assets?: Asset[];
   currentTime?: number;
   selectedClipId?: string | null;
+  selectedClipIds?: string[];
+  // Transitions
+  onUploadTransition?: (file: File) => Promise<{ transitionId: string; name: string }>;
+  onGenerateTransition?: (description: string) => Promise<{ transitionId: string; name: string; code: string }>;
+  onApplyTransition?: (fromClipId: string, toClipId: string, type: string, durationSec: number, customTransitionId?: string) => void;
+  availableTransitions?: { builtIn: string[]; custom: { id: string; name: string }[] };
   // Edit tab context
   activeTabId?: string;
   editTabAssetId?: string;
@@ -238,6 +244,11 @@ export default function AIPromptPanel({
   assets = [],
   currentTime = 0,
   selectedClipId,
+  selectedClipIds = [],
+  onUploadTransition,
+  onGenerateTransition,
+  onApplyTransition,
+  availableTransitions,
   activeTabId = 'main',
   editTabAssetId,
   editTabClips = [],
@@ -257,7 +268,14 @@ export default function AIPromptPanel({
   const [attachedAssets, setAttachedAssets] = useState<AttachedAsset[]>([]);
   const [isUploadingAttachment, setIsUploadingAttachment] = useState(false);
   const [isDragOverChat, setIsDragOverChat] = useState(false);
+  const [showTransitionsPanel, setShowTransitionsPanel] = useState(false);
+  const [selectedTransitionType, setSelectedTransitionType] = useState<string>('crossfade');
+  const [selectedCustomTransitionId, setSelectedCustomTransitionId] = useState<string | null>(null);
+  const [transitionDuration, setTransitionDuration] = useState(0.5);
+  const [generateTransitionPrompt, setGenerateTransitionPrompt] = useState('');
+  const [isGeneratingTransition, setIsGeneratingTransition] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const transitionFileInputRef = useRef<HTMLInputElement>(null);
   const quickActionsRef = useRef<HTMLDivElement>(null);
   const referencePickerRef = useRef<HTMLDivElement>(null);
   const timeRangePickerRef = useRef<HTMLDivElement>(null);
@@ -2855,6 +2873,167 @@ export default function AIPromptPanel({
 
       {/* Input */}
       <form onSubmit={handleSubmit} className="p-4 border-t border-zinc-800/50">
+        {/* Custom Transitions Button */}
+        <button
+          type="button"
+          onClick={() => setShowTransitionsPanel(!showTransitionsPanel)}
+          disabled={!hasVideo || isProcessing}
+          className={`w-full flex items-center justify-center gap-2 px-4 py-2.5 mb-2 rounded-lg text-sm font-medium transition-all ${
+            showTransitionsPanel
+              ? 'bg-purple-500/30 text-purple-200 ring-1 ring-purple-500/50'
+              : 'bg-gradient-to-r from-purple-500/20 to-indigo-500/20 hover:from-purple-500/30 hover:to-indigo-500/30 text-purple-300 hover:text-purple-200 border border-purple-500/30 hover:border-purple-500/50'
+          } disabled:opacity-50 disabled:cursor-not-allowed`}
+        >
+          <Sparkles className="w-4 h-4" />
+          Transitions
+          {showTransitionsPanel && <X className="w-3 h-3 ml-auto" />}
+        </button>
+
+        {/* Transitions Panel */}
+        {showTransitionsPanel && (
+          <div className="mb-3 p-3 bg-zinc-800/80 border border-purple-500/20 rounded-xl space-y-3">
+            {/* Transition Library */}
+            <div>
+              <div className="text-xs font-medium text-zinc-400 mb-1.5">Transition Library</div>
+              <div className="flex flex-wrap gap-1">
+                {(availableTransitions?.builtIn || ['crossfade', 'slide-left', 'slide-right', 'dip-to-black']).map(type => (
+                  <button
+                    key={type}
+                    type="button"
+                    onClick={() => { setSelectedTransitionType(type); setSelectedCustomTransitionId(null); }}
+                    className={`px-2 py-1 rounded text-xs transition-colors ${
+                      selectedTransitionType === type && !selectedCustomTransitionId
+                        ? 'bg-purple-500/30 text-purple-200 ring-1 ring-purple-500/50'
+                        : 'bg-zinc-700/50 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-300'
+                    }`}
+                  >
+                    {type}
+                  </button>
+                ))}
+                {(availableTransitions?.custom || []).map(ct => (
+                  <button
+                    key={ct.id}
+                    type="button"
+                    onClick={() => { setSelectedTransitionType('custom'); setSelectedCustomTransitionId(ct.id); }}
+                    className={`px-2 py-1 rounded text-xs transition-colors ${
+                      selectedCustomTransitionId === ct.id
+                        ? 'bg-purple-500/30 text-purple-200 ring-1 ring-purple-500/50'
+                        : 'bg-indigo-700/30 text-indigo-300 hover:bg-indigo-700/50'
+                    }`}
+                  >
+                    {ct.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Upload .tsx */}
+            <div>
+              <input
+                ref={transitionFileInputRef}
+                type="file"
+                accept=".tsx"
+                className="hidden"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (file && onUploadTransition) {
+                    try {
+                      await onUploadTransition(file);
+                    } catch (err: any) {
+                      console.error('Upload transition error:', err);
+                    }
+                  }
+                  e.target.value = '';
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => transitionFileInputRef.current?.click()}
+                disabled={!onUploadTransition}
+                className="w-full px-3 py-1.5 bg-zinc-700/50 hover:bg-zinc-700 rounded-lg text-xs text-zinc-400 hover:text-zinc-300 transition-colors disabled:opacity-50"
+              >
+                Upload .tsx transition file
+              </button>
+            </div>
+
+            {/* Generate with AI */}
+            <div className="flex gap-1.5">
+              <input
+                type="text"
+                value={generateTransitionPrompt}
+                onChange={(e) => setGenerateTransitionPrompt(e.target.value)}
+                placeholder="Describe a transition effect..."
+                className="flex-1 px-2 py-1.5 bg-zinc-700/50 border border-zinc-600/50 rounded-lg text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-purple-500/50"
+              />
+              <button
+                type="button"
+                disabled={!generateTransitionPrompt.trim() || isGeneratingTransition || !onGenerateTransition}
+                onClick={async () => {
+                  if (!generateTransitionPrompt.trim() || !onGenerateTransition) return;
+                  setIsGeneratingTransition(true);
+                  try {
+                    const result = await onGenerateTransition(generateTransitionPrompt.trim());
+                    setSelectedTransitionType('custom');
+                    setSelectedCustomTransitionId(result.transitionId);
+                    setGenerateTransitionPrompt('');
+                  } catch (err: any) {
+                    console.error('Generate transition error:', err);
+                  }
+                  setIsGeneratingTransition(false);
+                }}
+                className="px-3 py-1.5 bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 rounded-lg text-xs font-medium transition-colors disabled:opacity-50"
+              >
+                {isGeneratingTransition ? 'Generating...' : 'Generate'}
+              </button>
+            </div>
+
+            {/* Apply Transition */}
+            <div className="border-t border-zinc-700/50 pt-2">
+              {selectedClipIds.length === 2 ? (
+                <div className="space-y-2">
+                  <div className="text-xs text-zinc-400">
+                    Pair: <span className="text-zinc-200">{selectedClipIds[0].slice(0, 8)}...</span> → <span className="text-zinc-200">{selectedClipIds[1].slice(0, 8)}...</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-zinc-500">Duration:</span>
+                    <input
+                      type="range"
+                      min={0.1}
+                      max={2.0}
+                      step={0.1}
+                      value={transitionDuration}
+                      onChange={(e) => setTransitionDuration(parseFloat(e.target.value))}
+                      className="flex-1 accent-purple-500"
+                    />
+                    <span className="text-xs text-zinc-300 w-8">{transitionDuration}s</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (onApplyTransition && selectedClipIds.length === 2) {
+                        onApplyTransition(
+                          selectedClipIds[0],
+                          selectedClipIds[1],
+                          selectedTransitionType,
+                          transitionDuration,
+                          selectedCustomTransitionId || undefined
+                        );
+                      }
+                    }}
+                    className="w-full px-3 py-2 bg-gradient-to-r from-purple-500 to-indigo-500 hover:from-purple-600 hover:to-indigo-600 rounded-lg text-xs font-medium text-white transition-all"
+                  >
+                    Apply {selectedTransitionType === 'custom' ? 'Custom' : selectedTransitionType} Transition
+                  </button>
+                </div>
+              ) : (
+                <div className="text-xs text-zinc-500 text-center py-1">
+                  Shift+click two clips on the timeline to select a transition pair
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Motion Graphics Button */}
         <button
           type="button"

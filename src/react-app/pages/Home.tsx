@@ -24,7 +24,9 @@ interface ChapterData {
 
 export default function Home() {
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
+  const [availableTransitions, setAvailableTransitions] = useState<{ builtIn: string[]; custom: { id: string; name: string }[] }>({ builtIn: ['crossfade', 'slide-left', 'slide-right', 'dip-to-black'], custom: [] });
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [chapterData, setChapterData] = useState<ChapterData | null>(null);
@@ -502,12 +504,92 @@ export default function Home() {
     });
   }, [setSettings]);
 
-  // Handle selecting clip
-  const handleSelectClip = useCallback((clipId: string | null) => {
-    setSelectedClipId(clipId);
-    // Clear asset preview mode - let timeline-based preview take over
+  // Handle selecting clip (supports shift+click for multi-select)
+  const handleSelectClip = useCallback((clipId: string | null, shiftKey?: boolean) => {
+    if (clipId === null) {
+      setSelectedClipId(null);
+      setSelectedClipIds([]);
+      setPreviewAssetId(null);
+      return;
+    }
+    if (shiftKey) {
+      setSelectedClipIds(prev => {
+        if (prev.includes(clipId)) {
+          return prev.filter(id => id !== clipId);
+        }
+        if (prev.length >= 2) {
+          return [prev[1], clipId];
+        }
+        return [...prev, clipId];
+      });
+      setSelectedClipId(clipId);
+    } else {
+      setSelectedClipId(clipId);
+      setSelectedClipIds([clipId]);
+    }
     setPreviewAssetId(null);
   }, []);
+
+  // Fetch available transitions from server
+  const fetchAvailableTransitions = useCallback(async () => {
+    if (!session) return;
+    try {
+      const response = await fetch(`http://localhost:3333/session/${session.sessionId}/transitions`);
+      if (response.ok) {
+        const data = await response.json();
+        setAvailableTransitions(data);
+      }
+    } catch { /* ignore */ }
+  }, [session]);
+
+  // Fetch transitions when session becomes available
+  useEffect(() => {
+    if (session) {
+      fetchAvailableTransitions();
+    }
+  }, [session, fetchAvailableTransitions]);
+
+  // Upload a custom transition .tsx file
+  const handleUploadTransition = useCallback(async (file: File) => {
+    if (!session) throw new Error('No session');
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('name', file.name.replace(/\.tsx$/, ''));
+    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/upload-transition`, {
+      method: 'POST',
+      body: formData,
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Upload failed');
+    await fetchAvailableTransitions();
+    return data;
+  }, [session, fetchAvailableTransitions]);
+
+  // Generate a custom transition with AI
+  const handleGenerateTransition = useCallback(async (description: string) => {
+    if (!session) throw new Error('No session');
+    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/generate-transition`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ description }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Generation failed');
+    await fetchAvailableTransitions();
+    return data;
+  }, [session, fetchAvailableTransitions]);
+
+  // Apply a transition between two selected clips
+  const handleApplyTransition = useCallback((
+    fromClipId: string,
+    toClipId: string,
+    type: string,
+    durationSec: number,
+    customTransitionId?: string,
+  ) => {
+    addTransition(fromClipId, toClipId, type as any, durationSec, customTransitionId);
+    saveProject();
+  }, [addTransition, saveProject]);
 
   // Handle updating clip transform (scale, rotation, crop, etc.)
   const handleUpdateClipTransform = useCallback((clipId: string, transform: TimelineClip['transform']) => {
@@ -1870,6 +1952,7 @@ export default function Home() {
               clips={activeClips}
               assets={assets}
               selectedClipId={selectedClipId}
+              selectedClipIds={selectedClipIds}
               currentTime={currentTime}
               duration={duration}
               isPlaying={isPlaying}
@@ -1972,6 +2055,11 @@ export default function Home() {
                   assets={assets}
                   currentTime={currentTime}
                   selectedClipId={selectedClipId}
+                  selectedClipIds={selectedClipIds}
+                  onUploadTransition={handleUploadTransition}
+                  onGenerateTransition={handleGenerateTransition}
+                  onApplyTransition={handleApplyTransition}
+                  availableTransitions={availableTransitions}
                   activeTabId={activeTabId}
                   editTabAssetId={activeTabId !== 'main' ? timelineTabs.find(t => t.id === activeTabId)?.assetId : undefined}
                   editTabClips={activeTabId !== 'main' ? timelineTabs.find(t => t.id === activeTabId)?.clips : undefined}
