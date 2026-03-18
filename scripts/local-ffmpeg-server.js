@@ -16,6 +16,7 @@ import {
 } from './remotion-core/spec.js';
 import { renderSpecWithRemotion, renderDynamicAnimation, renderVariantBatch, invalidateBundleCache } from './remotion-core/render.js';
 import { scoreVariantBatch, writeCampaignReport } from './remotion-core/ad-intelligence.js';
+import { detectHardwareCapabilities, getFFmpegEncoderArgs } from './hardware-detection.js';
 
 // Load environment variables from .dev.vars
 function loadEnvVars() {
@@ -35,6 +36,22 @@ function loadEnvVars() {
   }
 }
 loadEnvVars();
+
+// Detect hardware capabilities once at startup
+let hwCaps = null;
+detectHardwareCapabilities().then((caps) => {
+  hwCaps = caps;
+}).catch((err) => {
+  console.warn('[Hardware] Detection failed, using software fallback:', err.message);
+  hwCaps = {
+    platform: process.platform,
+    hasGpu: false,
+    gpuVendor: null,
+    bestGlOption: 'swangle',
+    bestFfmpegEncoder: 'libx264',
+    hardwareAccelerationAvailable: false,
+  };
+});
 
 // Configure fal.ai client - SDK expects FAL_KEY env var or credentials config
 // Map FAL_API_KEY to FAL_KEY for backward compatibility
@@ -2271,6 +2288,7 @@ async function handleRenderVariants(req, res, sessionId) {
       prefix: batchPrefix,
       preview: options.preview === true,
       logLevel: 'warn',
+      hardwareOptions: hwCaps,
     });
 
     const specPaths = variants.map((variant, index) => {
@@ -2353,6 +2371,7 @@ async function handleRenderFromSpec(req, res, sessionId) {
       preview,
       logLevel: 'warn',
       assetPathMap,
+      hardwareOptions: hwCaps,
     });
 
     const { stat } = await import('fs/promises');
@@ -2520,12 +2539,12 @@ async function handleProjectRender(req, res, sessionId) {
       ffmpegArgs.push('-map', '[aout]');
     }
 
-    // Encoding settings
-    if (isPreview) {
-      ffmpegArgs.push('-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28');
-    } else {
-      ffmpegArgs.push('-c:v', 'libx264', '-preset', 'medium', '-crf', '18');
-    }
+    // Encoding settings (hardware-accelerated when available)
+    const encoderArgs = getFFmpegEncoderArgs(
+      hwCaps?.bestFfmpegEncoder || 'libx264',
+      isPreview ? 'preview' : 'export'
+    );
+    ffmpegArgs.push(...encoderArgs);
 
     ffmpegArgs.push('-c:a', 'aac', '-b:a', '192k');
     ffmpegArgs.push('-movflags', '+faststart');
@@ -2614,6 +2633,7 @@ async function handleProjectRenderRemotion(req, res, sessionId) {
       preview,
       logLevel: 'warn',
       assetPathMap,
+      hardwareOptions: hwCaps,
     });
 
     const { stat } = await import('fs/promises');
@@ -4325,9 +4345,8 @@ async function handleRenderMotionGraphic(req, res, sessionId) {
       '-f', 'lavfi',
       '-i', `color=c=0x${bgColor}:s=${width}x${height}:d=${duration}:r=${fps}`,
       '-vf', `drawtext=text='${text.replace(/'/g, "\\'")}':fontfile=${fontFile}:fontsize=${fontSize}:fontcolor=0x${color}:x=(w-text_w)/2:y=(h-text_h)/2`,
-      '-c:v', 'libx264',
+      ...getFFmpegEncoderArgs(hwCaps?.bestFfmpegEncoder || 'libx264', 'preview'),
       '-pix_fmt', 'yuv420p',
-      '-preset', 'fast',
       outputPath
     ];
 
@@ -4961,6 +4980,7 @@ ${attachedAssetIds?.length ? `- IMPORTANT: Include media scenes to showcase the 
       height,
       fps,
       logLevel: 'warn',
+      hardwareOptions: hwCaps,
     });
 
     // Step 4: Generate thumbnail
@@ -5336,6 +5356,7 @@ Return ONLY the complete JSON structure with your minimal change applied. No mar
       height,
       fps,
       logLevel: 'warn',
+      hardwareOptions: hwCaps,
     });
 
     // Generate thumbnail
@@ -6387,6 +6408,7 @@ Make it visually engaging with good color choices. Use 2-4 scenes for variety.`;
         height,
         fps,
         logLevel: 'warn',
+        hardwareOptions: hwCaps,
       });
 
       // Generate thumbnail
@@ -6890,6 +6912,7 @@ async function handleRenderFromConcept(req, res, sessionId) {
       height,
       fps,
       logLevel: 'warn',
+      hardwareOptions: hwCaps,
     });
 
     // Generate thumbnail
@@ -7202,6 +7225,7 @@ Pick phrases that are spread throughout the video. Each phrase should be 2-6 wor
       height,
       fps,
       logLevel: 'warn',
+      hardwareOptions: hwCaps,
     });
 
     // Generate thumbnail
@@ -7508,6 +7532,7 @@ Use specific terms, concepts, and themes from the transcript.`;
       height,
       fps,
       logLevel: 'warn',
+      hardwareOptions: hwCaps,
     });
 
     // Step 4: Generate thumbnail
@@ -8300,7 +8325,7 @@ const server = http.createServer(async (req, res) => {
     await handleGenerateChapters(req, res);
   } else if (req.method === 'GET' && path === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', ffmpeg: 'native', sessions: sessions.size }));
+    res.end(JSON.stringify({ status: 'ok', ffmpeg: 'native', sessions: sessions.size, hardware: hwCaps }));
   } else {
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Not found' }));

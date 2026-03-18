@@ -23,6 +23,12 @@ GEMINI_API_KEY=your-gemini-api-key-here
 # Set to false to prevent hallucination loops on silence/music (default: true)
 # WHISPER_CONDITION_ON_PREV_TEXT=false
 
+# --- Hardware Acceleration ---
+# Auto-detected at startup. Override to force behavior:
+# HARDWARE_ACCEL=auto          # 'on', 'off', or 'auto' (default: auto)
+# REMOTION_GL=angle            # Override Remotion GL: angle, angle-egl, swangle
+# FFMPEG_ENCODER=libx264       # Override FFmpeg encoder: h264_nvenc, h264_qsv, h264_amf, h264_vaapi, h264_videotoolbox
+
 # --- FFmpeg Server Directories ---
 # Ephemeral scratch files (extracted audio for Whisper, etc.) — safe for a RAM disk
 # HYPEREDIT_TEMP_DIR=R:/temp

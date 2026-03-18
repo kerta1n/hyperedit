@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import { bundle } from '@remotion/bundler';
 import { renderMedia, selectComposition } from '@remotion/renderer';
 import { parseSpecInput } from './spec.js';
+import { buildRemotionHardwareOptions } from '../hardware-detection.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -116,6 +117,7 @@ export async function renderSpecWithRemotion({
   logLevel = 'info',
   concurrency,
   assetPathMap,
+  hardwareOptions,
 }) {
   if (!spec) {
     throw new Error('spec is required for renderSpecWithRemotion');
@@ -150,7 +152,8 @@ export async function renderSpecWithRemotion({
     inputProps,
   });
 
-  const resolvedCodec = codec || (preview ? 'h264' : 'h264');
+  const resolvedCodec = codec || 'h264';
+  const hwOpts = buildRemotionHardwareOptions(hardwareOptions, preview);
 
   const renderOptions = {
     serveUrl,
@@ -162,11 +165,21 @@ export async function renderSpecWithRemotion({
     overwrite: true,
     logLevel,
     concurrency,
-    crf: preview ? 30 : 20,
     audioCodec: 'aac',
+    ...hwOpts,
   };
 
-  await renderMedia(renderOptions);
+  try {
+    await renderMedia(renderOptions);
+  } catch (err) {
+    // Compositor EPIPE or GPU-related crash — retry with software fallback
+    console.warn(`[Remotion] Render failed (${err.code || err.message}), retrying with software fallback...`);
+    const fallback = { ...renderOptions, crf: preview ? 30 : 20 };
+    delete fallback.chromiumOptions;
+    delete fallback.hardwareAcceleration;
+    delete fallback.videoBitrate;
+    await renderMedia(fallback);
+  }
 
   return {
     outputPath,
@@ -186,6 +199,7 @@ export async function renderDynamicAnimation({
   fps = 30,
   logLevel = 'info',
   onProgress,
+  hardwareOptions,
 }) {
   if (!sceneData || !sceneData.scenes) {
     throw new Error('sceneData with scenes array is required for renderDynamicAnimation');
@@ -214,6 +228,8 @@ export async function renderDynamicAnimation({
     fps,
   };
 
+  const hwOpts = buildRemotionHardwareOptions(hardwareOptions, false);
+
   const renderOptions = {
     serveUrl,
     composition: finalComposition,
@@ -223,15 +239,24 @@ export async function renderDynamicAnimation({
     imageFormat: 'jpeg',
     overwrite: true,
     logLevel,
-    crf: 20,
     audioCodec: 'aac',
+    ...hwOpts,
   };
 
   if (onProgress) {
     renderOptions.onProgress = onProgress;
   }
 
-  await renderMedia(renderOptions);
+  try {
+    await renderMedia(renderOptions);
+  } catch (err) {
+    console.warn(`[Remotion] Render failed (${err.code || err.message}), retrying with software fallback...`);
+    const fallback = { ...renderOptions, crf: 20 };
+    delete fallback.chromiumOptions;
+    delete fallback.hardwareAcceleration;
+    delete fallback.videoBitrate;
+    await renderMedia(fallback);
+  }
 
   return {
     outputPath,
@@ -251,6 +276,7 @@ export async function renderVariantBatch({
   preview = false,
   compositionId = 'ProjectTimeline',
   logLevel = 'info',
+  hardwareOptions,
 }) {
   if (!Array.isArray(variants) || variants.length === 0) {
     throw new Error('variants must be a non-empty array');
@@ -267,6 +293,7 @@ export async function renderVariantBatch({
       compositionId,
       preview,
       logLevel,
+      hardwareOptions,
     });
     results.push(result);
   }
