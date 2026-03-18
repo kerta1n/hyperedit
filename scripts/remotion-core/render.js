@@ -1,33 +1,63 @@
-import { copyFile, link, mkdir } from 'fs/promises';
+import { copyFile, link, mkdir, rm } from 'fs/promises';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
+import { tmpdir } from 'os';
+import { mkdtempSync, existsSync, mkdirSync } from 'fs';
 import { bundle } from '@remotion/bundler';
 import { renderMedia, selectComposition } from '@remotion/renderer';
 import { parseSpecInput } from './spec.js';
+import { getRenderMediaOptions } from '../hwaccel-config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const projectRoot = resolve(__dirname, '..', '..');
 const remotionEntry = resolve(projectRoot, 'src/remotion/index.tsx');
 
+// Use HYPEREDIT_TEMP_DIR for ALL Remotion temp files (bundles, assets, pre-encode)
+// This prevents C: drive from filling up when a ramdisk or other drive is configured
+const remotionTempBase = process.env.HYPEREDIT_TEMP_DIR
+  ? join(process.env.HYPEREDIT_TEMP_DIR, 'remotion')
+  : join(tmpdir(), 'remotion');
+
+if (!existsSync(remotionTempBase)) {
+  mkdirSync(remotionTempBase, { recursive: true });
+}
+
+// Override TMPDIR/TEMP/TMP so Remotion's internal temp file creation
+// (assets, pre-encode MP4, etc.) also goes to the configured directory
+process.env.TMPDIR = remotionTempBase;
+process.env.TEMP = remotionTempBase;
+process.env.TMP = remotionTempBase;
+
 let cachedBundlePromise = null;
+let cachedBundlePath = null;
 let bundledTransitionSet = '';
 
 export function invalidateBundleCache() {
+  const oldPath = cachedBundlePath;
   cachedBundlePromise = null;
+  cachedBundlePath = null;
   bundledTransitionSet = '';
+
+  // Clean up old bundle directory asynchronously
+  if (oldPath) {
+    rm(oldPath, { recursive: true, force: true }).catch((err) => {
+      console.warn('[Remotion] Failed to clean up old bundle:', err.message);
+    });
+  }
 }
 
 async function getBundleUrl(customTransitionIds = []) {
   const key = [...customTransitionIds].sort().join(',');
   if (key !== bundledTransitionSet) {
-    cachedBundlePromise = null;
+    invalidateBundleCache();
     bundledTransitionSet = key;
   }
   if (!cachedBundlePromise) {
     const hasCustom = customTransitionIds.length > 0;
     cachedBundlePromise = bundle({
       entryPoint: remotionEntry,
+      outDir: join(remotionTempBase, `bundle-${Date.now()}`),
       webpackOverride: (config) => config,
       enableCaching: !hasCustom,
       onProgress: ({ progress }) => {
@@ -35,6 +65,9 @@ async function getBundleUrl(customTransitionIds = []) {
           console.log('[Remotion] Bundle ready');
         }
       },
+    }).then((bundlePath) => {
+      cachedBundlePath = bundlePath;
+      return bundlePath;
     });
   }
 
@@ -150,7 +183,30 @@ export async function renderSpecWithRemotion({
     inputProps,
   });
 
-  const resolvedCodec = codec || (preview ? 'h264' : 'h264');
+  const resolvedCodec = codec || 'h264';
+
+  // Build hardware-accelerated options (falls back to software if unavailable)
+  let hwOptions = {};
+  try {
+    hwOptions = getRenderMediaOptions(preview);
+    console.log(`[Remotion] HW accel config:`, JSON.stringify({
+      hardwareAcceleration: hwOptions.hardwareAcceleration || 'disabled',
+      videoBitrate: hwOptions.videoBitrate || 'N/A',
+      crf: hwOptions.crf ?? 'N/A',
+      gl: hwOptions.chromiumOptions?.gl || 'default',
+      chromeMode: hwOptions.chromeMode || 'headless-shell',
+      headless: hwOptions.chromiumOptions?.headless ?? true,
+      concurrency: hwOptions.concurrency,
+      offthreadVideoThreads: hwOptions.offthreadVideoThreads,
+      offthreadVideoCacheMB: hwOptions.offthreadVideoCacheSizeInBytes
+        ? Math.round(hwOptions.offthreadVideoCacheSizeInBytes / (1024 * 1024))
+        : 'default',
+      jpegQuality: hwOptions.jpegQuality || 'default',
+    }));
+  } catch (err) {
+    console.warn('[Remotion] HW detection not ready, using software defaults:', err.message);
+    hwOptions = { crf: preview ? 30 : 20 };
+  }
 
   const renderOptions = {
     serveUrl,
@@ -161,10 +217,13 @@ export async function renderSpecWithRemotion({
     imageFormat,
     overwrite: true,
     logLevel,
-    concurrency,
-    crf: preview ? 30 : 20,
+    concurrency: concurrency ?? hwOptions.concurrency,
     audioCodec: 'aac',
+    // Spread HW options (hardwareAcceleration, videoBitrate or crf, chromiumOptions, ffmpegOverride, x264Preset)
+    ...hwOptions,
   };
+  // Remove concurrency from hwOptions spread to prefer explicit param
+  if (concurrency != null) renderOptions.concurrency = concurrency;
 
   await renderMedia(renderOptions);
 
@@ -214,6 +273,14 @@ export async function renderDynamicAnimation({
     fps,
   };
 
+  // Build hardware-accelerated options for dynamic animation renders
+  let hwOptions = {};
+  try {
+    hwOptions = getRenderMediaOptions(false);
+  } catch {
+    hwOptions = { crf: 20 };
+  }
+
   const renderOptions = {
     serveUrl,
     composition: finalComposition,
@@ -223,8 +290,9 @@ export async function renderDynamicAnimation({
     imageFormat: 'jpeg',
     overwrite: true,
     logLevel,
-    crf: 20,
     audioCodec: 'aac',
+    concurrency: hwOptions.concurrency,
+    ...hwOptions,
   };
 
   if (onProgress) {

@@ -16,6 +16,8 @@ import {
 } from './remotion-core/spec.js';
 import { renderSpecWithRemotion, renderDynamicAnimation, renderVariantBatch, invalidateBundleCache } from './remotion-core/render.js';
 import { scoreVariantBatch, writeCampaignReport } from './remotion-core/ad-intelligence.js';
+import { detectCapabilities } from './hw-detect.js';
+import { getFFmpegEncodeArgs, getAccelSummary } from './hwaccel-config.js';
 
 // Load environment variables from .dev.vars
 function loadEnvVars() {
@@ -35,6 +37,13 @@ function loadEnvVars() {
   }
 }
 loadEnvVars();
+
+// Run hardware detection after env vars are loaded
+detectCapabilities().then((caps) => {
+  console.log(`[Server] HW acceleration: preferred encoder = ${caps.preferredEncoder || 'none (software fallback)'}`);
+}).catch((err) => {
+  console.warn('[Server] HW detection failed, using software encoding:', err.message);
+});
 
 // Configure fal.ai client - SDK expects FAL_KEY env var or credentials config
 // Map FAL_API_KEY to FAL_KEY for backward compatibility
@@ -714,7 +723,7 @@ async function handleRemoveDeadAir(req, res) {
       '-y', '-i', inputPath,
       '-filter_complex', filterComplex,
       '-map', '[outv]', '-map', '[outa]',
-      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18',
+      ...getFFmpegEncodeArgs('preview'),
       '-c:a', 'aac', '-b:a', '192k',
       '-movflags', '+faststart',
       outputPath
@@ -8298,6 +8307,15 @@ const server = http.createServer(async (req, res) => {
     await handleRemoveDeadAir(req, res);
   } else if (req.method === 'POST' && path === '/generate-chapters') {
     await handleGenerateChapters(req, res);
+  } else if (req.method === 'GET' && path === '/hwaccel-info') {
+    let info;
+    try {
+      info = getAccelSummary();
+    } catch {
+      info = { error: 'Hardware detection has not completed yet. Try again shortly.' };
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify(info, null, 2));
   } else if (req.method === 'GET' && path === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'ok', ffmpeg: 'native', sessions: sessions.size }));
@@ -8342,5 +8360,6 @@ server.listen(PORT, () => {
   console.log(`   POST /session/:id/analyze-for-animation - Analyze video, return concept for approval`);
   console.log(`   POST /session/:id/generate-contextual-animation - Content-aware animation (transcribes video first)`);
   console.log(`   POST /session/:id/process-asset - Apply FFmpeg command to an asset`);
-  console.log(`\n   GET /health - Health check\n`);
+  console.log(`\n   GET /health - Health check`);
+  console.log(`   GET /hwaccel-info - Hardware acceleration diagnostics\n`);
 });

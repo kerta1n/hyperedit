@@ -28,3 +28,17 @@ GEMINI_API_KEY=your-gemini-api-key-here
 # HYPEREDIT_TEMP_DIR=R:/temp
 # Persistent session storage (uploaded videos, images, renders) — needs real disk space
 # HYPEREDIT_SESSIONS_DIR=D:/coding/hyperedit/sessions
+
+# --- Hardware Acceleration ---
+# All default to true. Set to false to force software encoding for that surface.
+# HWACCEL_REMOTION: Rendering-phase optimizations (concurrency, offthread threads, GL backend).
+#   On macOS, also enables VideoToolbox GPU encoding (videoBitrate instead of CRF).
+#   On Windows/Linux, Remotion's bundled FFmpeg lacks GPU encoders — encoding stays on CPU.
+# HWACCEL_REMOTION=true
+# HWACCEL_FFMPEG: Use GPU encoder (NVENC/VAAPI/QSV) for direct FFmpeg calls
+#   (dead air removal, asset processing). Uses the system FFmpeg, not Remotion's.
+# HWACCEL_FFMPEG=true
+# HWACCEL_HEADFUL: Use visible (headful) browser for rendering instead of headless shell.
+#   Headful mode uses real GPU drivers for faster CSS/WebGL rendering.
+#   Default: true on Windows/macOS, false on Linux (no display server typically).
+# HWACCEL_HEADFUL=true
