@@ -478,15 +478,15 @@ function cleanupSession(sessionId) {
 }
 
 // Clean up old sessions (older than 2 hours)
-setInterval(() => {
-  const twoHoursAgo = Date.now() - (2 * 60 * 60 * 1000);
-  for (const [id, session] of sessions) {
-    if (session.createdAt < twoHoursAgo) {
-      console.log(`[Session] Auto-cleaning old session: ${id}`);
-      cleanupSession(id);
-    }
-  }
-}, 30 * 60 * 1000); // Check every 30 minutes
+// setInterval(() => {
+//   const twoHoursAgo = Date.now() - (2 * 60 * 60 * 1000);
+//   for (const [id, session] of sessions) {
+//     if (session.createdAt < twoHoursAgo) {
+//       console.log(`[Session] Auto-cleaning old session: ${id}`);
+//       cleanupSession(id);
+//     }
+//   }
+// }, 30 * 60 * 1000); // Check every 30 minutes
 
 // Run FFmpeg command and return a promise
 function runFFmpeg(args, jobId) {
@@ -2670,9 +2670,9 @@ async function handleRenderDownload(req, res, sessionId, renderType) {
   if (renderType === 'preview') {
     renderFile = files.find(f => f === 'preview.mp4');
   } else {
-    // Get most recent export
+    // Get most recent export (ensure it's the video, not the .spec.json snapshot)
     renderFile = files
-      .filter(f => f.startsWith('export-'))
+      .filter(f => f.startsWith('export-') && f.endsWith('.mp4'))
       .sort()
       .pop();
   }

@@ -36,35 +36,35 @@ function envBool(key, fallback = true) {
 const ENCODER_ARGS = {
   h264_nvenc: {
     preview: ['-c:v', 'h264_nvenc', '-preset', 'p4', '-tune', 'hq', '-b:v', '6M'],
-    final:   ['-c:v', 'h264_nvenc', '-preset', 'p5', '-tune', 'hq', '-b:v', '10M'],
-    max:     ['-c:v', 'h264_nvenc', '-preset', 'p7', '-tune', 'hq', '-b:v', '20M'],
+    final: ['-c:v', 'h264_nvenc', '-preset', 'p5', '-tune', 'hq', '-b:v', '10M'],
+    max: ['-c:v', 'h264_nvenc', '-preset', 'p7', '-tune', 'hq', '-b:v', '20M'],
   },
   h264_amf: {
     preview: ['-c:v', 'h264_amf', '-quality', 'speed', '-b:v', '6M'],
-    final:   ['-c:v', 'h264_amf', '-quality', 'balanced', '-b:v', '10M'],
-    max:     ['-c:v', 'h264_amf', '-quality', 'quality', '-b:v', '20M'],
+    final: ['-c:v', 'h264_amf', '-quality', 'balanced', '-b:v', '10M'],
+    max: ['-c:v', 'h264_amf', '-quality', 'quality', '-b:v', '20M'],
   },
   h264_qsv: {
     preview: ['-c:v', 'h264_qsv', '-preset', 'faster', '-b:v', '6M'],
-    final:   ['-c:v', 'h264_qsv', '-preset', 'medium', '-b:v', '10M'],
-    max:     ['-c:v', 'h264_qsv', '-preset', 'slow', '-b:v', '20M'],
+    final: ['-c:v', 'h264_qsv', '-preset', 'medium', '-b:v', '10M'],
+    max: ['-c:v', 'h264_qsv', '-preset', 'slow', '-b:v', '20M'],
   },
   h264_vaapi: {
     preview: ['-c:v', 'h264_vaapi', '-b:v', '6M'],
-    final:   ['-c:v', 'h264_vaapi', '-b:v', '10M'],
-    max:     ['-c:v', 'h264_vaapi', '-b:v', '20M'],
+    final: ['-c:v', 'h264_vaapi', '-b:v', '10M'],
+    max: ['-c:v', 'h264_vaapi', '-b:v', '20M'],
   },
   h264_videotoolbox: {
     preview: ['-c:v', 'h264_videotoolbox', '-b:v', '6M'],
-    final:   ['-c:v', 'h264_videotoolbox', '-b:v', '10M'],
-    max:     ['-c:v', 'h264_videotoolbox', '-b:v', '20M'],
+    final: ['-c:v', 'h264_videotoolbox', '-b:v', '10M'],
+    max: ['-c:v', 'h264_videotoolbox', '-b:v', '20M'],
   },
 };
 
 const SOFTWARE_ARGS = {
   preview: ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18'],
-  final:   ['-c:v', 'libx264', '-preset', 'fast', '-crf', '20'],
-  max:     ['-c:v', 'libx264', '-preset', 'medium', '-crf', '18'],
+  final: ['-c:v', 'libx264', '-preset', 'fast', '-crf', '20'],
+  max: ['-c:v', 'libx264', '-preset', 'medium', '-crf', '18'],
 };
 
 // --------------- public API ---------------
@@ -78,7 +78,7 @@ const SOFTWARE_ARGS = {
 export function getRenderMediaOptions(isPreview = false) {
   const caps = getCapabilities();
   const useRemotionHW = envBool('HWACCEL_REMOTION');
-  const encoder       = caps.preferredEncoder;
+  const encoder = caps.preferredEncoder;
 
   const result = {
     concurrency: caps.concurrency,
@@ -100,6 +100,33 @@ export function getRenderMediaOptions(isPreview = false) {
     if (!result.chromiumOptions) result.chromiumOptions = {};
     result.chromiumOptions.headless = false;
   }
+
+  // Performance-focused Chrome flags to speed up rendering
+  if (!result.chromiumOptions) result.chromiumOptions = {};
+  result.chromiumOptions.args = [
+    ...(result.chromiumOptions.args || []),
+    '--disable-extensions',
+    '--disable-component-extensions-with-background-pages',
+    '--disable-ipc-flooding-protection',
+    '--disable-renderer-backgrounding',
+    '--enable-features=NetworkService,NetworkServiceInProcess',
+    '--force-color-profile=srgb',
+    '--hide-scrollbars',
+    '--metrics-recording-only',
+    '--mute-audio',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-popup-blocking',
+    '--disable-prompt-on-repost',
+    '--disable-sync',
+    '--disable-component-update',
+    '--disable-domain-reliability',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-background-timer-throttling',
+    '--disable-background-networking',
+    '--disable-features=IntensiveWakeUpThrottling,IsolateOrigins,site-per-process,Translate,AudioServiceOutOfProcess'
+
+  ];
 
   // ---- RENDERING-PHASE optimizations (reduces CPU during frame capture) ----
 
