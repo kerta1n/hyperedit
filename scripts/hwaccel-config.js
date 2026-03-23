@@ -21,6 +21,8 @@
  */
 
 import { getCapabilities } from './hw-detect.js';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 // --------------- env helpers ---------------
 
@@ -101,10 +103,18 @@ export function getRenderMediaOptions(isPreview = false) {
     result.chromiumOptions.headless = false;
   }
 
+  // Redirect Chrome's user data + disk cache to the configured temp directory
+  // so it doesn't fill up C: (especially on Windows where AppData is on C:)
+  const chromeTempBase = process.env.TMPDIR || process.env.TEMP || tmpdir();
+  const chromeUserDataDir = join(chromeTempBase, 'chrome-user-data');
+  const chromeDiskCacheDir = join(chromeTempBase, 'chrome-cache');
+
   // Performance-focused Chrome flags to speed up rendering
   if (!result.chromiumOptions) result.chromiumOptions = {};
   result.chromiumOptions.args = [
     ...(result.chromiumOptions.args || []),
+    `--user-data-dir=${chromeUserDataDir}`,
+    `--disk-cache-dir=${chromeDiskCacheDir}`,
     '--disable-extensions',
     '--disable-component-extensions-with-background-pages',
     '--disable-ipc-flooding-protection',
