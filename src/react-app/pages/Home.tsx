@@ -4,6 +4,7 @@ import Timeline from '@/react-app/components/Timeline';
 import AssetLibrary from '@/react-app/components/AssetLibrary';
 import ClipPropertiesPanel from '@/react-app/components/ClipPropertiesPanel';
 import CaptionPropertiesPanel from '@/react-app/components/CaptionPropertiesPanel';
+import TransitionPropertiesPanel from '@/react-app/components/TransitionPropertiesPanel';
 import AIPromptPanel from '@/react-app/components/AIPromptPanel';
 import PicassoPanel from '@/react-app/components/PicassoPanel';
 import DiCaprioPanel from '@/react-app/components/DiCaprioPanel';
@@ -14,6 +15,7 @@ import TimelineTabs from '@/react-app/components/TimelineTabs';
 import { useProject, Asset, TimelineClip, CaptionStyle } from '@/react-app/hooks/useProject';
 import { useVideoSession } from '@/react-app/hooks/useVideoSession';
 import { Sparkles, ListOrdered, Copy, Check, X, Download, Play, Palette, Film } from 'lucide-react';
+import type { ActiveTransition } from '@/react-app/components/TransitionPreview';
 import type { TemplateId } from '@/remotion/templates';
 
 interface ChapterData {
@@ -25,6 +27,7 @@ interface ChapterData {
 export default function Home() {
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
+  const [selectedTransitionId, setSelectedTransitionId] = useState<string | null>(null);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [availableTransitions, setAvailableTransitions] = useState<{ builtIn: string[]; custom: { id: string; name: string }[] }>({ builtIn: ['crossfade', 'slide-left', 'slide-right', 'dip-to-black'], custom: [] });
   const [currentTime, setCurrentTime] = useState(0);
@@ -68,8 +71,12 @@ export default function Home() {
     addCaptionClipsBatch,
     updateCaptionStyle,
     getCaptionData,
-    // Transitions
+    // Transitions (legacy v1)
     transitions,
+    setTransitions,
+    addLegacyTransition,
+    // Timeline Transitions (v2)
+    timelineTransitions,
     addTransition,
     updateTransition,
     removeTransition,
@@ -235,6 +242,35 @@ export default function Home() {
   const previewLayers = getPreviewLayers();
   const hasPreviewContent = previewLayers.length > 0;
 
+  // Detect active transitions at current playhead for preview overlay
+  const previewActiveTransitions = useMemo((): ActiveTransition[] => {
+    if (previewAssetId) return []; // No transitions in single-asset preview mode
+    const currentTransitions = activeTabId === 'main'
+      ? timelineTransitions
+      : (timelineTabs.find(t => t.id === activeTabId)?.timelineTransitions || []);
+
+    return currentTransitions
+      .filter(t => currentTime >= t.startTime && currentTime < t.startTime + t.durationSec)
+      .map(t => {
+        const fromClip = t.fromClipId ? activeClips.find(c => c.id === t.fromClipId) : null;
+        const toClip = t.toClipId ? activeClips.find(c => c.id === t.toClipId) : null;
+        const fromAsset = fromClip ? assets.find(a => a.id === fromClip.assetId) : null;
+        const toAsset = toClip ? assets.find(a => a.id === toClip.assetId) : null;
+
+        return {
+          id: t.id,
+          transitionFileId: t.transitionFileId,
+          startTime: t.startTime,
+          durationSec: t.durationSec,
+          fromSrc: fromAsset ? (fromAsset.streamUrl || getAssetStreamUrl(fromAsset.id) || undefined) : undefined,
+          toSrc: toAsset ? (toAsset.streamUrl || getAssetStreamUrl(toAsset.id) || undefined) : undefined,
+          fromAssetType: fromAsset?.type === 'video' ? 'video' as const : fromAsset ? 'image' as const : undefined,
+          toAssetType: toAsset?.type === 'video' ? 'video' as const : toAsset ? 'image' as const : undefined,
+          params: t.params,
+        };
+      });
+  }, [previewAssetId, activeTabId, timelineTransitions, timelineTabs, currentTime, activeClips, assets, getAssetStreamUrl]);
+
   // Get duration based on active tab's clips
   const duration = useMemo(() => {
     if (activeClips.length === 0) return 0;
@@ -394,19 +430,10 @@ export default function Home() {
         updateTabClips(activeTabId, updatedClips);
       }
     } else {
-      // If moving to a different track, remove transitions for this clip
-      // (transitions must be between clips on the same track)
-      if (newTrackId) {
-        const clip = clips.find(c => c.id === clipId);
-        if (clip && clip.trackId !== newTrackId) {
-          transitions
-            .filter(t => t.fromClipId === clipId || t.toClipId === clipId)
-            .forEach(t => removeTransition(t.id));
-        }
-      }
+      // Cross-track transitions are now valid in v2 — no need to remove transitions on track change
       moveClip(clipId, newStart, newTrackId);
     }
-  }, [moveClip, activeTabId, timelineTabs, updateTabClips, clips, transitions, removeTransition]);
+  }, [moveClip, activeTabId, timelineTabs, updateTabClips, clips]);
 
   // Handle resizing clip
   const handleResizeClip = useCallback((clipId: string, newInPoint: number, newOutPoint: number, newStart?: number) => {
@@ -579,7 +606,45 @@ export default function Home() {
     return data;
   }, [session, fetchAvailableTransitions]);
 
-  // Apply a transition between two selected clips
+  // Apply a transition between two selected clips (v2 internal)
+  const handleApplyTransitionV2 = useCallback((
+    fromClipId: string | null,
+    toClipId: string | null,
+    transitionFileId: string,
+    durationSec: number,
+    params: Record<string, number | string | boolean> = {},
+  ) => {
+    // Compute startTime from clip positions
+    const activeClipsList = activeTabId === 'main' ? clips : (timelineTabs.find(t => t.id === activeTabId)?.clips || []);
+    const fromClip = fromClipId ? activeClipsList.find(c => c.id === fromClipId) : null;
+    const toClip = toClipId ? activeClipsList.find(c => c.id === toClipId) : null;
+
+    let startTime = 0;
+    if (fromClip && toClip) {
+      const fromEnd = fromClip.start + fromClip.duration;
+      const toStart = toClip.start;
+      if (fromEnd > toStart) {
+        // Overlapping: start at overlap begin
+        startTime = toStart;
+      } else if (fromEnd === toStart) {
+        // Adjacent: center on junction
+        startTime = fromEnd - durationSec / 2;
+      } else {
+        // Gap: start at from clip end
+        startTime = fromEnd;
+      }
+    } else if (fromClip) {
+      startTime = fromClip.start + fromClip.duration - durationSec;
+    } else if (toClip) {
+      startTime = toClip.start;
+    }
+    startTime = Math.max(0, startTime);
+
+    addTransition(fromClipId, toClipId, transitionFileId, startTime, durationSec, params);
+    saveProject();
+  }, [addTransition, saveProject, clips, activeTabId, timelineTabs]);
+
+  // Bridge: legacy AIPromptPanel calls old signature, we map to v2
   const handleApplyTransition = useCallback((
     fromClipId: string,
     toClipId: string,
@@ -587,9 +652,17 @@ export default function Home() {
     durationSec: number,
     customTransitionId?: string,
   ) => {
-    addTransition(fromClipId, toClipId, type as any, durationSec, customTransitionId);
-    saveProject();
-  }, [addTransition, saveProject]);
+    // Map old type names to v2 transitionFileId
+    const typeToFileId: Record<string, string> = {
+      crossfade: 'builtin-crossfade',
+      'slide-left': 'builtin-slide-left',
+      'slide-right': 'builtin-slide-right',
+      'dip-to-black': 'builtin-dip-to-black',
+      custom: customTransitionId || 'builtin-crossfade',
+    };
+    const transitionFileId = typeToFileId[type] || customTransitionId || 'builtin-crossfade';
+    handleApplyTransitionV2(fromClipId, toClipId, transitionFileId, durationSec);
+  }, [handleApplyTransitionV2]);
 
   // Handle updating clip transform (scale, rotation, crop, etc.)
   const handleUpdateClipTransform = useCallback((clipId: string, transform: TimelineClip['transform']) => {
@@ -1887,7 +1960,7 @@ export default function Home() {
             </div>
 
             {/* Clip/Caption Properties Panel (shown when clip is selected) */}
-            {selectedClipId && (
+            {selectedClipId && !selectedTransitionId && (
               <div className="h-1/2 border-t border-zinc-800/50 bg-zinc-900/50 overflow-hidden">
                 {selectedCaptionData ? (
                   <CaptionPropertiesPanel
@@ -1905,6 +1978,31 @@ export default function Home() {
                 )}
               </div>
             )}
+
+            {/* Transition Properties Panel (shown when transition is selected) */}
+            {selectedTransitionId && (() => {
+              const activeTransitions = activeTabId === 'main' ? timelineTransitions : (timelineTabs.find(t => t.id === activeTabId)?.timelineTransitions || []);
+              const selectedTransition = activeTransitions.find(t => t.id === selectedTransitionId);
+              if (!selectedTransition) return null;
+              return (
+                <div className="h-1/2 border-t border-zinc-800/50 bg-zinc-900/50 overflow-hidden overflow-y-auto">
+                  <TransitionPropertiesPanel
+                    transition={selectedTransition}
+                    clips={activeClips}
+                    onUpdate={(id, updates) => {
+                      updateTransition(id, updates);
+                      saveProject();
+                    }}
+                    onRemove={(id) => {
+                      removeTransition(id);
+                      setSelectedTransitionId(null);
+                      saveProject();
+                    }}
+                    onClose={() => setSelectedTransitionId(null)}
+                  />
+                </div>
+              );
+            })()}
           </div>
         </ResizablePanel>
 
@@ -1921,6 +2019,8 @@ export default function Home() {
                 onLayerMove={handleLayerMove}
                 onLayerSelect={handleLayerSelect}
                 selectedLayerId={selectedClipId}
+                activeTransitions={previewActiveTransitions}
+                currentTime={currentTime}
               />
             ) : clips.length > 0 ? (
               // Assets exist but playhead is not over any clip
@@ -1973,9 +2073,30 @@ export default function Home() {
               onSave={saveProject}
               getCaptionData={getCaptionData}
               transitions={activeTabId === 'main' ? transitions : []}
-              onAddTransition={addTransition}
-              onUpdateTransition={updateTransition}
-              onRemoveTransition={removeTransition}
+              onAddTransition={addLegacyTransition}
+              onUpdateTransition={(id, updates) => {
+                // Legacy v1 update - keep Timeline working until Phase 5
+                setTransitions((prev: any[]) => prev.map((t: any) => t.id === id ? { ...t, ...updates } : t));
+              }}
+              onRemoveTransition={(id) => {
+                setTransitions((prev: any[]) => prev.filter((t: any) => t.id !== id));
+              }}
+              timelineTransitions={activeTabId === 'main' ? timelineTransitions : (timelineTabs.find(t => t.id === activeTabId)?.timelineTransitions || [])}
+              selectedTransitionId={selectedTransitionId}
+              onSelectTransition={(id) => {
+                setSelectedTransitionId(id);
+                if (id) {
+                  setSelectedClipId(null);
+                  setSelectedClipIds([]);
+                }
+              }}
+              onUpdateTimelineTransition={(id, updates) => {
+                updateTransition(id, updates);
+              }}
+              onRemoveTimelineTransition={(id) => {
+                removeTransition(id);
+                if (selectedTransitionId === id) setSelectedTransitionId(null);
+              }}
             />
           </ResizableVerticalPanel>
         </div>

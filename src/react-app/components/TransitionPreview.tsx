@@ -1,0 +1,120 @@
+import { useMemo, useRef, useEffect } from 'react';
+import { Player, type PlayerRef } from '@remotion/player';
+import { AbsoluteFill } from 'remotion';
+import { getTransitionEntry } from '@/remotion/transitions/registry';
+
+export interface ActiveTransition {
+  id: string;
+  transitionFileId: string;
+  startTime: number;
+  durationSec: number;
+  fromSrc?: string;
+  toSrc?: string;
+  fromAssetType?: 'video' | 'image';
+  toAssetType?: 'video' | 'image';
+  params: Record<string, number | string | boolean>;
+}
+
+interface TransitionPreviewProps {
+  transition: ActiveTransition;
+  currentTime: number;
+  fps: number;
+  width: number;
+  height: number;
+}
+
+// Inner composition that renders the actual transition component
+function TransitionComposition({
+  transitionFileId,
+  fromSrc,
+  toSrc,
+  fromAssetType,
+  toAssetType,
+  params,
+}: {
+  transitionFileId: string;
+  fromSrc?: string;
+  toSrc?: string;
+  fromAssetType?: 'video' | 'image';
+  toAssetType?: 'video' | 'image';
+  params: Record<string, number | string | boolean>;
+}) {
+  const entry = getTransitionEntry(transitionFileId);
+  if (!entry) return null;
+
+  const Component = entry.component;
+  return (
+    <AbsoluteFill>
+      <Component
+        fromSrc={fromSrc}
+        toSrc={toSrc}
+        fromAssetType={fromAssetType}
+        toAssetType={toAssetType}
+        params={params}
+      />
+    </AbsoluteFill>
+  );
+}
+
+/**
+ * Renders a single active transition using @remotion/player.
+ * Mounts once per transition window, drives frame position via seekTo — never re-mounts per tick.
+ */
+export default function TransitionPreview({
+  transition,
+  currentTime,
+  fps,
+  width,
+  height,
+}: TransitionPreviewProps) {
+  const playerRef = useRef<PlayerRef>(null);
+
+  const durationInFrames = Math.max(1, Math.round(transition.durationSec * fps));
+
+  // Calculate which frame within the transition we're at
+  const progressTime = currentTime - transition.startTime;
+  const targetFrame = Math.max(0, Math.min(durationInFrames - 1, Math.round(progressTime * fps)));
+
+  // Drive frame position via seekTo — the Player stays mounted
+  useEffect(() => {
+    if (playerRef.current) {
+      playerRef.current.seekTo(targetFrame);
+    }
+  }, [targetFrame]);
+
+  const inputProps = useMemo(() => ({
+    transitionFileId: transition.transitionFileId,
+    fromSrc: transition.fromSrc,
+    toSrc: transition.toSrc,
+    fromAssetType: transition.fromAssetType,
+    toAssetType: transition.toAssetType,
+    params: transition.params,
+  }), [
+    transition.transitionFileId,
+    transition.fromSrc,
+    transition.toSrc,
+    transition.fromAssetType,
+    transition.toAssetType,
+    transition.params,
+  ]);
+
+  return (
+    <Player
+      ref={playerRef}
+      component={TransitionComposition}
+      inputProps={inputProps}
+      durationInFrames={durationInFrames}
+      fps={fps}
+      compositionWidth={width}
+      compositionHeight={height}
+      style={{
+        position: 'absolute',
+        inset: 0,
+        width: '100%',
+        height: '100%',
+        zIndex: 50,
+        pointerEvents: 'none',
+      }}
+    />
+  );
+}

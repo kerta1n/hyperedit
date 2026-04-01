@@ -27,6 +27,18 @@ export interface RemotionClipJunctionTransition {
   customTransitionId?: string;
 }
 
+// V2 transition: independent timeline entity (cross-track, any timing scenario)
+export interface RemotionTimelineTransition {
+  id: string;
+  startTime: number;           // absolute timeline position (seconds)
+  durationSec: number;
+  fromClipId: string | null;   // null = fade from black
+  toClipId: string | null;     // null = fade to black
+  transitionFileId: string;    // reference to registered .tsx transition
+  easing?: string;
+  params: Record<string, number | string | boolean>;
+}
+
 export interface RemotionClipTransform {
   x?: number;
   y?: number;
@@ -156,7 +168,8 @@ export interface RemotionProjectSpec {
   clips: RemotionClip[];
   captions: RemotionCaption[];
   voiceover: VoiceoverLayer[];
-  transitions?: RemotionClipJunctionTransition[];
+  transitions?: RemotionClipJunctionTransition[];     // legacy v1
+  timelineTransitions?: RemotionTimelineTransition[];  // v2: cross-track independent entities
   brandTheme: BrandTheme;
   adTemplate: AdTemplate;
   meta?: Record<string, unknown>;

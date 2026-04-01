@@ -1,18 +1,44 @@
 import type React from 'react';
+import type { TransitionParamSchema, TransitionMeta } from './types';
 
-const registry = new Map<string, React.FC<any>>();
+export interface RegisteredTransition {
+  component: React.FC<any>;
+  params: TransitionParamSchema;
+  meta: TransitionMeta;
+}
 
-export function registerTransition(id: string, component: React.FC<any>): void {
-  registry.set(id, component);
+const registry = new Map<string, RegisteredTransition>();
+
+export function registerTransition(
+  id: string,
+  component: React.FC<any>,
+  params: TransitionParamSchema = {},
+  meta: TransitionMeta = { name: id },
+): void {
+  registry.set(id, { component, params, meta });
 }
 
 export function getTransition(id: string): React.FC<any> | undefined {
+  return registry.get(id)?.component;
+}
+
+export function getTransitionEntry(id: string): RegisteredTransition | undefined {
   return registry.get(id);
+}
+
+export function getTransitionMeta(id: string): TransitionMeta | undefined {
+  return registry.get(id)?.meta;
+}
+
+export function getTransitionParams(id: string): TransitionParamSchema | undefined {
+  return registry.get(id)?.params;
 }
 
 export function getRegisteredTransitionIds(): string[] {
   return Array.from(registry.keys());
 }
 
-// Side-effect import: triggers registration of all installed custom transitions
-import './custom';
+export function getRegisteredTransitions(): Array<{ id: string } & RegisteredTransition> {
+  return Array.from(registry.entries()).map(([id, entry]) => ({ id, ...entry }));
+}
+

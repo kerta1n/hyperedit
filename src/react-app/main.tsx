@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client";
 import "@/react-app/index.css";
+import "@/remotion/transitions/init";
 import App from "@/react-app/App.tsx";
 
 createRoot(document.getElementById("root")!).render(

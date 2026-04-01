@@ -1,8 +1,8 @@
-import { copyFile, link, mkdir, rm } from 'fs/promises';
+import { link, copyFile, mkdir, rm } from 'fs/promises';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
-import { mkdtempSync, existsSync, mkdirSync } from 'fs';
+import { existsSync, mkdirSync } from 'fs';
 import { bundle } from '@remotion/bundler';
 import { renderMedia, selectComposition } from '@remotion/renderer';
 import { parseSpecInput } from './spec.js';
@@ -13,21 +13,46 @@ const __dirname = dirname(__filename);
 const projectRoot = resolve(__dirname, '..', '..');
 const remotionEntry = resolve(projectRoot, 'src/remotion/index.tsx');
 
-// Use HYPEREDIT_TEMP_DIR for ALL Remotion temp files (bundles, assets, pre-encode)
-// This prevents C: drive from filling up when a ramdisk or other drive is configured
-const remotionTempBase = process.env.HYPEREDIT_TEMP_DIR
-  ? join(process.env.HYPEREDIT_TEMP_DIR, 'remotion')
-  : join(tmpdir(), 'remotion');
+// ---- Directory layout ----
+//
+// IMPORTANT: Resolved lazily because this module is a static import — its body
+// runs BEFORE local-ffmpeg-server.js calls loadEnvVars() to populate
+// process.env from .dev.vars.
+//
+// Two directories, both on the same drive as session assets (D:):
+//   bundleDir  — webpack bundle output + hard-linked session assets
+//   tempDir    — Remotion's intermediate files (frame captures, pre-encode)
+//
+// The ramdisk (HYPEREDIT_TEMP_DIR) is NOT used here — Remotion's frame
+// extraction and pre-encode can easily exceed ramdisk capacity with large
+// source videos. Only Chrome cache/profiles go on the ramdisk (via hwaccel-config).
 
-if (!existsSync(remotionTempBase)) {
-  mkdirSync(remotionTempBase, { recursive: true });
+let _dirs = null;
+
+function getDirs() {
+  if (_dirs) return _dirs;
+
+  // Put Remotion temp files next to the project (same drive as sessions)
+  // so there's no space pressure from large video frame extractions
+  const tempDir = join(projectRoot, '.remotion-temp');
+  const bundleDir = join(projectRoot, '.remotion-bundles');
+
+  for (const dir of [tempDir, bundleDir]) {
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  }
+
+  // Override TMPDIR/TEMP/TMP so Remotion's internal temp file creation
+  // (frame JPEGs, pre-encode MP4, etc.) goes to the project drive
+  process.env.TMPDIR = tempDir;
+  process.env.TEMP = tempDir;
+  process.env.TMP = tempDir;
+
+  console.log(`[Remotion] Temp directory: ${tempDir}`);
+  console.log(`[Remotion] Bundle directory: ${bundleDir}`);
+
+  _dirs = { tempDir, bundleDir };
+  return _dirs;
 }
-
-// Override TMPDIR/TEMP/TMP so Remotion's internal temp file creation
-// (assets, pre-encode MP4, etc.) also goes to the configured directory
-process.env.TMPDIR = remotionTempBase;
-process.env.TEMP = remotionTempBase;
-process.env.TMP = remotionTempBase;
 
 let cachedBundlePromise = null;
 let cachedBundlePath = null;
@@ -57,7 +82,7 @@ async function getBundleUrl(customTransitionIds = []) {
     const hasCustom = customTransitionIds.length > 0;
     cachedBundlePromise = bundle({
       entryPoint: remotionEntry,
-      outDir: join(remotionTempBase, `bundle-${Date.now()}`),
+      outDir: join(getDirs().bundleDir, `bundle-${Date.now()}`),
       webpackOverride: (config) => config,
       enableCaching: !hasCustom,
       onProgress: ({ progress }) => {
@@ -75,24 +100,34 @@ async function getBundleUrl(customTransitionIds = []) {
 }
 
 /**
- * Copy session assets into the Remotion bundle directory so the bundle server
- * can serve them directly — avoids a proxy deadlock when the FFmpeg server is
- * blocked during renderMedia().
+ * Hard-link (or copy) session assets into the Remotion bundle directory, then
+ * rewrite clip src URLs to relative paths so the bundle server serves them.
  *
- * ONLY called when custom transitions are present in the spec.
+ * This is REQUIRED because the FFmpeg server is single-threaded — it blocks on
+ * the renderMedia() call, so Remotion cannot fetch assets from localhost:3333.
+ * The bundle dir lives on the same drive as session assets (D:), so hard links
+ * are instant and use zero extra disk space.
  */
 async function copyAssetsToBundle(bundlePath, spec, assetPathMap) {
   if (!assetPathMap || assetPathMap.size === 0) return;
 
-  for (const clip of spec.clips || []) {
+  let copiedCount = 0;
+
+  // Process both clips and voiceover entries — both have src URLs that
+  // Remotion will try to download, causing deadlock if they point at :3333
+  const allSrcEntries = [
+    ...(spec.clips || []),
+    ...(spec.voiceover || []),
+  ];
+
+  for (const clip of allSrcEntries) {
     if (!clip.src) continue;
+
     // clip.src is a full URL like "http://localhost:3333/session/{id}/assets/{assetId}/stream"
-    // Extract the path portion after the origin
     let urlPath;
     try {
-      urlPath = new URL(clip.src).pathname; // e.g. "/session/{id}/assets/{assetId}/stream"
+      urlPath = new URL(clip.src).pathname;
     } catch {
-      // Not a valid URL — might already be a relative path
       urlPath = clip.src;
     }
 
@@ -102,8 +137,16 @@ async function copyAssetsToBundle(bundlePath, spec, assetPathMap) {
     const sourcePath = assetPathMap.get(assetId);
     if (!sourcePath) continue;
 
-    // Construct destination inside the bundle directory using the URL path
-    const destPath = join(bundlePath, urlPath);
+    // Build destination inside bundle — use the source file's extension so
+    // Remotion's bundle server sets the correct Content-Type and the compositor
+    // can identify the codec from the filename.
+    const ext = sourcePath.match(/\.[^.]+$/)?.[0] || '.mp4';
+    const segments = urlPath.split('/').filter(Boolean);
+    // Replace the last segment (e.g. "stream") with "stream.mp4"
+    segments[segments.length - 1] += ext;
+    const destPath = join(bundlePath, ...segments);
+    const rewrittenUrl = '/' + segments.join('/');
+
     try {
       await mkdir(dirname(destPath), { recursive: true });
       try {
@@ -111,10 +154,17 @@ async function copyAssetsToBundle(bundlePath, spec, assetPathMap) {
       } catch {
         await copyFile(sourcePath, destPath);
       }
+      // Rewrite src to relative path — Remotion's bundle server serves it
+      clip.src = rewrittenUrl;
+      copiedCount++;
+      console.log(`[Remotion] Asset ${assetId}: ${sourcePath} → ${destPath}`);
     } catch (err) {
-      // Non-fatal: the render can still try the proxy approach
-      console.warn(`[Remotion] Failed to copy asset ${assetId} to bundle: ${err.message}`);
+      console.warn(`[Remotion] Failed to copy asset ${assetId}: ${err.message}`);
     }
+  }
+
+  if (copiedCount > 0) {
+    console.log(`[Remotion] Copied ${copiedCount} assets into bundle, rewrote src to relative paths`);
   }
 }
 
@@ -167,10 +217,9 @@ export async function renderSpecWithRemotion({
 
   const serveUrl = await getBundleUrl(customIds);
 
-  // Only copy assets into the bundle when custom transitions are present.
-  // This prevents a proxy deadlock where Remotion's compositor tries to fetch
-  // assets from the FFmpeg server while it's blocked waiting for the render.
-  // For normal renders (no custom transitions), the existing proxy approach works fine.
+  // Hard-link assets into the bundle so Remotion's bundle server serves them.
+  // The FFmpeg server is blocked during renderMedia(), so Remotion can't fetch
+  // from localhost:3333. Bundle is on the same drive → hard links are free.
   if (assetPathMap) {
     await copyAssetsToBundle(serveUrl, normalizedSpec, assetPathMap);
   }
@@ -181,6 +230,7 @@ export async function renderSpecWithRemotion({
     id: compositionId,
     serveUrl,
     inputProps,
+    timeoutInMilliseconds: 120000,
   });
 
   const resolvedCodec = codec || 'h264';
@@ -219,6 +269,7 @@ export async function renderSpecWithRemotion({
     logLevel,
     concurrency: concurrency ?? hwOptions.concurrency,
     audioCodec: 'aac',
+    timeoutInMilliseconds: 120000,
     // Spread HW options (hardwareAcceleration, videoBitrate or crf, chromiumOptions, ffmpegOverride, x264Preset)
     ...hwOptions,
   };
@@ -263,6 +314,7 @@ export async function renderDynamicAnimation({
     id: 'DynamicAnimation',
     serveUrl,
     inputProps,
+    timeoutInMilliseconds: 120000,
   });
 
   // Override composition settings with caller-specified values
@@ -291,6 +343,7 @@ export async function renderDynamicAnimation({
     overwrite: true,
     logLevel,
     audioCodec: 'aac',
+    timeoutInMilliseconds: 120000,
     concurrency: hwOptions.concurrency,
     ...hwOptions,
   };

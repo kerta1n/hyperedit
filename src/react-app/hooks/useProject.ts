@@ -110,13 +110,26 @@ export interface CustomTransitionMeta {
   installedAt: string | null;
 }
 
+// V2 transition: independent timeline entity (cross-track, any timing scenario)
+export interface TimelineTransition {
+  id: string;
+  startTime: number;           // absolute timeline position (seconds)
+  durationSec: number;
+  fromClipId: string | null;   // null = fade from black
+  toClipId: string | null;     // null = fade to black
+  transitionFileId: string;    // reference to registered .tsx transition
+  easing?: string;
+  params: Record<string, number | string | boolean>;
+}
+
 // Project state
 export interface ProjectState {
   tracks: Track[];
   clips: TimelineClip[];
   settings: ProjectSettings;
   captionData?: Record<string, CaptionData>;
-  transitions?: JunctionTransition[];
+  transitions?: JunctionTransition[];           // legacy v1
+  timelineTransitions?: TimelineTransition[];   // v2: cross-track independent entities
   brandTheme?: {
     name?: string;
     fontFamily?: string;
@@ -137,6 +150,7 @@ export interface TimelineTab {
   type: 'main' | 'clip';
   assetId?: string; // For clip tabs, the asset being edited
   clips: TimelineClip[];
+  timelineTransitions: TimelineTransition[];
 }
 
 // Session info
@@ -172,11 +186,12 @@ export function useProject() {
   ]);
   const [clips, setClips] = useState<TimelineClip[]>([]);
   const [transitions, setTransitions] = useState<JunctionTransition[]>([]);
+  const [timelineTransitions, setTimelineTransitions] = useState<TimelineTransition[]>([]);
   const [captionData, setCaptionData] = useState<Record<string, CaptionData>>({});
 
   // Timeline tabs for editing clips in isolation
   const [timelineTabs, setTimelineTabs] = useState<TimelineTab[]>([
-    { id: 'main', name: 'Main', type: 'main', clips: [] }
+    { id: 'main', name: 'Main', type: 'main', clips: [], timelineTransitions: [] }
   ]);
   const [activeTabId, setActiveTabId] = useState('main');
 
@@ -210,6 +225,7 @@ export function useProject() {
   const settingsRef = useRef(settings);
   const captionDataRef = useRef(captionData);
   const transitionsRef = useRef(transitions);
+  const timelineTransitionsRef = useRef(timelineTransitions);
 
   // Keep refs in sync with state
   useEffect(() => { tracksRef.current = tracks; }, [tracks]);
@@ -217,6 +233,7 @@ export function useProject() {
   useEffect(() => { settingsRef.current = settings; }, [settings]);
   useEffect(() => { captionDataRef.current = captionData; }, [captionData]);
   useEffect(() => { transitionsRef.current = transitions; }, [transitions]);
+  useEffect(() => { timelineTransitionsRef.current = timelineTransitions; }, [timelineTransitions]);
 
   // Wrapper to persist session to localStorage
   const setSession = useCallback((sessionOrUpdater: SessionInfo | null | ((prev: SessionInfo | null) => SessionInfo | null)) => {
@@ -491,6 +508,10 @@ export function useProject() {
     setTransitions(prev => prev.filter(
       t => t.fromClipId !== clipId && t.toClipId !== clipId
     ));
+    // Clean up v2 timeline transitions referencing the deleted clip
+    setTimelineTransitions(prev => prev.filter(
+      t => t.fromClipId !== clipId && t.toClipId !== clipId
+    ));
   }, []);
 
   // Move clip
@@ -560,9 +581,16 @@ export function useProject() {
       secondClip,
     ]);
 
-    // Re-wire transitions: any transition where the original clip was the "from" clip
+    // Re-wire legacy transitions: any transition where the original clip was the "from" clip
     // should now reference the second clip (which ends where the original ended)
     setTransitions(prev => prev.map(t => {
+      if (t.fromClipId === clipId) {
+        return { ...t, fromClipId: secondClip.id };
+      }
+      return t;
+    }));
+    // Re-wire v2 timeline transitions similarly
+    setTimelineTransitions(prev => prev.map(t => {
       if (t.fromClipId === clipId) {
         return { ...t, fromClipId: secondClip.id };
       }
@@ -581,6 +609,7 @@ export function useProject() {
       type: 'clip',
       assetId,
       clips: initialClips || [],
+      timelineTransitions: [],
     };
 
     setTimelineTabs(prev => [...prev, newTab]);
@@ -789,8 +818,8 @@ export function useProject() {
     return captionData[clipId] || null;
   }, [captionData]);
 
-  // Add a junction transition between two adjacent clips
-  const addTransition = useCallback((
+  // --- Legacy v1 transition CRUD (kept for backward compat) ---
+  const addLegacyTransition = useCallback((
     fromClipId: string,
     toClipId: string,
     type: JunctionTransitionType = 'crossfade',
@@ -808,7 +837,6 @@ export function useProject() {
       ...(customTransitionId ? { customTransitionId } : {}),
     };
     setTransitions(prev => {
-      // Replace any existing transition between these same two clips
       const filtered = prev.filter(
         t => !(t.fromClipId === fromClipId && t.toClipId === toClipId)
       );
@@ -817,19 +845,50 @@ export function useProject() {
     return transition;
   }, []);
 
-  // Update an existing transition
+  // --- V2 Timeline Transition CRUD ---
+  const addTransition = useCallback((
+    fromClipId: string | null,
+    toClipId: string | null,
+    transitionFileId: string,
+    startTime: number,
+    durationSec: number = 0.5,
+    params: Record<string, number | string | boolean> = {},
+    easing?: string
+  ): TimelineTransition => {
+    const transition: TimelineTransition = {
+      id: crypto.randomUUID(),
+      startTime,
+      durationSec,
+      fromClipId,
+      toClipId,
+      transitionFileId,
+      easing: easing ?? 'ease-in-out',
+      params,
+    };
+    setTimelineTransitions(prev => [...prev, transition]);
+    return transition;
+  }, []);
+
+  // Update an existing v2 transition
   const updateTransition = useCallback((
     transitionId: string,
-    updates: Partial<Omit<JunctionTransition, 'id'>>
+    updates: Partial<Omit<TimelineTransition, 'id'>>
   ): void => {
-    setTransitions(prev => prev.map(t =>
+    setTimelineTransitions(prev => prev.map(t =>
       t.id === transitionId ? { ...t, ...updates } : t
     ));
   }, []);
 
-  // Remove a transition
+  // Remove a v2 transition
   const removeTransition = useCallback((transitionId: string): void => {
-    setTransitions(prev => prev.filter(t => t.id !== transitionId));
+    setTimelineTransitions(prev => prev.filter(t => t.id !== transitionId));
+  }, []);
+
+  // Update transitions for a specific tab
+  const updateTabTransitions = useCallback((tabId: string, newTransitions: TimelineTransition[]): void => {
+    setTimelineTabs(prev => prev.map(tab =>
+      tab.id === tabId ? { ...tab, timelineTransitions: newTransitions } : tab
+    ));
   }, []);
 
   // Save project to server (debounced)
@@ -854,6 +913,7 @@ export function useProject() {
             settings: settingsRef.current,
             captionData: captionDataRef.current,
             transitions: transitionsRef.current,
+            timelineTransitions: timelineTransitionsRef.current,
           }),
         });
         console.log('[Project] Saved');
@@ -911,6 +971,7 @@ export function useProject() {
         if (data.settings) setSettings(data.settings);
         if (data.captionData) setCaptionData(data.captionData);
         if (data.transitions) setTransitions(data.transitions);
+        if (data.timelineTransitions) setTimelineTransitions(data.timelineTransitions);
       }
     } catch (error) {
       console.error('[Project] Load failed:', error);
@@ -936,6 +997,7 @@ export function useProject() {
           settings: settingsRef.current,
           captionData: captionDataRef.current,
           transitions: transitionsRef.current,
+          timelineTransitions: timelineTransitionsRef.current,
         }),
       });
 
@@ -1095,12 +1157,18 @@ export function useProject() {
     updateCaptionStyle,
     getCaptionData,
 
-    // Transitions
+    // Transitions (legacy v1)
     transitions,
+    addLegacyTransition,
+    setTransitions,
+
+    // Timeline Transitions (v2)
+    timelineTransitions,
     addTransition,
     updateTransition,
     removeTransition,
-    setTransitions,
+    setTimelineTransitions,
+    updateTabTransitions,
 
     // Project
     saveProject,

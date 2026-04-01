@@ -82,8 +82,13 @@ export function getRenderMediaOptions(isPreview = false) {
   const useRemotionHW = envBool('HWACCEL_REMOTION');
   const encoder = caps.preferredEncoder;
 
+  // Allow user to override concurrency via .dev.vars (default: 4)
+  const userConcurrency = process.env.REMOTION_CONCURRENCY
+    ? parseInt(process.env.REMOTION_CONCURRENCY, 10)
+    : 4;
+
   const result = {
-    concurrency: caps.concurrency,
+    concurrency: userConcurrency,
   };
 
   // GL backend for Chromium content rendering (CSS transforms, gradients, blur, shadows)
@@ -105,7 +110,8 @@ export function getRenderMediaOptions(isPreview = false) {
 
   // Redirect Chrome's user data + disk cache to the configured temp directory
   // so it doesn't fill up C: (especially on Windows where AppData is on C:)
-  const chromeTempBase = process.env.TMPDIR || process.env.TEMP || tmpdir();
+  // Read HYPEREDIT_TEMP_DIR directly — don't rely on TMPDIR which may not be set yet
+  const chromeTempBase = process.env.HYPEREDIT_TEMP_DIR || process.env.TMPDIR || process.env.TEMP || tmpdir();
   const chromeUserDataDir = join(chromeTempBase, 'chrome-user-data');
   const chromeDiskCacheDir = join(chromeTempBase, 'chrome-cache');
 
@@ -176,16 +182,13 @@ export function getRenderMediaOptions(isPreview = false) {
     result.videoBitrate = isPreview ? '6M' : '10M';
     // Do NOT set crf — it conflicts with hardware acceleration
 
-    // When GPU handles encoding, push concurrency higher
-    result.concurrency = Math.max(2, Math.floor(caps.cpuCores * 0.75));
+    result.concurrency = userConcurrency;
   } else {
     // Software encoding — use crf + fast preset
     result.crf = isPreview ? 30 : 20;
     result.x264Preset = isPreview ? 'ultrafast' : 'fast';
 
-    // Even without GPU encoding, higher concurrency helps render faster
-    // since rendering (Chromium) is the bottleneck, not encoding
-    result.concurrency = Math.max(2, Math.floor(caps.cpuCores * 0.7));
+    result.concurrency = userConcurrency;
   }
 
   return result;

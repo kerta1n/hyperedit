@@ -9,3 +9,5 @@ diff_output.txt
 .claude/settings.local.json
 src/remotion/transitions/custom/index.ts
 out/
+.remotion-bundles/
+.remotion-temp/

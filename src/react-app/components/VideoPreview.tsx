@@ -1,6 +1,7 @@
 import { Play, Image as ImageIcon, Layers, Move } from 'lucide-react';
 import { useRef, useEffect, forwardRef, useImperativeHandle, useMemo, useState, useCallback } from 'react';
 import CaptionRenderer from './CaptionRenderer';
+import TransitionPreview, { type ActiveTransition } from './TransitionPreview';
 import type { CaptionWord, CaptionStyle } from '@/react-app/hooks/useProject';
 
 interface ClipTransform {
@@ -34,6 +35,8 @@ interface VideoPreviewProps {
   onLayerMove?: (layerId: string, x: number, y: number) => void;
   onLayerSelect?: (layerId: string) => void;
   selectedLayerId?: string | null;
+  activeTransitions?: ActiveTransition[];
+  currentTime?: number;
 }
 
 export interface VideoPreviewHandle {
@@ -87,6 +90,8 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   onLayerMove,
   onLayerSelect,
   selectedLayerId,
+  activeTransitions = [],
+  currentTime = 0,
 }, ref) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const loadedSrcRef = useRef<string | null>(null);
@@ -443,6 +448,18 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
 
         return null;
       })}
+
+      {/* Transition overlays via @remotion/player */}
+      {activeTransitions.map(t => (
+        <TransitionPreview
+          key={t.id}
+          transition={t}
+          currentTime={currentTime}
+          fps={30}
+          width={isVertical ? 1080 : 1920}
+          height={isVertical ? 1920 : 1080}
+        />
+      ))}
 
       {/* Layer count indicator */}
       {layers.length > 1 && (
