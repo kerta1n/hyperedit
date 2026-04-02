@@ -267,10 +267,10 @@ export default function Home() {
           fromAssetType: fromAsset?.type === 'video' ? 'video' as const : fromAsset ? 'image' as const : undefined,
           toAssetType: toAsset?.type === 'video' ? 'video' as const : toAsset ? 'image' as const : undefined,
           fromStartFrom: fromClip
-            ? Math.round(((t.startTime - fromClip.start) + (fromClip.inPoint || 0)) * 30)
+            ? Math.max(0, Math.round(((t.startTime - fromClip.start) + (fromClip.inPoint || 0)) * 30))
             : 0,
           toStartFrom: toClip
-            ? Math.round(((t.startTime - toClip.start) + (toClip.inPoint || 0)) * 30)
+            ? Math.max(0, Math.round(((t.startTime - toClip.start) + (toClip.inPoint || 0)) * 30))
             : 0,
           params: t.params,
         };
