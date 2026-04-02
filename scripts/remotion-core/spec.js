@@ -723,6 +723,7 @@ export function migrateSpecToV2(rawSpec = {}, { fromVersion } = {}) {
     ...base,
     version: SPEC_VERSION_V2,
     transitions,
+    timelineTransitions: arrayOr(rawSpec.timelineTransitions),
     meta: {
       ...(base.meta || {}),
       migration: {

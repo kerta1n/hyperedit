@@ -63,6 +63,7 @@ export function timelineToRemotionSpec({
   assets = [],
   captionData = {},
   transitions: userTransitions = [],
+  timelineTransitions: userTimelineTransitions = [],
   sessionId,
   baseUrl = 'http://localhost:3333',
   specId,
@@ -178,6 +179,7 @@ export function timelineToRemotionSpec({
     captions,
     voiceover,
     ...(userTransitions.length > 0 ? { transitions: userTransitions } : {}),
+    ...(userTimelineTransitions.length > 0 ? { timelineTransitions: userTimelineTransitions } : {}),
     brandTheme: createDefaultBrandTheme(brandTheme || {}),
     adTemplate: resolvedTemplate,
     meta: {

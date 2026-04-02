@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import { ZoomIn, ZoomOut, Play, Pause, SkipBack, Scissors, Trash2, Type, RectangleHorizontal, RectangleVertical, Link, Unlink } from 'lucide-react';
 import TimelineClip from './TimelineClip';
-import type { Track, TimelineClip as TimelineClipType, Asset, CaptionData, JunctionTransition, JunctionTransitionType } from '@/react-app/hooks/useProject';
+import type { Track, TimelineClip as TimelineClipType, Asset, CaptionData, JunctionTransition, JunctionTransitionType, TimelineTransition } from '@/react-app/hooks/useProject';
 
 interface TimelineProps {
   tracks: Track[];
@@ -32,6 +32,12 @@ interface TimelineProps {
   onAddTransition: (fromClipId: string, toClipId: string, type?: JunctionTransitionType, durationSec?: number) => JunctionTransition;
   onUpdateTransition: (transitionId: string, updates: Partial<Omit<JunctionTransition, 'id'>>) => void;
   onRemoveTransition: (transitionId: string) => void;
+  // V2 timeline transitions
+  timelineTransitions?: TimelineTransition[];
+  selectedTransitionId?: string | null;
+  onSelectTransition?: (id: string | null) => void;
+  onUpdateTimelineTransition?: (id: string, updates: Partial<Omit<TimelineTransition, 'id'>>) => void;
+  onRemoveTimelineTransition?: (id: string) => void;
 }
 
 const TRACK_HEIGHTS: Record<string, number> = {
@@ -75,6 +81,11 @@ export default function Timeline({
   onAddTransition,
   onUpdateTransition,
   onRemoveTransition,
+  timelineTransitions = [],
+  selectedTransitionId,
+  onSelectTransition,
+  onUpdateTimelineTransition,
+  onRemoveTimelineTransition,
 }: TimelineProps) {
   const [zoom, setZoom] = useState(1);
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
@@ -549,7 +560,7 @@ export default function Timeline({
                       );
                     })}
 
-                    {/* Transition indicators between adjacent clips (video tracks only) */}
+                    {/* Legacy transition indicators (v1 - same-track adjacent only) */}
                     {track.type === 'video' && getAdjacentPairs(track.id).map(({ fromClip, toClip, junctionX, transition }) => (
                       <TransitionIndicator
                         key={`tr-${fromClip.id}-${toClip.id}`}
@@ -575,6 +586,37 @@ export default function Timeline({
                         }}
                       />
                     ))}
+
+                    {/* V2 timeline transition entities on this track */}
+                    {timelineTransitions
+                      .filter(t => {
+                        // Show transition on this track if either from or to clip is on this track
+                        const fromClip = t.fromClipId ? clips.find(c => c.id === t.fromClipId) : null;
+                        const toClip = t.toClipId ? clips.find(c => c.id === t.toClipId) : null;
+                        // Show on the "from" clip's track (or "to" if from is null)
+                        const primaryTrackId = fromClip?.trackId || toClip?.trackId;
+                        return primaryTrackId === track.id;
+                      })
+                      .map(t => (
+                        <TransitionEntity
+                          key={`tl-tr-${t.id}`}
+                          transition={t}
+                          clips={clips}
+                          tracks={tracks}
+                          trackHeight={TRACK_HEIGHTS[track.type]}
+                          pixelsPerSecond={pixelsPerSecond}
+                          isSelected={selectedTransitionId === t.id}
+                          onSelect={() => onSelectTransition?.(t.id)}
+                          onUpdate={(updates) => {
+                            onUpdateTimelineTransition?.(t.id, updates);
+                            onSave();
+                          }}
+                          onRemove={() => {
+                            onRemoveTimelineTransition?.(t.id);
+                            onSave();
+                          }}
+                        />
+                      ))}
                   </div>
                 );
               })}
@@ -726,6 +768,171 @@ function TransitionIndicator({
           <span className="text-xs font-bold">+</span>
         </button>
       )}
+    </div>
+  );
+}
+
+// --- V2 Timeline Transition Entity ---
+import { getTransitionMeta } from '@/remotion/transitions/registry';
+
+function TransitionEntity({
+  transition,
+  clips: allClips,
+  tracks: _tracks,
+  trackHeight,
+  pixelsPerSecond,
+  isSelected,
+  onSelect,
+  onUpdate,
+  onRemove,
+}: {
+  transition: TimelineTransition;
+  clips: TimelineClipType[];
+  tracks: Track[];
+  trackHeight: number;
+  pixelsPerSecond: number;
+  isSelected: boolean;
+  onSelect: () => void;
+  onUpdate: (updates: Partial<Omit<TimelineTransition, 'id'>>) => void;
+  onRemove: () => void;
+}) {
+  const [isDragging, setIsDragging] = useState(false);
+  const [isResizingLeft, setIsResizingLeft] = useState(false);
+  const [isResizingRight, setIsResizingRight] = useState(false);
+  const dragStartRef = useRef({ x: 0, startTime: 0, durationSec: 0 });
+
+  const meta = getTransitionMeta(transition.transitionFileId);
+  const transitionName = meta?.name || transition.transitionFileId;
+  const width = Math.max(transition.durationSec * pixelsPerSecond, 16);
+  const left = transition.startTime * pixelsPerSecond;
+
+  const fromClip = transition.fromClipId ? allClips.find(c => c.id === transition.fromClipId) : null;
+  const toClip = transition.toClipId ? allClips.find(c => c.id === transition.toClipId) : null;
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    onSelect();
+    setIsDragging(true);
+    dragStartRef.current = { x: e.clientX, startTime: transition.startTime, durationSec: transition.durationSec };
+
+    const handleMouseMove = (moveE: MouseEvent) => {
+      const deltaX = moveE.clientX - dragStartRef.current.x;
+      const deltaSec = deltaX / pixelsPerSecond;
+      const newStart = Math.max(0, dragStartRef.current.startTime + deltaSec);
+      onUpdate({ startTime: newStart });
+    };
+
+    const handleMouseUp = () => {
+      setIsDragging(false);
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  }, [onSelect, onUpdate, pixelsPerSecond, transition.startTime, transition.durationSec]);
+
+  const handleResizeLeft = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setIsResizingLeft(true);
+    dragStartRef.current = { x: e.clientX, startTime: transition.startTime, durationSec: transition.durationSec };
+
+    const handleMouseMove = (moveE: MouseEvent) => {
+      const deltaX = moveE.clientX - dragStartRef.current.x;
+      const deltaSec = deltaX / pixelsPerSecond;
+      const newStart = Math.max(0, dragStartRef.current.startTime + deltaSec);
+      const newDuration = Math.max(0.05, dragStartRef.current.durationSec - deltaSec);
+      onUpdate({ startTime: newStart, durationSec: newDuration });
+    };
+
+    const handleMouseUp = () => {
+      setIsResizingLeft(false);
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  }, [onUpdate, pixelsPerSecond, transition.startTime, transition.durationSec]);
+
+  const handleResizeRight = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setIsResizingRight(true);
+    dragStartRef.current = { x: e.clientX, startTime: transition.startTime, durationSec: transition.durationSec };
+
+    const handleMouseMove = (moveE: MouseEvent) => {
+      const deltaX = moveE.clientX - dragStartRef.current.x;
+      const deltaSec = deltaX / pixelsPerSecond;
+      const newDuration = Math.max(0.05, dragStartRef.current.durationSec + deltaSec);
+      onUpdate({ durationSec: newDuration });
+    };
+
+    const handleMouseUp = () => {
+      setIsResizingRight(false);
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  }, [onUpdate, pixelsPerSecond, transition.durationSec]);
+
+  return (
+    <div
+      className={`absolute z-30 group ${isDragging || isResizingLeft || isResizingRight ? 'cursor-grabbing' : 'cursor-grab'}`}
+      style={{
+        left: `${left}px`,
+        width: `${width}px`,
+        top: '1px',
+        height: `${trackHeight - 2}px`,
+      }}
+      onMouseDown={handleMouseDown}
+    >
+      <div
+        className={`w-full h-full rounded border flex items-center justify-center relative overflow-hidden ${
+          isSelected
+            ? 'bg-purple-500/30 border-purple-400'
+            : 'bg-purple-500/15 border-purple-500/40 hover:bg-purple-500/25'
+        }`}
+      >
+        {/* Left resize handle */}
+        <div
+          className="absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-purple-400/50 z-10"
+          onMouseDown={handleResizeLeft}
+        />
+
+        {/* Content */}
+        <div className="flex flex-col items-center justify-center px-2 min-w-0">
+          <span className="text-[8px] font-bold text-purple-300 truncate max-w-full">
+            {transitionName}
+          </span>
+          {width > 60 && (
+            <span className="text-[7px] text-purple-400/70 truncate max-w-full">
+              {fromClip ? `${(fromClip.assetId || '').slice(0, 4)}` : 'black'}
+              {' → '}
+              {toClip ? `${(toClip.assetId || '').slice(0, 4)}` : 'black'}
+            </span>
+          )}
+        </div>
+
+        {/* Right resize handle */}
+        <div
+          className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-purple-400/50 z-10"
+          onMouseDown={handleResizeRight}
+        />
+
+        {/* Delete button on hover */}
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemove();
+          }}
+          className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 bg-red-500 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity text-white z-20"
+          title="Remove transition"
+        >
+          <span className="text-[8px] font-bold">×</span>
+        </button>
+      </div>
     </div>
   );
 }

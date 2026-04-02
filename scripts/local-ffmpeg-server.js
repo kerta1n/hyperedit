@@ -397,6 +397,7 @@ function ensureProjectDefaults(project = {}) {
     },
     captionData: project.captionData || {},
     transitions: Array.isArray(project.transitions) ? project.transitions : [],
+    timelineTransitions: Array.isArray(project.timelineTransitions) ? project.timelineTransitions : [],
     brandTheme: {
       ...DEFAULT_BRAND_THEME,
       ...(project.brandTheme || {}),
@@ -413,6 +414,7 @@ function serializeProjectForClient(project = {}) {
     settings: normalized.settings,
     captionData: normalized.captionData,
     transitions: normalized.transitions || [],
+    timelineTransitions: normalized.timelineTransitions || [],
     brandTheme: normalized.brandTheme,
     adTemplate: normalized.adTemplate,
   };
@@ -2090,6 +2092,7 @@ async function handleProjectSave(req, res, sessionId) {
     }
     if (data.adTemplate) session.project.adTemplate = data.adTemplate;
     if (data.transitions) session.project.transitions = data.transitions;
+    if (data.timelineTransitions) session.project.timelineTransitions = data.timelineTransitions;
 
     // Save to disk for persistence
     const projectPath = join(session.dir, 'project.json');
@@ -2114,6 +2117,7 @@ function buildSessionRemotionSpec(session, sessionId, options = {}) {
     assets: getSessionAssetsAsArray(session),
     captionData: session.project.captionData || {},
     transitions: session.project.transitions || [],
+    timelineTransitions: session.project.timelineTransitions || [],
     sessionId,
     baseUrl: `http://localhost:${PORT}`,
     specId: options.specId,
@@ -7885,6 +7889,7 @@ function detectExportStyle(code) {
 
 function validateTransitionCode(code) {
   const errors = [];
+  const warnings = [];
   const exportInfo = detectExportStyle(code);
   if (!exportInfo) {
     errors.push('File must contain an export (either "export default" or a named export like "export const MyTransition")');
@@ -7901,7 +7906,15 @@ function validateTransitionCode(code) {
       errors.push(`Import "${pkg}" is not allowed. Only these packages are available: ${TRANSITION_IMPORT_WHITELIST.join(', ')}`);
     }
   }
-  return { valid: errors.length === 0, errors, exportInfo };
+  // Check for params export (recommended)
+  if (!code.match(/export\s+(?:const|let|var)\s+params\b/)) {
+    warnings.push('Missing "export const params" — transition will have no configurable parameters');
+  }
+  // Check for meta export (recommended)
+  if (!code.match(/export\s+(?:const|let|var)\s+meta\b/)) {
+    warnings.push('Missing "export const meta" — transition will use filename as display name');
+  }
+  return { valid: errors.length === 0, errors, warnings, exportInfo };
 }
 
 function regenerateBarrelFile() {
@@ -7914,12 +7927,19 @@ function regenerateBarrelFile() {
     const id = file.replace('.tsx', '');
     const code = readFileSync(join(CUSTOM_TRANSITIONS_DIR, file), 'utf-8');
     const exportInfo = detectExportStyle(code);
+    const hasParams = !!code.match(/export\s+(?:const|let|var)\s+params\b/);
+    const hasMeta = !!code.match(/export\s+(?:const|let|var)\s+meta\b/);
+    const namedImports = [];
+    if (hasParams) namedImports.push(`params as P${i}`);
+    if (hasMeta) namedImports.push(`meta as M${i}`);
+    const namedPart = namedImports.length > 0 ? `, { ${namedImports.join(', ')} }` : '';
     if (exportInfo?.style === 'default') {
-      lines.push(`import T${i} from './${id}';`);
-      lines.push(`registerTransition('${id}', T${i});`);
+      lines.push(`import T${i}${namedPart} from './${id}';`);
+      lines.push(`registerTransition('${id}', T${i}${hasParams ? `, P${i}` : ''}${hasMeta ? `, M${i}` : ''});`);
     } else if (exportInfo?.style === 'named') {
-      lines.push(`import { ${exportInfo.name} as T${i} } from './${id}';`);
-      lines.push(`registerTransition('${id}', T${i});`);
+      const allImports = [`${exportInfo.name} as T${i}`, ...namedImports];
+      lines.push(`import { ${allImports.join(', ')} } from './${id}';`);
+      lines.push(`registerTransition('${id}', T${i}${hasParams ? `, P${i}` : ''}${hasMeta ? `, M${i}` : ''});`);
     }
   });
   lines.push('');
@@ -7985,7 +8005,7 @@ async function handleUploadTransition(req, res, sessionId) {
 
     console.log(`[${sessionId}] Custom transition uploaded: ${transitionId}`);
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ success: true, transitionId, name }));
+    res.end(JSON.stringify({ success: true, transitionId, name, warnings: validation.warnings || [] }));
   } catch (error) {
     console.error('Upload transition error:', error);
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
@@ -8001,24 +8021,83 @@ async function handleListTransitions(req, res, sessionId) {
     return;
   }
 
-  const builtIn = ['crossfade', 'slide-left', 'slide-right', 'dip-to-black'];
-  const custom = [];
+  // Built-in transitions as flat list entries
+  const builtInEntries = [
+    { id: 'builtin-crossfade', name: 'Crossfade', description: 'Simple opacity crossfade between two clips', source: 'builtin', params: {} },
+    { id: 'builtin-slide-left', name: 'Slide Left', description: 'From clip slides left, to clip slides in from right', source: 'builtin', params: {} },
+    { id: 'builtin-slide-right', name: 'Slide Right', description: 'From clip slides right, to clip slides in from left', source: 'builtin', params: {} },
+    { id: 'builtin-dip-to-black', name: 'Dip to Black', description: 'Dip through black between clips', source: 'builtin', params: {} },
+  ];
+
+  const customEntries = [];
   if (existsSync(CUSTOM_TRANSITIONS_DIR)) {
-    const files = readdirSync(CUSTOM_TRANSITIONS_DIR).filter(f => f.endsWith('.tsx'));
+    const files = readdirSync(CUSTOM_TRANSITIONS_DIR).filter(f => f.endsWith('.tsx') && f !== 'index.ts');
     for (const file of files) {
       const id = file.replace('.tsx', '');
-      const meta = session.customTransitions?.get(id);
-      custom.push({
+      const sessionMeta = session.customTransitions?.get(id);
+      // Try to extract params and meta from source code
+      const code = readFileSync(join(CUSTOM_TRANSITIONS_DIR, file), 'utf-8');
+      const extractedMeta = extractTransitionMeta(code);
+      const extractedParams = extractTransitionParams(code);
+      customEntries.push({
         id,
-        name: meta?.name || id,
+        name: extractedMeta?.name || sessionMeta?.name || id,
+        description: extractedMeta?.description || null,
+        source: 'custom',
         filename: file,
-        installedAt: meta?.installedAt || null,
+        params: extractedParams || {},
+        installedAt: sessionMeta?.installedAt || null,
       });
     }
   }
 
+  // Return flat list (v2) plus legacy split for backward compat
+  const transitions = [...builtInEntries, ...customEntries];
+  const builtIn = ['crossfade', 'slide-left', 'slide-right', 'dip-to-black'];
+  const custom = customEntries.map(e => ({ id: e.id, name: e.name, filename: e.filename, installedAt: e.installedAt }));
+
   res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-  res.end(JSON.stringify({ builtIn, custom }));
+  res.end(JSON.stringify({ transitions, builtIn, custom }));
+}
+
+// Extract meta object from transition source code (best-effort static analysis)
+function extractTransitionMeta(code) {
+  const metaMatch = code.match(/export\s+(?:const|let|var)\s+meta\s*(?::\s*\w+)?\s*=\s*(\{[\s\S]*?\});/);
+  if (!metaMatch) return null;
+  try {
+    // Simple extraction of name and description strings
+    const block = metaMatch[1];
+    const nameMatch = block.match(/name\s*:\s*['"]([^'"]+)['"]/);
+    const descMatch = block.match(/description\s*:\s*['"]([^'"]+)['"]/);
+    return { name: nameMatch?.[1] || null, description: descMatch?.[1] || null };
+  } catch { return null; }
+}
+
+// Extract params schema from transition source code (best-effort static analysis)
+function extractTransitionParams(code) {
+  const paramsMatch = code.match(/export\s+(?:const|let|var)\s+params\s*(?::\s*\w+)?\s*=\s*(\{[\s\S]*?\});/);
+  if (!paramsMatch) return null;
+  try {
+    const block = paramsMatch[1].trim();
+    if (block === '{}') return {};
+    // Attempt to parse simple param definitions - returns keys with type info
+    const result = {};
+    const paramRegex = /(\w+)\s*:\s*\{([^}]+)\}/g;
+    let m;
+    while ((m = paramRegex.exec(block)) !== null) {
+      const key = m[1];
+      const body = m[2];
+      const typeMatch = body.match(/type\s*:\s*['"](\w+)['"]/);
+      const labelMatch = body.match(/label\s*:\s*['"]([^'"]+)['"]/);
+      const defaultMatch = body.match(/default\s*:\s*([^,}\s]+)/);
+      result[key] = {
+        type: typeMatch?.[1] || 'number',
+        label: labelMatch?.[1] || key,
+        default: defaultMatch?.[1] ? (isNaN(Number(defaultMatch[1])) ? defaultMatch[1].replace(/['"]/g, '') : Number(defaultMatch[1])) : 0,
+      };
+    }
+    return result;
+  } catch { return null; }
 }
 
 async function handleGenerateTransition(req, res, sessionId) {
@@ -8326,6 +8405,8 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
+  // Clear stale Remotion bundle cache so builtin transition changes take effect
+  invalidateBundleCache();
   console.log(`\n🎬 Local FFmpeg server running at http://localhost:${PORT}`);
   console.log(`\n   Session API:`);
   console.log(`   POST /session/upload - Upload video, get sessionId`);

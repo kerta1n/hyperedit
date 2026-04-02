@@ -5,7 +5,9 @@ node_modules/
 worker-configuration.d.ts
 sessions/
 tmp/
-diff_output.txt
 .claude/settings.local.json
 src/remotion/transitions/custom/index.ts
 out/
+.remotion-bundles/
+.remotion-temp/
+/src/remotion/transitions/custom
