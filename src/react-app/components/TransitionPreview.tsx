@@ -12,6 +12,8 @@ export interface ActiveTransition {
   toSrc?: string;
   fromAssetType?: 'video' | 'image';
   toAssetType?: 'video' | 'image';
+  fromStartFrom?: number;
+  toStartFrom?: number;
   params: Record<string, number | string | boolean>;
 }
 
@@ -30,6 +32,8 @@ function TransitionComposition({
   toSrc,
   fromAssetType,
   toAssetType,
+  fromStartFrom,
+  toStartFrom,
   params,
 }: {
   transitionFileId: string;
@@ -37,6 +41,8 @@ function TransitionComposition({
   toSrc?: string;
   fromAssetType?: 'video' | 'image';
   toAssetType?: 'video' | 'image';
+  fromStartFrom?: number;
+  toStartFrom?: number;
   params: Record<string, number | string | boolean>;
 }) {
   const entry = getTransitionEntry(transitionFileId);
@@ -50,6 +56,8 @@ function TransitionComposition({
         toSrc={toSrc}
         fromAssetType={fromAssetType}
         toAssetType={toAssetType}
+        fromStartFrom={fromStartFrom}
+        toStartFrom={toStartFrom}
         params={params}
       />
     </AbsoluteFill>
@@ -88,6 +96,8 @@ export default function TransitionPreview({
     toSrc: transition.toSrc,
     fromAssetType: transition.fromAssetType,
     toAssetType: transition.toAssetType,
+    fromStartFrom: transition.fromStartFrom,
+    toStartFrom: transition.toStartFrom,
     params: transition.params,
   }), [
     transition.transitionFileId,
@@ -95,6 +105,8 @@ export default function TransitionPreview({
     transition.toSrc,
     transition.fromAssetType,
     transition.toAssetType,
+    transition.fromStartFrom,
+    transition.toStartFrom,
     transition.params,
   ]);
 

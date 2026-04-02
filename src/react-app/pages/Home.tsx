@@ -266,6 +266,12 @@ export default function Home() {
           toSrc: toAsset ? (toAsset.streamUrl || getAssetStreamUrl(toAsset.id) || undefined) : undefined,
           fromAssetType: fromAsset?.type === 'video' ? 'video' as const : fromAsset ? 'image' as const : undefined,
           toAssetType: toAsset?.type === 'video' ? 'video' as const : toAsset ? 'image' as const : undefined,
+          fromStartFrom: fromClip
+            ? Math.round(((t.startTime - fromClip.start) + (fromClip.inPoint || 0)) * 30)
+            : 0,
+          toStartFrom: toClip
+            ? Math.round(((t.startTime - toClip.start) + (toClip.inPoint || 0)) * 30)
+            : 0,
           params: t.params,
         };
       });

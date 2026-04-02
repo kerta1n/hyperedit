@@ -33,6 +33,8 @@ interface ResolvedTransition {
   toSrc: string | undefined;
   fromAssetType: 'video' | 'image' | undefined;
   toAssetType: 'video' | 'image' | undefined;
+  fromStartFrom: number;
+  toStartFrom: number;
   startFrame: number;
   durationInFrames: number;
   params: Record<string, number | string | boolean>;
@@ -192,6 +194,15 @@ const resolveTimelineTransitions = (
     const startFrame = toFrames(t.startTime, fps);
     const durationInFrames = Math.max(1, toFrames(t.durationSec, fps));
 
+    // Compute the frame offset into each clip's source media at the transition start.
+    // This ensures the transition shows the correct frame, not frame 0.
+    const fromStartFrom = fromClip
+      ? toFrames((t.startTime - fromClip.startSec) + fromClip.inPointSec, fps)
+      : 0;
+    const toStartFrom = toClip
+      ? toFrames((t.startTime - toClip.startSec) + toClip.inPointSec, fps)
+      : 0;
+
     resolved.push({
       id: t.id,
       transitionFileId: t.transitionFileId,
@@ -199,6 +210,8 @@ const resolveTimelineTransitions = (
       toSrc,
       fromAssetType,
       toAssetType,
+      fromStartFrom,
+      toStartFrom,
       startFrame,
       durationInFrames,
       params: t.params || {},
@@ -222,6 +235,8 @@ const TransitionCompositor: React.FC<{
         toSrc={transition.toSrc}
         fromAssetType={transition.fromAssetType}
         toAssetType={transition.toAssetType}
+        fromStartFrom={transition.fromStartFrom}
+        toStartFrom={transition.toStartFrom}
         params={transition.params}
       />
     </AbsoluteFill>

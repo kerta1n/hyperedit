@@ -29,6 +29,10 @@ export interface CustomTransitionProps {
   /** Asset types so the component knows whether to use <OffthreadVideo> or <Img> */
   fromAssetType?: 'video' | 'image';
   toAssetType?: 'video' | 'image';
+  /** Frame offset into the FROM clip's source media where the transition starts */
+  fromStartFrom?: number;
+  /** Frame offset into the TO clip's source media where the transition starts */
+  toStartFrom?: number;
   /** User-configured param values from the properties panel */
   params: Record<string, number | string | boolean>;
 }

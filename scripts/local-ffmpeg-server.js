@@ -8405,6 +8405,8 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
+  // Clear stale Remotion bundle cache so builtin transition changes take effect
+  invalidateBundleCache();
   console.log(`\n🎬 Local FFmpeg server running at http://localhost:${PORT}`);
   console.log(`\n   Session API:`);
   console.log(`   POST /session/upload - Upload video, get sessionId`);
