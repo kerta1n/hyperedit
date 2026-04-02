@@ -397,6 +397,7 @@ function ensureProjectDefaults(project = {}) {
     },
     captionData: project.captionData || {},
     transitions: Array.isArray(project.transitions) ? project.transitions : [],
+    timelineTransitions: Array.isArray(project.timelineTransitions) ? project.timelineTransitions : [],
     brandTheme: {
       ...DEFAULT_BRAND_THEME,
       ...(project.brandTheme || {}),
@@ -413,6 +414,7 @@ function serializeProjectForClient(project = {}) {
     settings: normalized.settings,
     captionData: normalized.captionData,
     transitions: normalized.transitions || [],
+    timelineTransitions: normalized.timelineTransitions || [],
     brandTheme: normalized.brandTheme,
     adTemplate: normalized.adTemplate,
   };
