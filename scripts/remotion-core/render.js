@@ -13,6 +13,20 @@ const __dirname = dirname(__filename);
 const projectRoot = resolve(__dirname, '..', '..');
 const remotionEntry = resolve(projectRoot, 'src/remotion/index.tsx');
 
+function makeProgressLogger(totalFrames) {
+  const start = Date.now();
+  return ({ renderedFrames, progress }) => {
+    const elapsed = Math.floor((Date.now() - start) / 1000);
+    const min = Math.floor(elapsed / 60);
+    const sec = String(elapsed % 60).padStart(2, '0');
+    const pct = Math.round(progress * 100);
+    process.stdout.write(
+      `\r[Remotion] Rendering: ${pct}% (${renderedFrames}/${totalFrames} frames) [${min}:${sec} elapsed]`
+    );
+    if (progress === 1) process.stdout.write('\n');
+  };
+}
+
 // ---- Directory layout ----
 //
 // IMPORTANT: Resolved lazily because this module is a static import — its body
@@ -276,6 +290,8 @@ export async function renderSpecWithRemotion({
   // Remove concurrency from hwOptions spread to prefer explicit param
   if (concurrency != null) renderOptions.concurrency = concurrency;
 
+  renderOptions.onProgress = makeProgressLogger(composition.durationInFrames);
+
   await renderMedia(renderOptions);
 
   return {
@@ -348,8 +364,11 @@ export async function renderDynamicAnimation({
     ...hwOptions,
   };
 
+  const logger = makeProgressLogger(finalComposition.durationInFrames);
   if (onProgress) {
-    renderOptions.onProgress = onProgress;
+    renderOptions.onProgress = (p) => { logger(p); onProgress(p); };
+  } else {
+    renderOptions.onProgress = logger;
   }
 
   await renderMedia(renderOptions);

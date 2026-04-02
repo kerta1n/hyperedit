@@ -87,9 +87,7 @@ export function getRenderMediaOptions(isPreview = false) {
     ? parseInt(process.env.REMOTION_CONCURRENCY, 10)
     : 4;
 
-  const result = {
-    concurrency: userConcurrency,
-  };
+  const result = {};
 
   // GL backend for Chromium content rendering (CSS transforms, gradients, blur, shadows)
   if (caps.preferredGl) {
@@ -107,6 +105,15 @@ export function getRenderMediaOptions(isPreview = false) {
     if (!result.chromiumOptions) result.chromiumOptions = {};
     result.chromiumOptions.headless = false;
   }
+
+  // Concurrency: only limit when headful (visible Chrome windows are resource-heavy)
+  // If REMOTION_CONCURRENCY is explicitly set, always respect it regardless of mode
+  if (process.env.REMOTION_CONCURRENCY) {
+    result.concurrency = userConcurrency;
+  } else if (useHeadful) {
+    result.concurrency = userConcurrency; // default 4
+  }
+  // headless without explicit env var: don't set concurrency, let Remotion auto-detect
 
   // Redirect Chrome's user data + disk cache to the configured temp directory
   // so it doesn't fill up C: (especially on Windows where AppData is on C:)
@@ -181,14 +188,10 @@ export function getRenderMediaOptions(isPreview = false) {
     result.hardwareAcceleration = 'if-possible';
     result.videoBitrate = isPreview ? '6M' : '10M';
     // Do NOT set crf — it conflicts with hardware acceleration
-
-    result.concurrency = userConcurrency;
   } else {
     // Software encoding — use crf + fast preset
     result.crf = isPreview ? 30 : 20;
     result.x264Preset = isPreview ? 'ultrafast' : 'fast';
-
-    result.concurrency = userConcurrency;
   }
 
   return result;
@@ -239,6 +242,12 @@ export function getAccelSummary() {
       chromeMode: envBool('HWACCEL_HEADFUL', caps.platform !== 'linux')
         ? 'chrome-for-testing (headful, real GPU)'
         : 'headless-shell (no GPU)',
+      concurrency: process.env.REMOTION_CONCURRENCY
+        ? parseInt(process.env.REMOTION_CONCURRENCY, 10)
+        : envBool('HWACCEL_HEADFUL', caps.platform !== 'linux') ? 4 : 'auto (Remotion default)',
+      concurrencySource: process.env.REMOTION_CONCURRENCY
+        ? 'REMOTION_CONCURRENCY env var'
+        : envBool('HWACCEL_HEADFUL', caps.platform !== 'linux') ? 'default (headful)' : 'auto (headless)',
     },
   };
 }
