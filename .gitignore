@@ -8,6 +8,4 @@ tmp/
 .claude/settings.local.json
 src/remotion/transitions/custom/index.ts
 out/
-.remotion-bundles/
-.remotion-temp/
 /src/remotion/transitions/custom

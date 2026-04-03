@@ -14,7 +14,7 @@ import {
   parseSpecInput,
   RemotionSpecValidationError,
 } from './remotion-core/spec.js';
-import { renderSpecWithRemotion, renderDynamicAnimation, renderVariantBatch, invalidateBundleCache } from './remotion-core/render.js';
+import { renderSpecWithRemotion, renderDynamicAnimation, renderVariantBatch, invalidateBundleCache, invalidateBrowserCache } from './remotion-core/render.js';
 import { scoreVariantBatch, writeCampaignReport } from './remotion-core/ad-intelligence.js';
 import { detectCapabilities } from './hw-detect.js';
 import { getFFmpegEncodeArgs, getAccelSummary } from './hwaccel-config.js';

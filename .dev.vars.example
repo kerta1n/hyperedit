@@ -28,6 +28,9 @@ GEMINI_API_KEY=your-gemini-api-key-here
 # HYPEREDIT_TEMP_DIR=R:/temp
 # Persistent session storage (uploaded videos, images, renders) — needs real disk space
 # HYPEREDIT_SESSIONS_DIR=D:/coding/hyperedit/sessions
+# Output directory for Remotion bundles (cache/bundles), temp frames (cache/temp), and future render output
+# Must be on the same drive as HYPEREDIT_SESSIONS_DIR (hard links require same filesystem)
+# HYPEREDIT_OUTPUT=D:/coding/hyperedit/out
 
 # --- Hardware Acceleration ---
 # All default to true. Set to false to force software encoding for that surface.

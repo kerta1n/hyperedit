@@ -1,10 +1,9 @@
 import { link, copyFile, mkdir, rm } from 'fs/promises';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
-import { tmpdir } from 'os';
 import { existsSync, mkdirSync } from 'fs';
 import { bundle } from '@remotion/bundler';
-import { renderMedia, selectComposition } from '@remotion/renderer';
+import { openBrowser, renderMedia, selectComposition } from '@remotion/renderer';
 import { parseSpecInput } from './spec.js';
 import { getRenderMediaOptions } from '../hwaccel-config.js';
 
@@ -33,38 +32,39 @@ function makeProgressLogger(totalFrames) {
 // runs BEFORE local-ffmpeg-server.js calls loadEnvVars() to populate
 // process.env from .dev.vars.
 //
-// Two directories, both on the same drive as session assets (D:):
-//   bundleDir  — webpack bundle output + hard-linked session assets
-//   tempDir    — Remotion's intermediate files (frame captures, pre-encode)
+// HYPEREDIT_OUTPUT (env var, default: {projectRoot}/.output):
+//   {HYPEREDIT_OUTPUT}/cache/bundles — webpack bundle output + hard-linked session assets
+//   {HYPEREDIT_OUTPUT}/cache/temp    — Remotion's intermediate files (frame captures, pre-encode)
 //
-// The ramdisk (HYPEREDIT_TEMP_DIR) is NOT used here — Remotion's frame
-// extraction and pre-encode can easily exceed ramdisk capacity with large
-// source videos. Only Chrome cache/profiles go on the ramdisk (via hwaccel-config).
+// Must be on the same drive as HYPEREDIT_SESSIONS_DIR so hard links work.
+// Chrome profiles go on the ramdisk (HYPEREDIT_TEMP_DIR) via the TEMP swap in getBrowser().
 
 let _dirs = null;
 
 function getDirs() {
   if (_dirs) return _dirs;
 
-  // Put Remotion temp files next to the project (same drive as sessions)
-  // so there's no space pressure from large video frame extractions
-  const tempDir = join(projectRoot, '.remotion-temp');
-  const bundleDir = join(projectRoot, '.remotion-bundles');
+  const outputRoot = process.env.HYPEREDIT_OUTPUT || join(projectRoot, '.output');
+  const tempDir = join(outputRoot, 'cache', 'temp');
+  const bundleDir = join(outputRoot, 'cache', 'bundles');
 
   for (const dir of [tempDir, bundleDir]) {
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   }
 
   // Override TMPDIR/TEMP/TMP so Remotion's internal temp file creation
-  // (frame JPEGs, pre-encode MP4, etc.) goes to the project drive
+  // (frame JPEGs, pre-encode MP4, etc.) goes to the output drive
   process.env.TMPDIR = tempDir;
   process.env.TEMP = tempDir;
   process.env.TMP = tempDir;
 
+  const ramdisk = process.env.HYPEREDIT_TEMP_DIR;
+  console.log(`[Remotion] Output root: ${outputRoot}`);
   console.log(`[Remotion] Temp directory: ${tempDir}`);
   console.log(`[Remotion] Bundle directory: ${bundleDir}`);
+  console.log(`[Remotion] Chrome profile: ${ramdisk || tempDir}`);
 
-  _dirs = { tempDir, bundleDir };
+  _dirs = { outputRoot, tempDir, bundleDir };
   return _dirs;
 }
 
@@ -111,6 +111,71 @@ async function getBundleUrl(customTransitionIds = []) {
   }
 
   return cachedBundlePromise;
+}
+
+// ---- Cached browser instance ----
+//
+// Reuse a single Chrome instance across renders. The TEMP env var is swapped to
+// HYPEREDIT_TEMP_DIR (ramdisk) before openBrowser() so Chrome's user-data profile
+// lands on fast storage. After launch, TEMP is restored to the output cache/temp
+// dir so Remotion's frame captures (which can be gigabytes) go to the project drive.
+
+let cachedBrowserPromise = null;
+let cachedBrowserInstance = null;
+let browserConfigKey = '';
+
+export function invalidateBrowserCache() {
+  const old = cachedBrowserInstance;
+  cachedBrowserPromise = null;
+  cachedBrowserInstance = null;
+  browserConfigKey = '';
+  if (old) old.close({ silent: true }).catch(() => {});
+}
+
+function getBrowserConfigKey(hw) {
+  return JSON.stringify({
+    chromeMode: hw.chromeMode,
+    gl: hw.chromiumOptions?.gl,
+    headless: hw.chromiumOptions?.headless,
+  });
+}
+
+async function getBrowser(hwOptions) {
+  const key = getBrowserConfigKey(hwOptions);
+  if (key !== browserConfigKey) {
+    invalidateBrowserCache();
+    browserConfigKey = key;
+  }
+  if (!cachedBrowserPromise) {
+    cachedBrowserPromise = (async () => {
+      const { tempDir } = getDirs();
+      const ramdisk = process.env.HYPEREDIT_TEMP_DIR;
+
+      // Swap TEMP to ramdisk so Chrome profile lands there (small, ephemeral)
+      if (ramdisk) {
+        process.env.TMPDIR = ramdisk;
+        process.env.TEMP = ramdisk;
+        process.env.TMP = ramdisk;
+      }
+
+      try {
+        const browser = await openBrowser('chrome', {
+          chromiumOptions: hwOptions.chromiumOptions || {},
+          chromeMode: hwOptions.chromeMode || 'headless-shell',
+          logLevel: 'warn',
+        });
+        cachedBrowserInstance = browser;
+        console.log(`[Remotion] Browser opened (profile on ${ramdisk || tempDir})`);
+        return browser;
+      } finally {
+        // Restore TEMP so frame captures go to cache/temp (large files, not ramdisk)
+        process.env.TMPDIR = tempDir;
+        process.env.TEMP = tempDir;
+        process.env.TMP = tempDir;
+      }
+    })();
+  }
+  return cachedBrowserPromise;
 }
 
 /**
@@ -239,14 +304,6 @@ export async function renderSpecWithRemotion({
   }
 
   const inputProps = { spec: normalizedSpec };
-
-  const composition = await selectComposition({
-    id: compositionId,
-    serveUrl,
-    inputProps,
-    timeoutInMilliseconds: 120000,
-  });
-
   const resolvedCodec = codec || 'h264';
 
   // Build hardware-accelerated options (falls back to software if unavailable)
@@ -272,6 +329,17 @@ export async function renderSpecWithRemotion({
     hwOptions = { crf: preview ? 30 : 20 };
   }
 
+  // Reuse cached browser (Chrome profile on ramdisk, frames on output drive)
+  const browser = await getBrowser(hwOptions);
+
+  const composition = await selectComposition({
+    id: compositionId,
+    serveUrl,
+    inputProps,
+    timeoutInMilliseconds: 120000,
+    puppeteerInstance: browser,
+  });
+
   const renderOptions = {
     serveUrl,
     composition,
@@ -284,11 +352,14 @@ export async function renderSpecWithRemotion({
     concurrency: concurrency ?? hwOptions.concurrency,
     audioCodec: 'aac',
     timeoutInMilliseconds: 120000,
+    puppeteerInstance: browser,
     // Spread HW options (hardwareAcceleration, videoBitrate or crf, chromiumOptions, ffmpegOverride, x264Preset)
     ...hwOptions,
   };
   // Remove concurrency from hwOptions spread to prefer explicit param
   if (concurrency != null) renderOptions.concurrency = concurrency;
+  // Ensure puppeteerInstance isn't overwritten by hwOptions spread
+  renderOptions.puppeteerInstance = browser;
 
   renderOptions.onProgress = makeProgressLogger(composition.durationInFrames);
 
@@ -326,11 +397,23 @@ export async function renderDynamicAnimation({
   const serveUrl = await getBundleUrl();
   const inputProps = sceneData;
 
+  // Build hardware-accelerated options for dynamic animation renders
+  let hwOptions = {};
+  try {
+    hwOptions = getRenderMediaOptions(false);
+  } catch {
+    hwOptions = { crf: 20 };
+  }
+
+  // Reuse cached browser (Chrome profile on ramdisk, frames on output drive)
+  const browser = await getBrowser(hwOptions);
+
   const composition = await selectComposition({
     id: 'DynamicAnimation',
     serveUrl,
     inputProps,
     timeoutInMilliseconds: 120000,
+    puppeteerInstance: browser,
   });
 
   // Override composition settings with caller-specified values
@@ -340,14 +423,6 @@ export async function renderDynamicAnimation({
     height,
     fps,
   };
-
-  // Build hardware-accelerated options for dynamic animation renders
-  let hwOptions = {};
-  try {
-    hwOptions = getRenderMediaOptions(false);
-  } catch {
-    hwOptions = { crf: 20 };
-  }
 
   const renderOptions = {
     serveUrl,
@@ -361,8 +436,11 @@ export async function renderDynamicAnimation({
     audioCodec: 'aac',
     timeoutInMilliseconds: 120000,
     concurrency: hwOptions.concurrency,
+    puppeteerInstance: browser,
     ...hwOptions,
   };
+  // Ensure puppeteerInstance isn't overwritten by hwOptions spread
+  renderOptions.puppeteerInstance = browser;
 
   const logger = makeProgressLogger(finalComposition.durationInFrames);
   if (onProgress) {
