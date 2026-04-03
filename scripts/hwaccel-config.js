@@ -21,8 +21,6 @@
  */
 
 import { getCapabilities } from './hw-detect.js';
-import { tmpdir } from 'os';
-import { join } from 'path';
 
 // --------------- env helpers ---------------
 
@@ -106,50 +104,11 @@ export function getRenderMediaOptions(isPreview = false) {
     result.chromiumOptions.headless = false;
   }
 
-  // Concurrency: only limit when headful (visible Chrome windows are resource-heavy)
-  // If REMOTION_CONCURRENCY is explicitly set, always respect it regardless of mode
-  if (process.env.REMOTION_CONCURRENCY) {
-    result.concurrency = userConcurrency;
-  } else if (useHeadful) {
-    result.concurrency = userConcurrency; // default 4
-  }
-  // headless without explicit env var: don't set concurrency, let Remotion auto-detect
-
-  // Redirect Chrome's user data + disk cache to the configured temp directory
-  // so it doesn't fill up C: (especially on Windows where AppData is on C:)
-  // Read HYPEREDIT_TEMP_DIR directly — don't rely on TMPDIR which may not be set yet
-  const chromeTempBase = process.env.HYPEREDIT_TEMP_DIR || process.env.TMPDIR || process.env.TEMP || tmpdir();
-  const chromeUserDataDir = join(chromeTempBase, 'chrome-user-data');
-  const chromeDiskCacheDir = join(chromeTempBase, 'chrome-cache');
-
-  // Performance-focused Chrome flags to speed up rendering
-  if (!result.chromiumOptions) result.chromiumOptions = {};
-  result.chromiumOptions.args = [
-    ...(result.chromiumOptions.args || []),
-    `--user-data-dir=${chromeUserDataDir}`,
-    `--disk-cache-dir=${chromeDiskCacheDir}`,
-    '--disable-extensions',
-    '--disable-component-extensions-with-background-pages',
-    '--disable-ipc-flooding-protection',
-    '--disable-renderer-backgrounding',
-    '--enable-features=NetworkService,NetworkServiceInProcess',
-    '--force-color-profile=srgb',
-    '--hide-scrollbars',
-    '--metrics-recording-only',
-    '--mute-audio',
-    '--no-first-run',
-    '--no-default-browser-check',
-    '--disable-popup-blocking',
-    '--disable-prompt-on-repost',
-    '--disable-sync',
-    '--disable-component-update',
-    '--disable-domain-reliability',
-    '--disable-backgrounding-occluded-windows',
-    '--disable-background-timer-throttling',
-    '--disable-background-networking',
-    '--disable-features=IntensiveWakeUpThrottling,IsolateOrigins,site-per-process,Translate,AudioServiceOutOfProcess'
-
-  ];
+  // Always cap concurrency to prevent thundering herd at frame 0.
+  // Remotion's auto-detect (50% of CPU cores) is too aggressive for the single
+  // Node.js event loop that also serves the bundle/proxy HTTP server.
+  // REMOTION_CONCURRENCY env var overrides this default.
+  result.concurrency = userConcurrency;
 
   // ---- RENDERING-PHASE optimizations (reduces CPU during frame capture) ----
 
@@ -244,10 +203,10 @@ export function getAccelSummary() {
         : 'headless-shell (no GPU)',
       concurrency: process.env.REMOTION_CONCURRENCY
         ? parseInt(process.env.REMOTION_CONCURRENCY, 10)
-        : envBool('HWACCEL_HEADFUL', caps.platform !== 'linux') ? 4 : 'auto (Remotion default)',
+        : 4,
       concurrencySource: process.env.REMOTION_CONCURRENCY
         ? 'REMOTION_CONCURRENCY env var'
-        : envBool('HWACCEL_HEADFUL', caps.platform !== 'linux') ? 'default (headful)' : 'auto (headless)',
+        : 'default (safe cap)',
     },
   };
 }
