@@ -7914,6 +7914,11 @@ function validateTransitionCode(code) {
   if (!code.match(/export\s+(?:const|let|var)\s+meta\b/)) {
     warnings.push('Missing "export const meta" — transition will use filename as display name');
   }
+  // Check for startFrom usage when rendering video (important for correct frame positioning)
+  if ((code.includes('OffthreadVideo') || code.includes('<Video'))
+      && !code.includes('startFrom') && !code.includes('fromStartFrom')) {
+    warnings.push('Transition renders video but does not use fromStartFrom/toStartFrom — video clips may start from frame 0 instead of the correct position. See the transition authoring spec.');
+  }
   return { valid: errors.length === 0, errors, warnings, exportInfo };
 }
 
@@ -8008,6 +8013,42 @@ async function handleUploadTransition(req, res, sessionId) {
     res.end(JSON.stringify({ success: true, transitionId, name, warnings: validation.warnings || [] }));
   } catch (error) {
     console.error('Upload transition error:', error);
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: error.message }));
+  }
+}
+
+async function handleDeleteTransition(req, res, sessionId) {
+  try {
+    const body = await readBody(req);
+    const data = JSON.parse(body);
+    const transitionId = data.transitionId;
+
+    if (!transitionId) {
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      return res.end(JSON.stringify({ error: 'Missing transitionId' }));
+    }
+
+    if (transitionId.startsWith('builtin-')) {
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      return res.end(JSON.stringify({ error: 'Cannot delete built-in transitions' }));
+    }
+
+    const filePath = join(CUSTOM_TRANSITIONS_DIR, `${transitionId}.tsx`);
+    if (!existsSync(filePath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      return res.end(JSON.stringify({ error: `Transition "${transitionId}" not found` }));
+    }
+
+    unlinkSync(filePath);
+    regenerateBarrelFile();
+    invalidateBundleCache();
+
+    console.log(`[Transitions] Deleted custom transition: ${transitionId}`);
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ success: true, transitionId }));
+  } catch (error) {
+    console.error('Delete transition error:', error);
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: error.message }));
   }
@@ -8362,6 +8403,9 @@ const server = http.createServer(async (req, res) => {
     }
     else if (req.method === 'POST' && action === 'generate-transition') {
       await handleGenerateTransition(req, res, sessionId);
+    }
+    else if (req.method === 'POST' && action === 'delete-transition') {
+      await handleDeleteTransition(req, res, sessionId);
     }
     else if (action.startsWith('renders/')) {
       const renderType = action.substring(8); // Remove 'renders/'

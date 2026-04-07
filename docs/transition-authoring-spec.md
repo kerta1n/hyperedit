@@ -106,12 +106,18 @@ interface CustomTransitionProps {
   fromAssetType?: 'video' | 'image';
   /** Asset type of the TO clip */
   toAssetType?: 'video' | 'image';
+  /** Frame offset into the FROM clip's source media. Pass to <OffthreadVideo startFrom={fromStartFrom}> so the video starts at the correct position instead of frame 0. */
+  fromStartFrom?: number;
+  /** Frame offset into the TO clip's source media. Pass to <OffthreadVideo startFrom={toStartFrom}>. */
+  toStartFrom?: number;
   /** User-configurable parameters defined by the params export */
   params: Record<string, number | string | boolean>;
 }
 ```
 
 **Important:** When `fromSrc` or `toSrc` is `undefined`, render black (or nothing) for that side. This happens when the user explicitly sets a clip to "Black" in the from/to selector.
+
+**Important:** Always pass `startFrom={fromStartFrom}` and `startFrom={toStartFrom}` to your `<OffthreadVideo>` elements. Without this, video clips will always play from the beginning of the source file instead of the correct position on the timeline.
 
 ## Timing Rules
 
@@ -136,20 +142,28 @@ const progress = interpolate(frame, [0, durationInFrames - 1], [0, 1], {
 
 ## Rendering Media
 
-Use `<OffthreadVideo>` for video sources and `<Img>` for images. Always check the asset type:
+Use `<OffthreadVideo>` for video sources and `<Img>` for images. Always check the asset type, and **always pass `startFrom`** so video clips start at the correct position:
 
 ```tsx
-function MediaLayer({ src, assetType, style }: {
+function MediaLayer({ src, assetType, startFrom, style }: {
   src?: string;
   assetType?: 'video' | 'image';
+  startFrom?: number;
   style?: React.CSSProperties;
 }) {
   if (!src) return null;
   const mediaStyle = { width: '100%', height: '100%', objectFit: 'cover' as const, ...style };
   return assetType === 'video'
-    ? <OffthreadVideo src={src} style={mediaStyle} />
+    ? <OffthreadVideo src={src} startFrom={startFrom} style={mediaStyle} />
     : <Img src={src} style={mediaStyle} />;
 }
+```
+
+Usage inside your transition component:
+
+```tsx
+<MediaLayer src={fromSrc} assetType={fromAssetType} startFrom={fromStartFrom} />
+<MediaLayer src={toSrc} assetType={toAssetType} startFrom={toStartFrom} />
 ```
 
 ## Allowed Imports
@@ -223,11 +237,12 @@ interface TransitionMeta { name: string; description?: string; }
 interface CustomTransitionProps {
   fromSrc?: string; toSrc?: string;
   fromAssetType?: 'video' | 'image'; toAssetType?: 'video' | 'image';
+  fromStartFrom?: number; toStartFrom?: number;
   params: Record<string, number | string | boolean>;
 }
 
 const DirectionalWipe: React.FC<CustomTransitionProps> = ({
-  fromSrc, toSrc, fromAssetType, toAssetType, params,
+  fromSrc, toSrc, fromAssetType, toAssetType, fromStartFrom, toStartFrom, params,
 }) => {
   const frame = useCurrentFrame();
   const { width, height, durationInFrames } = useVideoConfig();
@@ -258,21 +273,21 @@ const DirectionalWipe: React.FC<CustomTransitionProps> = ({
       break;
   }
 
-  const renderMedia = (src?: string, assetType?: string, style?: React.CSSProperties) => {
+  const renderMedia = (src?: string, assetType?: string, startFrom?: number, style?: React.CSSProperties) => {
     if (!src) return <AbsoluteFill style={{ backgroundColor: '#000' }} />;
     const mediaStyle = { width: '100%', height: '100%', objectFit: 'cover' as const, ...style };
     return assetType === 'video'
-      ? <OffthreadVideo src={src} style={mediaStyle} />
+      ? <OffthreadVideo src={src} startFrom={startFrom} style={mediaStyle} />
       : <Img src={src} style={mediaStyle} />;
   };
 
   return (
     <AbsoluteFill>
       {/* FROM clip (underneath) */}
-      <AbsoluteFill>{renderMedia(fromSrc, fromAssetType)}</AbsoluteFill>
+      <AbsoluteFill>{renderMedia(fromSrc, fromAssetType, fromStartFrom)}</AbsoluteFill>
       {/* TO clip (wiping in) */}
       <AbsoluteFill style={{ clipPath }}>
-        {renderMedia(toSrc, toAssetType)}
+        {renderMedia(toSrc, toAssetType, toStartFrom)}
       </AbsoluteFill>
     </AbsoluteFill>
   );

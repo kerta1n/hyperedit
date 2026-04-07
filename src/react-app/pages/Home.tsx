@@ -598,6 +598,19 @@ export default function Home() {
     return data;
   }, [session, fetchAvailableTransitions]);
 
+  // Delete a custom transition
+  const handleDeleteTransition = useCallback(async (transitionId: string) => {
+    if (!session) throw new Error('No session');
+    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/delete-transition`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transitionId }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Delete failed');
+    await fetchAvailableTransitions();
+  }, [session, fetchAvailableTransitions]);
+
   // Generate a custom transition with AI
   const handleGenerateTransition = useCallback(async (description: string) => {
     if (!session) throw new Error('No session');
@@ -2184,6 +2197,7 @@ export default function Home() {
                   selectedClipId={selectedClipId}
                   selectedClipIds={selectedClipIds}
                   onUploadTransition={handleUploadTransition}
+                  onDeleteTransition={handleDeleteTransition}
                   onGenerateTransition={handleGenerateTransition}
                   onApplyTransition={handleApplyTransition}
                   availableTransitions={availableTransitions}

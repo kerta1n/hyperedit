@@ -208,6 +208,7 @@ interface AIPromptPanelProps {
   selectedClipIds?: string[];
   // Transitions
   onUploadTransition?: (file: File) => Promise<{ transitionId: string; name: string }>;
+  onDeleteTransition?: (transitionId: string) => Promise<void>;
   onGenerateTransition?: (description: string) => Promise<{ transitionId: string; name: string; code: string }>;
   onApplyTransition?: (fromClipId: string, toClipId: string, type: string, durationSec: number, customTransitionId?: string) => void;
   availableTransitions?: { builtIn: string[]; custom: { id: string; name: string }[] };
@@ -246,6 +247,7 @@ export default function AIPromptPanel({
   selectedClipId,
   selectedClipIds = [],
   onUploadTransition,
+  onDeleteTransition,
   onGenerateTransition,
   onApplyTransition,
   availableTransitions,
@@ -2911,18 +2913,29 @@ export default function AIPromptPanel({
                   </button>
                 ))}
                 {(availableTransitions?.custom || []).map(ct => (
-                  <button
-                    key={ct.id}
-                    type="button"
-                    onClick={() => { setSelectedTransitionType('custom'); setSelectedCustomTransitionId(ct.id); }}
-                    className={`px-2 py-1 rounded text-xs transition-colors ${
-                      selectedCustomTransitionId === ct.id
-                        ? 'bg-purple-500/30 text-purple-200 ring-1 ring-purple-500/50'
-                        : 'bg-indigo-700/30 text-indigo-300 hover:bg-indigo-700/50'
-                    }`}
-                  >
-                    {ct.name}
-                  </button>
+                  <div key={ct.id} className="relative group/ct">
+                    <button
+                      type="button"
+                      onClick={() => { setSelectedTransitionType('custom'); setSelectedCustomTransitionId(ct.id); }}
+                      className={`px-2 py-1 rounded text-xs transition-colors ${
+                        selectedCustomTransitionId === ct.id
+                          ? 'bg-purple-500/30 text-purple-200 ring-1 ring-purple-500/50'
+                          : 'bg-indigo-700/30 text-indigo-300 hover:bg-indigo-700/50'
+                      }`}
+                    >
+                      {ct.name}
+                    </button>
+                    {onDeleteTransition && (
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); onDeleteTransition(ct.id); }}
+                        className="absolute -top-1 -right-1 w-3.5 h-3.5 bg-red-500 rounded-full flex items-center justify-center opacity-0 group-hover/ct:opacity-100 transition-opacity text-white z-10"
+                        title="Delete transition"
+                      >
+                        <span className="text-[8px] font-bold">&times;</span>
+                      </button>
+                    )}
+                  </div>
                 ))}
               </div>
             </div>
@@ -2954,6 +2967,7 @@ export default function AIPromptPanel({
               >
                 Upload .tsx transition file
               </button>
+              <p className="text-[9px] text-zinc-600 text-center mt-1">Page will reload after uploading</p>
             </div>
 
             {/* Generate with AI */}

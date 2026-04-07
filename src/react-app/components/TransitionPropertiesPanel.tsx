@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { X } from 'lucide-react';
 import type { TimelineTransition, TimelineClip } from '@/react-app/hooks/useProject';
 import { getTransitionParams, getTransitionMeta, getRegisteredTransitions } from '@/remotion/transitions/registry';
@@ -21,6 +21,7 @@ export default function TransitionPropertiesPanel({
   const meta = getTransitionMeta(transition.transitionFileId);
   const paramSchema = getTransitionParams(transition.transitionFileId);
   const allTransitions = useMemo(() => getRegisteredTransitions(), []);
+  const [freeForm, setFreeForm] = useState(transition.durationSec > 5);
 
   // fromClip/toClip used for display only in the selectors below
 
@@ -70,18 +71,44 @@ export default function TransitionPropertiesPanel({
 
       {/* Duration */}
       <div>
-        <label className="text-[10px] text-zinc-500 block mb-1">
-          Duration: {transition.durationSec.toFixed(2)}s
-        </label>
-        <input
-          type="range"
-          min={0.1}
-          max={5}
-          step={0.05}
-          value={transition.durationSec}
-          onChange={(e) => onUpdate(transition.id, { durationSec: parseFloat(e.target.value) })}
-          className="w-full h-1 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
-        />
+        <div className="flex items-center justify-between mb-1">
+          <label className="text-[10px] text-zinc-500">
+            Duration: {transition.durationSec.toFixed(2)}s
+          </label>
+          <button
+            onClick={() => setFreeForm(f => !f)}
+            className={`text-[9px] px-1.5 py-0.5 rounded border transition-colors ${
+              freeForm
+                ? 'bg-purple-500/20 border-purple-500/50 text-purple-300'
+                : 'bg-zinc-800 border-zinc-700 text-zinc-500 hover:text-zinc-300'
+            }`}
+          >
+            Free-form
+          </button>
+        </div>
+        {freeForm ? (
+          <input
+            type="number"
+            min={0.1}
+            step={0.1}
+            value={transition.durationSec}
+            onChange={(e) => {
+              const v = parseFloat(e.target.value);
+              if (!isNaN(v) && v >= 0.1) onUpdate(transition.id, { durationSec: v });
+            }}
+            className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-300 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+          />
+        ) : (
+          <input
+            type="range"
+            min={0.1}
+            max={5}
+            step={0.05}
+            value={Math.min(transition.durationSec, 5)}
+            onChange={(e) => onUpdate(transition.id, { durationSec: parseFloat(e.target.value) })}
+            className="w-full h-1 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+          />
+        )}
       </div>
 
       {/* Easing */}
