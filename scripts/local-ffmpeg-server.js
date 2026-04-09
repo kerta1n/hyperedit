@@ -8020,7 +8020,8 @@ async function handleUploadTransition(req, res, sessionId) {
 
 async function handleDeleteTransition(req, res, sessionId) {
   try {
-    const body = await readBody(req);
+    let body = '';
+    for await (const chunk of req) body += chunk;
     const data = JSON.parse(body);
     const transitionId = data.transitionId;
 
