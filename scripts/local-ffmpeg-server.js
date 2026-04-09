@@ -182,6 +182,14 @@ const TEMP_DIR = process.env.HYPEREDIT_TEMP_DIR
   : join(tmpdir(), 'hyperedit-ffmpeg');
 const SESSIONS_DIR = process.env.HYPEREDIT_SESSIONS_DIR || join(TEMP_DIR, 'sessions');
 
+// Force Node's internal os.tmpdir() to respect our explicit temp drive,
+// preventing libraries like Formidable or Remotion from leaking default OS temp files.
+if (process.env.HYPEREDIT_TEMP_DIR) {
+  process.env.TMPDIR = TEMP_DIR;
+  process.env.TEMP = TEMP_DIR;
+  process.env.TMP = TEMP_DIR;
+}
+
 // Active video sessions - keeps videos on disk between edits
 const sessions = new Map();
 
@@ -192,6 +200,29 @@ if (!existsSync(TEMP_DIR)) {
 if (!existsSync(SESSIONS_DIR)) {
   mkdirSync(SESSIONS_DIR, { recursive: true });
 }
+
+// Clean up stale 0kb temp files that Formidable or ffmpeg might leave behind
+function cleanupStaleTempFiles() {
+  try {
+    const files = readdirSync(TEMP_DIR);
+    let count = 0;
+    const now = Date.now();
+    for (const file of files) {
+      if (file === 'sessions' || file === 'webaudio') continue;
+      const fullPath = join(TEMP_DIR, file);
+      const stats = statSync(fullPath);
+      // Delete files that are 0KB or older than 12 hours
+      if (stats.isFile() && (stats.size === 0 || now - stats.mtimeMs > 12 * 60 * 60 * 1000)) {
+        unlinkSync(fullPath);
+        count++;
+      }
+    }
+    if (count > 0) console.log(`[Cleanup] Removed ${count} stale temp files from ${TEMP_DIR}`);
+  } catch (err) {
+    console.warn('[Cleanup] Error cleaning TEMP_DIR:', err.message);
+  }
+}
+cleanupStaleTempFiles();
 
 // Restore sessions from disk on server start
 function restoreSessionsFromDisk() {
@@ -1442,25 +1473,6 @@ async function handleSessionRemoveDeadAir(req, res, sessionId) {
 
     console.log(`\n[${jobId}] Dead air removal complete`);
 
-    // Verify output has audio before replacing original
-    const probeResult = execSync(
-      `ffprobe -v error -show_entries stream=codec_type -of csv=p=0 "${outputPath}"`,
-      { encoding: 'utf-8' }
-    );
-    const streams = probeResult.trim().split('\n');
-    console.log(`\n🔍 [${jobId}] OUTPUT FILE PROBE:`);
-    console.log(`🔍 [${jobId}]   Streams: ${streams.join(', ')}`);
-    console.log(`🔍 [${jobId}]   Has video: ${streams.includes('video')}`);
-    console.log(`🔍 [${jobId}]   Has audio: ${streams.includes('audio')}`);
-    console.log(`🔍 [${jobId}]   Output path: ${outputPath}`);
-
-    // Also probe the ORIGINAL file for comparison
-    const origProbe = execSync(
-      `ffprobe -v error -show_entries stream=codec_type -of csv=p=0 "${videoAsset.path}"`,
-      { encoding: 'utf-8' }
-    );
-    console.log(`🔍 [${jobId}]   Original streams: ${origProbe.trim().split('\n').join(', ')}`);
-
     // Cleanup segments
     segmentPaths.forEach(p => { try { unlinkSync(p); } catch { } });
     try { unlinkSync(concatListPath); } catch { }
@@ -1469,10 +1481,6 @@ async function handleSessionRemoveDeadAir(req, res, sessionId) {
     const { rename, stat } = await import('fs/promises');
     unlinkSync(videoAsset.path);
     await rename(outputPath, videoAsset.path);
-
-    // Cleanup segments
-    segmentPaths.forEach(p => { try { unlinkSync(p); } catch { } });
-    try { unlinkSync(concatListPath); } catch { }
 
     const newStats = await stat(videoAsset.path);
 
@@ -1497,6 +1505,7 @@ async function handleSessionRemoveDeadAir(req, res, sessionId) {
   } catch (error) {
     console.error(`[${jobId}] Error:`, error.message);
     segmentPaths.forEach(p => { try { unlinkSync(p); } catch { } });
+    try { unlinkSync(concatListPath); } catch { }
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: error.message }));
   }
@@ -7963,7 +7972,7 @@ async function handleUploadTransition(req, res, sessionId) {
     let code, name;
     const contentType = req.headers['content-type'] || '';
     if (contentType.includes('multipart/form-data')) {
-      const form = formidable({ maxFileSize: 1 * 1024 * 1024, keepExtensions: true });
+      const form = formidable({ maxFileSize: 1 * 1024 * 1024, keepExtensions: true, uploadDir: TEMP_DIR });
       const [fields, files] = await form.parse(req);
       const uploadedFile = files.file?.[0];
       if (!uploadedFile) {
@@ -7972,6 +7981,7 @@ async function handleUploadTransition(req, res, sessionId) {
         return;
       }
       code = readFileSync(uploadedFile.filepath, 'utf-8');
+      try { unlinkSync(uploadedFile.filepath); } catch { /* ignore cleanup errors */ }
       name = fields.name?.[0] || uploadedFile.originalFilename?.replace(/\.tsx$/, '') || 'custom-transition';
     } else {
       const body = await parseBody(req);

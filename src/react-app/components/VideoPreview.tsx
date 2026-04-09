@@ -165,7 +165,6 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     if (!video) return;
 
     if (isPlaying) {
-      console.log('[VideoPreview] Playing base video:', { src: video.src?.slice(-60), muted: video.muted, volume: video.volume, readyState: video.readyState, networkState: video.networkState });
       video.play().catch((err) => {
         console.error('[VideoPreview] Play failed:', err.name, err.message);
       });
@@ -270,6 +269,12 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     ? 'h-[65vh] w-auto aspect-[9/16]'  // Vertical: fixed height, width from aspect ratio
     : 'w-full max-w-4xl aspect-video';  // Horizontal: constrain width, height follows
 
+  // Separate base video from overlay layers to prevent re-render issues
+  const overlayLayers = useMemo(() =>
+    sortedLayers.filter(l => !(l.trackId === 'V1' && l.type === 'video')),
+    [sortedLayers]
+  );
+
   if (layers.length === 0) {
     return (
       <div className={`relative ${containerClass} bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 flex items-center justify-center`}>
@@ -280,12 +285,6 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
       </div>
     );
   }
-
-  // Separate base video from overlay layers to prevent re-render issues
-  const overlayLayers = useMemo(() =>
-    sortedLayers.filter(l => !(l.trackId === 'V1' && l.type === 'video')),
-    [sortedLayers]
-  );
 
   return (
     <div

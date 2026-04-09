@@ -195,19 +195,6 @@ export function useProject() {
   ]);
   const [activeTabId, setActiveTabId] = useState('main');
 
-  // DEBUG: Track when activeTabId changes
-  const prevActiveTabIdRef = useRef(activeTabId);
-  useEffect(() => {
-    if (prevActiveTabIdRef.current !== activeTabId) {
-      console.log('=================================================');
-      console.log('[useProject] ⚠️ activeTabId CHANGED!');
-      console.log(`  FROM: "${prevActiveTabIdRef.current}" TO: "${activeTabId}"`);
-      console.log('=================================================');
-      console.trace('[useProject] Stack trace for activeTabId change:');
-      prevActiveTabIdRef.current = activeTabId;
-    }
-  }, [activeTabId]);
-
   const [settings, setSettings] = useState<ProjectSettings>({
     width: 1920,
     height: 1080,
@@ -620,25 +607,18 @@ export function useProject() {
 
   // Switch to a different timeline tab
   const switchTimelineTab = useCallback((tabId: string): void => {
-    console.log('[switchTimelineTab] Switching to tab:', tabId);
-    console.trace('[switchTimelineTab] Call stack:');
     setActiveTabId(tabId);
   }, []);
 
   // Close a timeline tab (cannot close main)
   const closeTimelineTab = useCallback((tabId: string): void => {
-    console.log('[closeTimelineTab] Attempting to close tab:', tabId);
-    console.trace('[closeTimelineTab] Call stack:');
     if (tabId === 'main') return; // Cannot close main tab
 
     setTimelineTabs(prev => prev.filter(tab => tab.id !== tabId));
 
     // If closing the active tab, switch to main
     setActiveTabId(currentId => {
-      if (currentId === tabId) {
-        console.log('[closeTimelineTab] Active tab is being closed, switching to main');
-        return 'main';
-      }
+      if (currentId === tabId) return 'main';
       return currentId;
     });
   }, []);
@@ -653,53 +633,27 @@ export function useProject() {
   // Update a tab's animation asset (used when editing an animation - now in-place)
   // This updates the V1 clip duration (asset ID stays the same for in-place edits)
   const updateTabAsset = useCallback((tabId: string, newAssetId: string, newDuration: number): void => {
-    console.log('[updateTabAsset] Called with:', { tabId, newAssetId, newDuration });
+    setTimelineTabs(prev => prev.map(tab => {
+      if (tab.id !== tabId) return tab;
 
-    setTimelineTabs(prev => {
-      const updatedTabs = prev.map(tab => {
-        if (tab.id !== tabId) return tab;
-
-        console.log('[updateTabAsset] Found tab to update:', {
-          tabId: tab.id,
-          currentAssetId: tab.assetId,
-          newAssetId,
-          isSameAsset: tab.assetId === newAssetId,
-        });
-
-        // Update the V1 clip to point to the new asset
-        const updatedClips = tab.clips.map(clip => {
-          if (clip.trackId === 'V1') {
-            console.log('[updateTabAsset] Updating V1 clip:', {
-              oldAssetId: clip.assetId,
-              newAssetId,
-              oldDuration: clip.duration,
-              newDuration,
-            });
-            return {
-              ...clip,
-              assetId: newAssetId,
-              duration: newDuration,
-              outPoint: newDuration,
-            };
-          }
-          return clip;
-        });
-
-        return {
-          ...tab,
-          assetId: newAssetId,
-          clips: updatedClips,
-        };
+      const updatedClips = tab.clips.map(clip => {
+        if (clip.trackId === 'V1') {
+          return {
+            ...clip,
+            assetId: newAssetId,
+            duration: newDuration,
+            outPoint: newDuration,
+          };
+        }
+        return clip;
       });
 
-      console.log('[updateTabAsset] Updated tabs:', updatedTabs.map(t => ({
-        id: t.id,
-        assetId: t.assetId,
-        clipCount: t.clips.length,
-      })));
-
-      return updatedTabs;
-    });
+      return {
+        ...tab,
+        assetId: newAssetId,
+        clips: updatedClips,
+      };
+    }));
   }, []);
 
   // Get the active timeline tab
