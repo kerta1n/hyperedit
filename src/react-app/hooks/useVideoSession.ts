@@ -57,7 +57,7 @@ export function useVideoSession() {
       if (session?.sessionId) {
         try {
           await fetch(`${LOCAL_FFMPEG_URL}/session/${session.sessionId}`, { method: 'DELETE' });
-        } catch {}
+        } catch { /* explicitly ignore */ }
       }
 
       uploadAbortRef.current = new AbortController();
@@ -291,7 +291,7 @@ export function useVideoSession() {
     if (session?.sessionId) {
       try {
         await fetch(`${LOCAL_FFMPEG_URL}/session/${session.sessionId}`, { method: 'DELETE' });
-      } catch {}
+      } catch { /* explicitly ignore */ }
     }
     setSession(null);
   }, [session]);

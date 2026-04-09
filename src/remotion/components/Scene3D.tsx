@@ -2,7 +2,7 @@ import React, { useRef, useMemo } from 'react';
 import { ThreeCanvas } from '@remotion/three';
 import { useCurrentFrame, useVideoConfig, interpolate, spring } from 'remotion';
 import { useFrame } from '@react-three/fiber';
-import { Text, Center, Float, RoundedBox } from '@react-three/drei';
+import { Text, Float, RoundedBox } from '@react-three/drei';
 import * as THREE from 'three';
 
 // 3D Scene configuration
@@ -242,8 +242,6 @@ const ProductShowcase: React.FC<{ color: string; secondaryColor: string }> = ({ 
 
 // Main 3D Scene content
 const Scene3DContent: React.FC<{ config: Scene3DConfig }> = ({ config }) => {
-  const frame = useCurrentFrame();
-  const { fps, durationInFrames } = useVideoConfig();
 
   const {
     style,

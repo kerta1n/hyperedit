@@ -778,7 +778,6 @@ import { getTransitionMeta } from '@/remotion/transitions/registry';
 function TransitionEntity({
   transition,
   clips: allClips,
-  tracks: _tracks,
   trackHeight,
   pixelsPerSecond,
   isSelected,

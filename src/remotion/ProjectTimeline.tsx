@@ -3,7 +3,6 @@ import {
   AbsoluteFill,
   Audio,
   Img,
-  interpolate,
   OffthreadVideo,
   Sequence,
   spring,

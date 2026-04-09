@@ -2838,8 +2838,6 @@ const AnimatedGifItem: React.FC<{ gifConfig: GifConfig; index: number }> = ({ gi
 
 // GIF Scene - displays animated GIFs
 const GifScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
-  const frame = useCurrentFrame();
-  const { fps, width, height } = useVideoConfig();
   const gifs = content.gifs || [];
   const layout = content.gifLayout || 'custom';
   const accentColor = content.color || '#f97316';
@@ -2997,7 +2995,7 @@ const GifScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
 // Lottie animation item
 const LottieItem: React.FC<{ lottieConfig: LottieConfig; index: number }> = ({ lottieConfig, index }) => {
   const frame = useCurrentFrame();
-  const { fps, durationInFrames } = useVideoConfig();
+  const { fps } = useVideoConfig();
   const delay = lottieConfig.delay || index * 5;
 
   const [animationData, setAnimationData] = useState<LottieAnimationData | null>(null);
@@ -3066,8 +3064,6 @@ const LottieItem: React.FC<{ lottieConfig: LottieConfig; index: number }> = ({ l
 
 // Lottie Scene - displays Lottie/After Effects animations
 const LottieScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
-  const frame = useCurrentFrame();
-  const { fps, width, height } = useVideoConfig();
   const lotties = content.lotties || [];
   const layout = content.lottieLayout || 'custom';
   const accentColor = content.color || '#f97316';

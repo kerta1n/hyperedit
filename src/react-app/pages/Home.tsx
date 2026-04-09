@@ -363,7 +363,7 @@ export default function Home() {
   }, [refreshAssets]);
 
   // Handle drag start from asset library
-  const handleAssetDragStart = useCallback((_asset: Asset) => {
+  const handleAssetDragStart = useCallback(() => {
     // Asset drag is handled by the browser's native drag-drop
   }, []);
 
@@ -862,7 +862,7 @@ export default function Home() {
     // Get current project state from server
     const projectResponse = await fetch(`http://localhost:3333/session/${session.sessionId}/project`);
     const projectData = await projectResponse.json();
-    let currentClips: TimelineClip[] = projectData.clips || [];
+    const currentClips: TimelineClip[] = projectData.clips || [];
 
     // Process all cuts by directly manipulating the clips array
     // This avoids React state batching issues

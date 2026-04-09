@@ -1057,7 +1057,7 @@ export function useProject() {
         await fetch(`${LOCAL_FFMPEG_URL}/session/${session.sessionId}`, {
           method: 'DELETE',
         });
-      } catch {}
+      } catch { /* explicitly ignore */ }
     }
     setSession(null);
     setAssets([]);

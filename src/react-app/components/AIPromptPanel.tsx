@@ -241,7 +241,6 @@ export default function AIPromptPanel({
   applyStatus,
   hasVideo,
   clips = [],
-  tracks: _tracks = [],
   assets = [],
   currentTime = 0,
   selectedClipId,

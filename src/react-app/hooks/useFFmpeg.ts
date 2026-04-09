@@ -281,7 +281,7 @@ export function useFFmpeg() {
 
       // Parse and execute the FFmpeg command
       // Replace input.mp4/output.mp4 placeholders with actual filenames
-      let args = ffmpegCommand
+      const args = ffmpegCommand
         .replace(/^ffmpeg\s+/, '') // Remove "ffmpeg" prefix
         .replace(/input\.[a-z0-9]+/gi, inputName)
         .replace(/output\.[a-z0-9]+/gi, outputName);
