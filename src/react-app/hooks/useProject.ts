@@ -172,6 +172,27 @@ function loadSessionFromStorage(): SessionInfo | null {
   return null;
 }
 
+// Default caption style
+export const defaultCaptionStyle: CaptionStyle = {
+  fontFamily: 'Inter',
+  fontSize: 52,
+  fontWeight: 'bold',
+  color: '#FFFFFF',
+  textOpacity: 100,
+  backgroundColor: 'rgba(0,0,0,0.45)',
+  backgroundEnabled: true,
+  backgroundPadding: 100,
+  backgroundRadius: 10,
+  backgroundOpacity: 45,
+  strokeColor: '#000000',
+  strokeWidth: 4,
+  position: 'bottom',
+  positionX: 0,
+  positionY: 0,
+  animation: 'fade',
+  highlightColor: '#FFD700',
+};
+
 export function useProject() {
   // Initialize session from localStorage if available
   const [session, setSessionInternal] = useState<SessionInfo | null>(loadSessionFromStorage);
@@ -282,6 +303,7 @@ export function useProject() {
     };
 
     validateSession();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // Only run once on mount
 
   // Create a new session
@@ -359,6 +381,7 @@ export function useProject() {
     } finally {
       setLoading(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
 
   // Delete asset
@@ -661,26 +684,7 @@ export function useProject() {
     return timelineTabs.find(tab => tab.id === activeTabId);
   }, [timelineTabs, activeTabId]);
 
-  // Default caption style
-  const defaultCaptionStyle: CaptionStyle = {
-    fontFamily: 'Inter',
-    fontSize: 52,
-    fontWeight: 'bold',
-    color: '#FFFFFF',
-    textOpacity: 100,
-    backgroundColor: 'rgba(0,0,0,0.45)',
-    backgroundEnabled: true,
-    backgroundPadding: 100,
-    backgroundRadius: 10,
-    backgroundOpacity: 45,
-    strokeColor: '#000000',
-    strokeWidth: 4,
-    position: 'bottom',
-    positionX: 0,
-    positionY: 0,
-    animation: 'fade',
-    highlightColor: '#FFD700',
-  };
+  // addCaptionClip logic below
 
   // Add caption clip to timeline
   const addCaptionClip = useCallback((
@@ -1063,6 +1067,7 @@ export function useProject() {
     setAssets([]);
     setClips([]);
     setTransitions([]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
 
   // Auto-save when clips change

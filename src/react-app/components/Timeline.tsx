@@ -874,7 +874,7 @@ function TransitionEntity({
 
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
-  }, [onUpdate, pixelsPerSecond, transition.durationSec]);
+  }, [onUpdate, pixelsPerSecond, transition.durationSec, transition.startTime]);
 
   return (
     <div

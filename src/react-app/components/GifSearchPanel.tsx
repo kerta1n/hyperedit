@@ -37,7 +37,7 @@ export default function GifSearchPanel({ sessionId, onClose, onGifAdded }: GifSe
   // Load trending GIFs on mount
   useEffect(() => {
     loadTrending();
-  }, [sessionId]);
+  }, [sessionId, loadTrending]);
 
   const loadTrending = useCallback(async () => {
     setLoading(true);

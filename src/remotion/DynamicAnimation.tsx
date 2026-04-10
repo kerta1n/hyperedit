@@ -1201,7 +1201,7 @@ const extractNumericFromString = (valueStr: string): { numericValue: number; pre
 const StatsScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
   const frame = useCurrentFrame();
   const { fps, durationInFrames } = useVideoConfig();
-  const stats = content.stats || [];
+  const stats = useMemo(() => content.stats || [], [content.stats]);
   const accentColor = content.color || '#f97316';
   const colors = [accentColor, '#3b82f6', '#22c55e', '#8b5cf6', '#ec4899'];
   const isShort = durationInFrames < 90;
@@ -2394,7 +2394,7 @@ const AnimatedShape: React.FC<{
 const ShapesScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
   const frame = useCurrentFrame();
   const { fps, durationInFrames } = useVideoConfig();
-  const shapes = content.shapes || [];
+  const shapes = useMemo(() => content.shapes || [], [content.shapes]);
   const layout = content.shapesLayout || 'custom';
   const accentColor = content.color || '#f97316';
 
@@ -2622,7 +2622,7 @@ const AnimatedEmojiItem: React.FC<{
 const EmojiScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
-  const emojis = content.emojis || [];
+  const emojis = useMemo(() => content.emojis || [], [content.emojis]);
   const layout = content.emojiLayout || 'custom';
   const accentColor = content.color || '#f97316';
 
@@ -2838,7 +2838,7 @@ const AnimatedGifItem: React.FC<{ gifConfig: GifConfig; index: number }> = ({ gi
 
 // GIF Scene - displays animated GIFs
 const GifScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
-  const gifs = content.gifs || [];
+  const gifs = useMemo(() => content.gifs || [], [content.gifs]);
   const layout = content.gifLayout || 'custom';
   const accentColor = content.color || '#f97316';
   const backgroundGif = content.gifBackground;
@@ -3065,7 +3065,7 @@ const LottieItem: React.FC<{ lottieConfig: LottieConfig; index: number }> = ({ l
 
 // Lottie Scene - displays Lottie/After Effects animations
 const LottieScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
-  const lotties = content.lotties || [];
+  const lotties = useMemo(() => content.lotties || [], [content.lotties]);
   const layout = content.lottieLayout || 'custom';
   const accentColor = content.color || '#f97316';
   const backgroundLottie = content.lottieBackground;

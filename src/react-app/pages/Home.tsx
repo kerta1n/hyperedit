@@ -439,7 +439,7 @@ export default function Home() {
       // Cross-track transitions are now valid in v2 — no need to remove transitions on track change
       moveClip(clipId, newStart, newTrackId);
     }
-  }, [moveClip, activeTabId, timelineTabs, updateTabClips, clips]);
+  }, [moveClip, activeTabId, timelineTabs, updateTabClips]);
 
   // Handle resizing clip
   const handleResizeClip = useCallback((clipId: string, newInPoint: number, newOutPoint: number, newStart?: number) => {

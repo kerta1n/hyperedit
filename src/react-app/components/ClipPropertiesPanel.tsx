@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useMemo } from 'react';
 import { Move, RotateCw, Crop, X } from 'lucide-react';
 import type { TimelineClip, Asset } from '@/react-app/hooks/useProject';
 
@@ -27,7 +27,7 @@ export default function ClipPropertiesPanel({
   onUpdateTransform,
   onClose,
 }: ClipPropertiesPanelProps) {
-  const transform = clip?.transform || {};
+  const transform = useMemo(() => clip?.transform || {}, [clip?.transform]);
 
   const handleScaleChange = useCallback((value: number) => {
     if (!clip) return;
