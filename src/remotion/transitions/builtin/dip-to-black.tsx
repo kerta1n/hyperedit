@@ -41,8 +41,10 @@ const DipToBlack: React.FC<CustomTransitionProps> = ({ fromSrc, toSrc, fromAsset
   );
 };
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const params: TransitionParamSchema = {};
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const meta: TransitionMeta = {
   name: 'Dip to Black',
   description: 'From clip fades to black, then to clip fades in from black',

@@ -34,8 +34,10 @@ const SlideRight: React.FC<CustomTransitionProps> = ({ fromSrc, toSrc, fromAsset
   );
 };
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const params: TransitionParamSchema = {};
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const meta: TransitionMeta = {
   name: 'Slide Right',
   description: 'From clip slides out to the right, to clip slides in from the left',

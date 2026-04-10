@@ -31,8 +31,10 @@ const Crossfade: React.FC<CustomTransitionProps> = ({ fromSrc, toSrc, fromAssetT
   );
 };
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const params: TransitionParamSchema = {};
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const meta: TransitionMeta = {
   name: 'Crossfade',
   description: 'Simple opacity crossfade between two clips',

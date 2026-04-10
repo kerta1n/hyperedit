@@ -2875,11 +2875,12 @@ const GifScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
             y = 50 + Math.sin(angle) * radius;
             break;
           }
-          case 'row':
+          case 'row': {
             const spacing = 70 / gifs.length;
             x = 15 + spacing / 2 + index * spacing;
             y = 50;
             break;
+          }
         }
       }
 
@@ -3113,11 +3114,12 @@ const LottieScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
             y = 50 + Math.sin(angle) * radius;
             break;
           }
-          case 'row':
+          case 'row': {
             const spacing = 70 / lotties.length;
             x = 15 + spacing / 2 + index * spacing;
             y = 50;
             break;
+          }
         }
       }
 

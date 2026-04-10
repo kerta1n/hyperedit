@@ -109,10 +109,11 @@ const AnimatedShape: React.FC<{
       case 'float':
         meshRef.current.position.y = position[1] + Math.sin(t * 2) * 0.3;
         break;
-      case 'pulse':
+      case 'pulse': {
         const pulseScale = 1 + Math.sin(t * 3) * 0.1;
         meshRef.current.scale.setScalar(scale * Math.max(0, entryProgress) * pulseScale);
         return; // Don't apply default scale
+      }
       case 'bounce':
         meshRef.current.position.y = position[1] + Math.abs(Math.sin(t * 3)) * 0.5;
         break;
