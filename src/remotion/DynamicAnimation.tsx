@@ -2295,11 +2295,12 @@ const AnimatedShape: React.FC<{
       translateY = Math.sin((frame - delay) * 0.08) * 15;
       opacity = interpolate(entryProgress, [0, 0.3], [0, 1], { extrapolateRight: 'clamp' });
       break;
-    case 'pulse':
+    case 'pulse': {
       const pulseScale = 1 + Math.sin((frame - delay) * 0.1) * 0.1;
       scale *= interpolate(entryProgress, [0, 1], [0, pulseScale]);
       opacity = entryProgress;
       break;
+    }
     case 'draw':
       // Draw animation uses stroke-dasharray (handled in shape rendering)
       scale *= interpolate(entryProgress, [0, 1], [0.9, 1]);
@@ -2547,11 +2548,12 @@ const AnimatedEmojiItem: React.FC<{
       translateY = Math.sin((frame - delay) * 0.08) * 15;
       opacity = interpolate(entryProgress, [0, 0.3], [0, 1], { extrapolateRight: 'clamp' });
       break;
-    case 'pulse':
+    case 'pulse': {
       const pulseAmount = 1 + Math.sin((frame - delay) * 0.15) * 0.15;
       scale *= interpolate(entryProgress, [0, 1], [0, pulseAmount]);
       opacity = entryProgress;
       break;
+    }
     case 'spin':
       scale *= interpolate(entryProgress, [0, 1], [0.5, 1]);
       rotation = interpolate(frame - delay, [0, 90], [0, 360], { extrapolateRight: 'extend' });
@@ -2608,7 +2610,7 @@ const AnimatedEmojiItem: React.FC<{
     >
       {useAnimatedEmoji && !isEmojiCharacter ? (
         <AnimatedEmoji
-          emoji={emojiConfig.emoji as any}
+          emoji={emojiConfig.emoji as string}
           scale={1}
         />
       ) : (
@@ -2658,11 +2660,12 @@ const EmojiScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
             y = 50 + Math.sin(angle) * radius;
             break;
           }
-          case 'row':
+          case 'row': {
             const spacing = 70 / emojis.length;
             x = 15 + spacing / 2 + index * spacing;
             y = 50;
             break;
+          }
         }
       }
 

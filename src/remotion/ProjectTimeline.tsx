@@ -130,7 +130,7 @@ const migrateLegacyTransitions = (
     if (!fromClip || !toClip) continue;
 
     const transitionFileId = t.type === 'custom'
-      ? ((t as any).customTransitionId || 'builtin-crossfade')
+      ? ((t as Record<string, unknown>).customTransitionId as string || 'builtin-crossfade')
       : (typeToFileId[t.type] || 'builtin-crossfade');
 
     // Compute startTime from clip overlap

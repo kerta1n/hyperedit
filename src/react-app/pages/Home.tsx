@@ -2135,9 +2135,11 @@ export default function Home() {
               onAddTransition={addLegacyTransition}
               onUpdateTransition={(id, updates) => {
                 // Legacy v1 update - keep Timeline working until Phase 5
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 setTransitions((prev: any[]) => prev.map((t: any) => t.id === id ? { ...t, ...updates } : t));
               }}
               onRemoveTransition={(id) => {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 setTransitions((prev: any[]) => prev.filter((t: any) => t.id !== id));
               }}
               timelineTransitions={activeTabId === 'main' ? timelineTransitions : (timelineTabs.find(t => t.id === activeTabId)?.timelineTransitions || [])}

@@ -2,7 +2,7 @@ import type React from 'react';
 import type { TransitionParamSchema, TransitionMeta } from './types';
 
 export interface RegisteredTransition {
-  component: React.FC<any>;
+  component: React.FC<any> /* eslint-disable-line @typescript-eslint/no-explicit-any */;
   params: TransitionParamSchema;
   meta: TransitionMeta;
 }
@@ -11,14 +11,14 @@ const registry = new Map<string, RegisteredTransition>();
 
 export function registerTransition(
   id: string,
-  component: React.FC<any>,
+  component: React.FC<any> /* eslint-disable-line @typescript-eslint/no-explicit-any */,
   params: TransitionParamSchema = {},
   meta: TransitionMeta = { name: id },
 ): void {
   registry.set(id, { component, params, meta });
 }
 
-export function getTransition(id: string): React.FC<any> | undefined {
+export function getTransition(id: string): React.FC<any> /* eslint-disable-line @typescript-eslint/no-explicit-any */ | undefined {
   return registry.get(id)?.component;
 }
 

@@ -1189,7 +1189,7 @@ export default function AIPromptPanel({
   };
 
   // Poll for job completion
-  const pollForResult = async (jobId: string, maxAttempts = 60): Promise<any> => {
+  const pollForResult = async (jobId: string, maxAttempts = 60): Promise<Record<string, unknown>> => {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       setProcessingStatus(`AI is working... (${attempt + 1}s)`);
 
@@ -2951,7 +2951,7 @@ export default function AIPromptPanel({
                   if (file && onUploadTransition) {
                     try {
                       await onUploadTransition(file);
-                    } catch (err: any) {
+                    } catch (err: unknown) {
                       console.error('Upload transition error:', err);
                     }
                   }
@@ -2989,7 +2989,7 @@ export default function AIPromptPanel({
                     setSelectedTransitionType('custom');
                     setSelectedCustomTransitionId(result.transitionId);
                     setGenerateTransitionPrompt('');
-                  } catch (err: any) {
+                  } catch (err: unknown) {
                     console.error('Generate transition error:', err);
                   }
                   setIsGeneratingTransition(false);
