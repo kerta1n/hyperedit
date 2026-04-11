@@ -1,11 +1,11 @@
-import React, { useMemo, useEffect, useState, useCallback } from 'react';
-import { AbsoluteFill, useCurrentFrame, useVideoConfig, interpolate, spring, Sequence, Img, Video, OffthreadVideo, staticFile, continueRender, delayRender } from 'remotion';
+import React, { useMemo, useEffect, useState } from 'react';
+import { AbsoluteFill, useCurrentFrame, useVideoConfig, interpolate, spring, Sequence, Img, OffthreadVideo, continueRender, delayRender } from 'remotion';
 import { preloadVideo, preloadImage } from '@remotion/preload';
 import { Circle, Rect, Triangle, Star, Polygon, Ellipse } from '@remotion/shapes';
-import { AnimatedEmoji, getAvailableEmojis } from '@remotion/animated-emoji';
+import { AnimatedEmoji } from '@remotion/animated-emoji';
 import { Gif } from '@remotion/gif';
 import { Lottie, LottieAnimationData } from '@remotion/lottie';
-import { Scene3D, Scene3DConfig } from './components/Scene3D';
+import { Scene3D } from './components/Scene3D';
 
 // Shape definition for shapes scene
 export interface ShapeConfig {
@@ -203,7 +203,7 @@ const Particle: React.FC<{
   size: number;
   color: string;
   duration: number;
-}> = ({ delay, angle, distance, size, color, duration }) => {
+}> = ({ delay, angle, distance, size, color }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
@@ -413,7 +413,6 @@ const AnimatedNumber: React.FC<{
   duration?: number; // in frames
 }> = ({ value, prefix = '', suffix = '', fontSize = 108, color = '#f97316', delay = 0, duration = 60 }) => {
   const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
 
   // Debug logging (only on first few frames to avoid spam)
   if (frame <= 3) {
@@ -533,8 +532,8 @@ const TransitionWrapper: React.FC<{
   children: React.ReactNode;
   transitionType: Scene['transition']['type'];
   transitionDuration?: number;
-  isEntry?: boolean; // true = entering scene, false = exiting scene
-}> = ({ children, transitionType, transitionDuration = 15, isEntry = true }) => {
+  transitionDuration?: number;
+}> = ({ children, transitionType, transitionDuration = 15 }) => {
   const frame = useCurrentFrame();
   const { durationInFrames, fps, width, height } = useVideoConfig();
 
@@ -573,7 +572,7 @@ const TransitionWrapper: React.FC<{
     durationInFrames: transitionDuration,
   });
 
-  let style: React.CSSProperties = {
+  const style: React.CSSProperties = {
     width: '100%',
     height: '100%',
     position: 'absolute',
@@ -591,35 +590,39 @@ const TransitionWrapper: React.FC<{
       opacity = interpolate(entryProgress, [0, 1], [0, 1]) * interpolate(exitProgress, [0, 1], [1, 0]);
       break;
 
-    case 'swipe-left':
+    case 'swipe-left': {
       // Enter from right, exit to left
       const swipeLeftEntry = interpolate(easedEntry, [0, 1], [width, 0]);
       const swipeLeftExit = interpolate(easedExit, [0, 1], [0, -width]);
       transform = `translateX(${frame < exitStart ? swipeLeftEntry : swipeLeftExit}px)`;
       break;
+    }
 
-    case 'swipe-right':
+    case 'swipe-right': {
       // Enter from left, exit to right
       const swipeRightEntry = interpolate(easedEntry, [0, 1], [-width, 0]);
       const swipeRightExit = interpolate(easedExit, [0, 1], [0, width]);
       transform = `translateX(${frame < exitStart ? swipeRightEntry : swipeRightExit}px)`;
       break;
+    }
 
-    case 'swipe-up':
+    case 'swipe-up': {
       // Enter from bottom, exit to top
       const swipeUpEntry = interpolate(easedEntry, [0, 1], [height, 0]);
       const swipeUpExit = interpolate(easedExit, [0, 1], [0, -height]);
       transform = `translateY(${frame < exitStart ? swipeUpEntry : swipeUpExit}px)`;
       break;
+    }
 
-    case 'swipe-down':
+    case 'swipe-down': {
       // Enter from top, exit to bottom
       const swipeDownEntry = interpolate(easedEntry, [0, 1], [-height, 0]);
       const swipeDownExit = interpolate(easedExit, [0, 1], [0, height]);
       transform = `translateY(${frame < exitStart ? swipeDownEntry : swipeDownExit}px)`;
       break;
+    }
 
-    case 'zoom-in':
+    case 'zoom-in': {
       // Start small, grow to full, then shrink out
       const zoomInEntry = interpolate(easedEntry, [0, 1], [0.3, 1]);
       const zoomInExit = interpolate(easedExit, [0, 1], [1, 1.5]);
@@ -627,8 +630,9 @@ const TransitionWrapper: React.FC<{
       opacity = frame < exitStart ? entryProgress : (1 - exitProgress);
       transform = `scale(${zoomInScale})`;
       break;
+    }
 
-    case 'zoom-out':
+    case 'zoom-out': {
       // Start large, shrink to full, then zoom out smaller
       const zoomOutEntry = interpolate(easedEntry, [0, 1], [1.5, 1]);
       const zoomOutExit = interpolate(easedExit, [0, 1], [1, 0.3]);
@@ -636,8 +640,9 @@ const TransitionWrapper: React.FC<{
       opacity = frame < exitStart ? entryProgress : (1 - exitProgress);
       transform = `scale(${zoomOutScale})`;
       break;
+    }
 
-    case 'wipe-left':
+    case 'wipe-left': {
       // Reveal from right to left using clip-path
       const wipeLeftReveal = interpolate(entryProgress, [0, 1], [100, 0]);
       const wipeLeftHide = interpolate(exitProgress, [0, 1], [0, 100]);
@@ -645,8 +650,9 @@ const TransitionWrapper: React.FC<{
         ? `inset(0 ${wipeLeftReveal}% 0 0)`
         : `inset(0 0 0 ${wipeLeftHide}%)`;
       break;
+    }
 
-    case 'wipe-right':
+    case 'wipe-right': {
       // Reveal from left to right using clip-path
       const wipeRightReveal = interpolate(entryProgress, [0, 1], [100, 0]);
       const wipeRightHide = interpolate(exitProgress, [0, 1], [0, 100]);
@@ -654,8 +660,9 @@ const TransitionWrapper: React.FC<{
         ? `inset(0 0 0 ${wipeRightReveal}%)`
         : `inset(0 ${wipeRightHide}% 0 0)`;
       break;
+    }
 
-    case 'blur':
+    case 'blur': {
       // Blur in and out
       const blurEntry = interpolate(entryProgress, [0, 1], [20, 0]);
       const blurExit = interpolate(exitProgress, [0, 1], [0, 20]);
@@ -663,8 +670,9 @@ const TransitionWrapper: React.FC<{
       filter = `blur(${blurAmount}px)`;
       opacity = frame < exitStart ? entryProgress : (1 - exitProgress);
       break;
+    }
 
-    case 'flip':
+    case 'flip': {
       // 3D flip effect
       const flipEntry = interpolate(easedEntry, [0, 1], [-90, 0]);
       const flipExit = interpolate(easedExit, [0, 1], [0, 90]);
@@ -674,6 +682,7 @@ const TransitionWrapper: React.FC<{
         ? interpolate(entryProgress, [0, 0.5, 1], [0, 0, 1])
         : interpolate(exitProgress, [0, 0.5, 1], [1, 0, 0]);
       break;
+    }
 
     case 'none':
     default:
@@ -1406,13 +1415,11 @@ const TextScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
 // Enhanced Transition Scene
 const TransitionScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
   const frame = useCurrentFrame();
-  const { durationInFrames, fps } = useVideoConfig();
+  const { durationInFrames } = useVideoConfig();
   const accentColor = content.color || '#f97316';
 
-  const progress = interpolate(frame, [0, durationInFrames], [0, 1]);
-
   // Multiple expanding rings
-  const rings = [0, 10, 20].map((delay, i) => {
+  const rings = [0, 10, 20].map((delay) => {
     const ringProgress = interpolate(frame - delay, [0, durationInFrames - delay], [0, 1], {
       extrapolateLeft: 'clamp',
       extrapolateRight: 'clamp',
@@ -1461,7 +1468,7 @@ const MediaAnimationWrapper: React.FC<{
   intensity?: number;
 }> = ({ children, animationType = 'none', intensity = 0.3 }) => {
   const frame = useCurrentFrame();
-  const { durationInFrames, fps } = useVideoConfig();
+  const { durationInFrames } = useVideoConfig();
 
   const progress = interpolate(frame, [0, durationInFrames], [0, 1], { extrapolateRight: 'clamp' });
   const maxMove = intensity * 50;
@@ -1633,7 +1640,7 @@ const MediaTextOverlay: React.FC<{
 // Media Scene - displays images or videos with advanced features
 const MediaScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
   const frame = useCurrentFrame();
-  const { fps, durationInFrames, width, height } = useVideoConfig();
+  const { fps, durationInFrames } = useVideoConfig();
   const accentColor = content.color || '#f97316';
   const mediaStyle = content.mediaStyle || 'framed';
 
@@ -1987,7 +1994,6 @@ const MediaScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
 // Chart Scene - displays various chart types
 const ChartScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
   const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
   const accentColor = content.color || '#f97316';
   const chartType = content.chartType || 'bar';
   const chartData = content.chartData || content.items?.map(item => ({
@@ -2074,7 +2080,7 @@ const ChartScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
 // Comparison Scene - before/after or side-by-side comparison
 const ComparisonScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
   const frame = useCurrentFrame();
-  const { fps, durationInFrames, width } = useVideoConfig();
+  const { fps } = useVideoConfig();
   const accentColor = content.color || '#f97316';
 
   const revealProgress = spring({
@@ -2082,8 +2088,6 @@ const ComparisonScene: React.FC<{ content: Scene['content'] }> = ({ content }) =
     fps,
     config: { damping: 15, stiffness: 80 },
   });
-
-  const dividerPosition = interpolate(revealProgress, [0, 1], [0, 50]); // 0% to 50%
 
   return (
     <AbsoluteFill
@@ -2256,7 +2260,7 @@ const AnimatedShape: React.FC<{
   index: number;
 }> = ({ shape, index }) => {
   const frame = useCurrentFrame();
-  const { fps, durationInFrames } = useVideoConfig();
+  const { fps } = useVideoConfig();
 
   const delay = shape.delay ?? index * 8;
   const animation = shape.animation || 'pop';
@@ -2393,8 +2397,6 @@ const AnimatedShape: React.FC<{
 
 // Shapes Scene - displays animated SVG shapes
 const ShapesScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
-  const frame = useCurrentFrame();
-  const { fps, durationInFrames } = useVideoConfig();
   const shapes = useMemo(() => content.shapes || [], [content.shapes]);
   const layout = content.shapesLayout || 'custom';
   const accentColor = content.color || '#f97316';
@@ -2511,8 +2513,8 @@ const AnimatedEmojiItem: React.FC<{
   index: number;
 }> = ({ emojiConfig, index }) => {
   const frame = useCurrentFrame();
-  const { fps, durationInFrames } = useVideoConfig();
-  const [useAnimatedEmoji, setUseAnimatedEmoji] = useState(true);
+  const { fps } = useVideoConfig();
+  const [useAnimatedEmoji] = useState(true);
 
   const delay = emojiConfig.delay ?? index * 10;
   const animation = emojiConfig.animation || 'pop';
@@ -2622,8 +2624,6 @@ const AnimatedEmojiItem: React.FC<{
 
 // Emoji Scene - displays animated emojis
 const EmojiScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
-  const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
   const emojis = useMemo(() => content.emojis || [], [content.emojis]);
   const layout = content.emojiLayout || 'custom';
   const accentColor = content.color || '#f97316';
@@ -2742,7 +2742,7 @@ const EmojiScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
 // Animated GIF item with entrance animations
 const AnimatedGifItem: React.FC<{ gifConfig: GifConfig; index: number }> = ({ gifConfig, index }) => {
   const frame = useCurrentFrame();
-  const { fps, durationInFrames } = useVideoConfig();
+  const { fps } = useVideoConfig();
   const delay = gifConfig.delay || index * 5;
 
   const {
@@ -2809,7 +2809,6 @@ const AnimatedGifItem: React.FC<{ gifConfig: GifConfig; index: number }> = ({ gi
   }
 
   // Calculate which frame of the GIF to show based on playback rate
-  const gifFrame = Math.floor(frame * playbackRate);
 
   if (entranceProgress <= 0) return null;
 

@@ -3,7 +3,7 @@ import { cors } from "hono/cors";
 import { generateEditCommand } from "./llm";
 
 // In-memory store for pending requests (dev only)
-const pendingRequests = new Map<string, { status: string; result?: Record<string, unknown>; error?: string }>();
+const pendingRequests = new Map<string, { status: string; result?: any /* eslint-disable-line @typescript-eslint/no-explicit-any */; error?: string }>();
 
 const app = new Hono<{ Bindings: Env }>();
 
