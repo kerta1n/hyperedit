@@ -168,7 +168,7 @@ export default function TimelineClip({
         onClick(e);
       }}
       onMouseDown={handleMouseDown}
-      className={`absolute rounded-md bg-gradient-to-r ${colorClass} ${
+      className={`group absolute overflow-visible rounded-md bg-gradient-to-r ${colorClass} ${
         isDragging
           ? 'opacity-80 scale-105 shadow-xl shadow-black/50 z-30 cursor-grabbing ring-2 ring-orange-400'
           : isResizingLeft || isResizingRight
@@ -248,19 +248,19 @@ export default function TimelineClip({
         }}
       />
 
-      {/* Delete button (shown when selected) */}
-      {isSelected && (
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onDelete();
-          }}
-          className="absolute -top-2 -right-2 w-5 h-5 bg-red-500 hover:bg-red-600 rounded-full flex items-center justify-center shadow-lg transition-colors z-30"
-          title="Remove from timeline"
-        >
-          <X className="w-3 h-3 text-white" />
-        </button>
-      )}
+      {/* Delete button (shown on hover) */}
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete();
+        }}
+        className={`absolute -top-2 -right-2 w-5 h-5 bg-red-500 hover:bg-red-600 rounded-full flex items-center justify-center shadow-lg transition-all z-40 ${
+          isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+        }`}
+        title="Remove from timeline"
+      >
+        <X className="w-3 h-3 text-white" />
+      </button>
 
       {/* Duration indicator (shown when resizing) */}
       {(isResizingLeft || isResizingRight) && (

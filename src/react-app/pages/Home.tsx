@@ -5,6 +5,7 @@ import AssetLibrary from '@/react-app/components/AssetLibrary';
 import ClipPropertiesPanel from '@/react-app/components/ClipPropertiesPanel';
 import CaptionPropertiesPanel from '@/react-app/components/CaptionPropertiesPanel';
 import TransitionPropertiesPanel from '@/react-app/components/TransitionPropertiesPanel';
+import TrackPropertiesPanel from '@/react-app/components/TrackPropertiesPanel';
 import AIPromptPanel from '@/react-app/components/AIPromptPanel';
 import PicassoPanel from '@/react-app/components/PicassoPanel';
 import DiCaprioPanel from '@/react-app/components/DiCaprioPanel';
@@ -37,7 +38,8 @@ export default function Home() {
   const [copied, setCopied] = useState(false);
   const [previewAssetId, setPreviewAssetId] = useState<string | null>(null);
   const [aspectRatio, setAspectRatio] = useState<'16:9' | '9:16'>('16:9');
-  const [autoSnap, setAutoSnap] = useState(true); // Ripple delete mode - shift clips when deleting
+  const [selectedTrackId, setSelectedTrackId] = useState<string | null>(null);
+  const [trackAutoSnap, setTrackAutoSnap] = useState<Record<string, boolean>>({});
   const [activeAgent, setActiveAgent] = useState<'director' | 'picasso' | 'dicaprio'>('director');
   const [showGifSearch, setShowGifSearch] = useState(false);
 
@@ -68,6 +70,7 @@ export default function Home() {
     renderProject,
     getDuration,
     // Captions
+    addCaptionClip,
     addCaptionClipsBatch,
     updateCaptionStyle,
     getCaptionData,
@@ -479,7 +482,7 @@ export default function Home() {
     }
   }, [clips, updateClip, activeTabId, timelineTabs, updateTabClips]);
 
-  // Handle deleting clip from timeline (with autoSnap/ripple support)
+  // Handle deleting clip from timeline (with per-track auto-snap ripple)
   const handleDeleteClip = useCallback((clipId: string) => {
     // Check if we're on an edit tab
     if (activeTabId !== 'main') {
@@ -489,13 +492,15 @@ export default function Home() {
         updateTabClips(activeTabId, updatedClips);
       }
     } else {
-      deleteClip(clipId, autoSnap);
+      const clip = clips.find(c => c.id === clipId);
+      const ripple = clip ? (trackAutoSnap[clip.trackId] ?? false) : false;
+      deleteClip(clipId, ripple);
     }
 
     if (selectedClipId === clipId) {
       setSelectedClipId(null);
     }
-  }, [deleteClip, selectedClipId, autoSnap, activeTabId, timelineTabs, updateTabClips]);
+  }, [deleteClip, selectedClipId, trackAutoSnap, clips, activeTabId, timelineTabs, updateTabClips]);
 
   // Handle cutting clips at the playhead position
   const handleCutAtPlayhead = useCallback(() => {
@@ -516,12 +521,24 @@ export default function Home() {
     saveProject();
   }, [clips, currentTime, splitClip, saveProject]);
 
-  // Handle adding text overlay
+  // Handle adding text overlay at playhead
   const handleAddText = useCallback(() => {
-    // Create a text clip on T1 track at current playhead
-    // TODO: Open text editor modal or add default text
-    console.log('Add text overlay at', currentTime);
-  }, [currentTime]);
+    const clip = addCaptionClip(
+      [{ text: 'Text', start: 0, end: 5 }],
+      currentTime,
+      5,
+    );
+
+    // Tab awareness: also add to active tab's clips if not on main
+    if (activeTabId !== 'main') {
+      const activeTab = timelineTabs.find(tab => tab.id === activeTabId);
+      if (activeTab) {
+        updateTabClips(activeTabId, [...activeTab.clips, clip]);
+      }
+    }
+
+    saveProject();
+  }, [currentTime, addCaptionClip, activeTabId, timelineTabs, updateTabClips, saveProject]);
 
   // Handle toggling aspect ratio
   const handleToggleAspectRatio = useCallback(() => {
@@ -1132,11 +1149,18 @@ export default function Home() {
       throw new Error('Please upload a video first');
     }
 
-    // Call the transcribe endpoint
+    // Find the V1 clip for this asset to respect trim (inPoint/outPoint)
+    const v1Clip = activeClips.find(c => c.trackId === 'V1' && c.assetId === videoAsset.id);
+
+    // Call the transcribe endpoint with trim bounds
     const response = await fetch(`http://localhost:3333/session/${session.sessionId}/transcribe`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ assetId: videoAsset.id }),
+      body: JSON.stringify({
+        assetId: videoAsset.id,
+        startTime: v1Clip?.inPoint ?? 0,
+        endTime: v1Clip?.outPoint ?? undefined,
+      }),
     });
 
     if (!response.ok) {
@@ -1199,7 +1223,7 @@ export default function Home() {
         }));
         return {
           words: relativeWords,
-          start: chunk.start,
+          start: chunk.start + (v1Clip?.start ?? 0),
           duration,
           style: options ? { ...options } : {},
         };
@@ -1213,7 +1237,7 @@ export default function Home() {
     }
 
     return data;
-  }, [session, assets, addCaptionClipsBatch, saveProject]);
+  }, [session, assets, activeClips, addCaptionClipsBatch, saveProject]);
 
   // Handle updating caption style
   const handleUpdateCaptionStyle = useCallback((clipId: string, styleUpdates: Partial<CaptionStyle>) => {
@@ -2022,6 +2046,19 @@ export default function Home() {
                 </div>
               );
             })()}
+
+            {/* Track Properties Panel (shown when track label is clicked, no clip/transition selected) */}
+            {selectedTrackId && !selectedClipId && !selectedTransitionId && (
+              <div className="h-1/2 border-t border-zinc-800/50 bg-zinc-900/50 overflow-hidden">
+                <TrackPropertiesPanel
+                  trackId={selectedTrackId}
+                  trackName={tracks.find(t => t.id === selectedTrackId)?.name ?? selectedTrackId}
+                  autoSnap={trackAutoSnap[selectedTrackId] ?? false}
+                  onToggleAutoSnap={(enabled) => setTrackAutoSnap(prev => ({ ...prev, [selectedTrackId]: enabled }))}
+                  onClose={() => setSelectedTrackId(null)}
+                />
+              </div>
+            )}
           </div>
         </ResizablePanel>
 
@@ -2086,8 +2123,11 @@ export default function Home() {
               onCutAtPlayhead={handleCutAtPlayhead}
               onAddText={handleAddText}
               onToggleAspectRatio={handleToggleAspectRatio}
-              autoSnap={autoSnap}
-              onToggleAutoSnap={() => setAutoSnap(prev => !prev)}
+              onTrackLabelClick={(trackId: string) => {
+                setSelectedTrackId(trackId);
+                setSelectedClipId(null);
+                setSelectedTransitionId(null);
+              }}
               onDropAsset={handleDropAsset}
               onSave={saveProject}
               getCaptionData={getCaptionData}

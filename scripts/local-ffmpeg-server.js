@@ -3572,7 +3572,7 @@ async function handleTranscribe(req, res, sessionId) {
     for await (const chunk of req) {
       body += chunk;
     }
-    const { assetId } = JSON.parse(body || '{}');
+    const { assetId, startTime, endTime } = JSON.parse(body || '{}');
 
     // Determine which method to use
     const useLocalWhisper = hasLocalWhisper;
@@ -3625,14 +3625,20 @@ async function handleTranscribe(req, res, sessionId) {
     const totalDuration = await getVideoDuration(videoAsset.path);
     console.log(`[${jobId}] Video duration: ${totalDuration.toFixed(2)}s`);
 
-    // Extract audio as MP3
+    // Extract audio as MP3 (with optional trim for resized clips)
     console.log(`[${jobId}] Extracting audio...`);
-    await runFFmpeg([
-      '-y', '-i', videoAsset.path,
-      '-vn', '-acodec', 'libmp3lame',
-      '-ab', '64k', '-ar', '16000', '-ac', '1',
-      audioPath
-    ], jobId);
+    const ffmpegArgs = ['-y'];
+    if (startTime !== undefined && startTime > 0) {
+      ffmpegArgs.push('-ss', String(startTime));
+    }
+    ffmpegArgs.push('-i', videoAsset.path);
+    if (endTime !== undefined) {
+      // When using -ss before -i (input seeking), -to is relative to the new start
+      const duration = endTime - (startTime || 0);
+      ffmpegArgs.push('-t', String(duration));
+    }
+    ffmpegArgs.push('-vn', '-acodec', 'libmp3lame', '-ab', '64k', '-ar', '16000', '-ac', '1', audioPath);
+    await runFFmpeg(ffmpegArgs, jobId);
 
     const { stat } = await import('fs/promises');
     const audioStats = await stat(audioPath);

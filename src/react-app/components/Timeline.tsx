@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
-import { ZoomIn, ZoomOut, Play, Pause, SkipBack, Scissors, Trash2, Type, RectangleHorizontal, RectangleVertical, Link, Unlink } from 'lucide-react';
+import { ZoomIn, ZoomOut, Play, Pause, SkipBack, Scissors, Trash2, Type, RectangleHorizontal, RectangleVertical } from 'lucide-react';
 import TimelineClip from './TimelineClip';
 import type { Track, TimelineClip as TimelineClipType, Asset, CaptionData, JunctionTransition, JunctionTransitionType, TimelineTransition } from '@/react-app/hooks/useProject';
 
@@ -23,8 +23,7 @@ interface TimelineProps {
   onCutAtPlayhead: () => void;
   onAddText: () => void;
   onToggleAspectRatio: () => void;
-  autoSnap?: boolean;
-  onToggleAutoSnap?: () => void;
+  onTrackLabelClick?: (trackId: string) => void;
   onDropAsset: (asset: Asset, trackId: string, time: number) => void;
   onSave: () => void;
   getCaptionData?: (clipId: string) => CaptionData | null;
@@ -72,8 +71,7 @@ export default function Timeline({
   onCutAtPlayhead,
   onAddText,
   onToggleAspectRatio,
-  autoSnap = true,
-  onToggleAutoSnap,
+  onTrackLabelClick,
   onDropAsset,
   onSave,
   getCaptionData,
@@ -362,22 +360,6 @@ export default function Timeline({
                 <RectangleVertical className="w-3.5 h-3.5" />
               )}
             </button>
-            <div className="w-px h-4 bg-zinc-600" />
-            <button
-              onClick={onToggleAutoSnap}
-              className={`p-1.5 rounded transition-colors ${
-                autoSnap
-                  ? 'bg-orange-500/20 text-orange-400 hover:bg-orange-500/30'
-                  : 'bg-zinc-700 hover:bg-zinc-600 text-zinc-400'
-              }`}
-              title={autoSnap ? 'Auto-snap ON: Clips shift when deleting' : 'Auto-snap OFF: Gaps remain when deleting'}
-            >
-              {autoSnap ? (
-                <Link className="w-3.5 h-3.5" />
-              ) : (
-                <Unlink className="w-3.5 h-3.5" />
-              )}
-            </button>
           </div>
 
           {/* Time display */}
@@ -433,7 +415,11 @@ export default function Timeline({
                   className="flex items-center justify-center gap-1 text-xs font-medium text-zinc-400 border-b border-zinc-800/50 px-1"
                   style={{ height: TRACK_HEIGHTS[track.type] }}
                 >
-                  <span className="truncate">{track.name}</span>
+                  <span
+                    className="truncate cursor-pointer hover:text-zinc-200 transition-colors"
+                    onClick={() => onTrackLabelClick?.(track.id)}
+                    title={`${track.name} properties`}
+                  >{track.name}</span>
                   {isTextTrack && (
                     <button
                       title={`Delete all ${trackClipCount} captions`}
@@ -568,6 +554,7 @@ export default function Timeline({
                         trackHeight={TRACK_HEIGHTS[track.type]}
                         transition={transition}
                         pixelsPerSecond={pixelsPerSecond}
+                        adjacentClipSelected={fromClip.id === selectedClipId}
                         onAdd={() => {
                           onAddTransition(fromClip.id, toClip.id, 'crossfade', 0.5);
                           onSave();
@@ -658,6 +645,7 @@ function TransitionIndicator({
   trackHeight,
   transition,
   pixelsPerSecond,
+  adjacentClipSelected = false,
   onAdd,
   onRemove,
   onUpdate,
@@ -666,6 +654,7 @@ function TransitionIndicator({
   trackHeight: number;
   transition: JunctionTransition | null;
   pixelsPerSecond: number;
+  adjacentClipSelected?: boolean;
   onAdd: () => void;
   onRemove: () => void;
   onUpdate: (updates: Partial<Omit<JunctionTransition, 'id'>>) => void;
@@ -762,7 +751,7 @@ function TransitionIndicator({
             e.stopPropagation();
             onAdd();
           }}
-          className="opacity-0 group-hover:opacity-100 w-5 h-5 bg-zinc-700 hover:bg-orange-500 rounded-full flex items-center justify-center transition-all text-zinc-400 hover:text-white"
+          className={`w-5 h-5 bg-zinc-700 hover:bg-orange-500 rounded-full flex items-center justify-center transition-all text-zinc-400 hover:text-white ${adjacentClipSelected ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
           title="Add transition"
         >
           <span className="text-xs font-bold">+</span>

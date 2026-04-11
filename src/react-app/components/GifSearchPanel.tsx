@@ -34,11 +34,6 @@ export default function GifSearchPanel({ sessionId, onClose, onGifAdded }: GifSe
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<'trending' | 'search'>('trending');
 
-  // Load trending GIFs on mount
-  useEffect(() => {
-    loadTrending();
-  }, [sessionId, loadTrending]);
-
   const loadTrending = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -54,6 +49,11 @@ export default function GifSearchPanel({ sessionId, onClose, onGifAdded }: GifSe
       setLoading(false);
     }
   }, [sessionId]);
+
+  // Load trending GIFs on mount
+  useEffect(() => {
+    loadTrending();
+  }, [sessionId, loadTrending]);
 
   const handleSearch = useCallback(async (e?: React.FormEvent) => {
     e?.preventDefault();
