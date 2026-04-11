@@ -666,7 +666,7 @@ function TransitionIndicator({
 
   return (
     <div
-      className="absolute z-20 flex items-center justify-center group"
+      className="absolute z-20 flex items-center justify-center group pointer-events-none"
       style={{
         left: `${junctionX - indicatorWidth / 2}px`,
         width: `${indicatorWidth}px`,
@@ -676,7 +676,7 @@ function TransitionIndicator({
     >
       {transition ? (
         <div
-          className="w-full h-full bg-orange-500/20 border border-orange-500/50 rounded flex items-center justify-center cursor-pointer hover:bg-orange-500/30 transition-colors relative"
+          className="w-full h-full bg-orange-500/20 border border-orange-500/50 rounded flex items-center justify-center cursor-pointer hover:bg-orange-500/30 transition-colors relative pointer-events-auto"
           onClick={(e) => {
             e.stopPropagation();
             setShowMenu(!showMenu);
@@ -751,7 +751,7 @@ function TransitionIndicator({
             e.stopPropagation();
             onAdd();
           }}
-          className={`w-5 h-5 bg-zinc-700 hover:bg-orange-500 rounded-full flex items-center justify-center transition-all text-zinc-400 hover:text-white ${adjacentClipSelected ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+          className={`w-4 h-4 bg-zinc-700 hover:bg-orange-500 rounded-full flex items-center justify-center transition-all text-zinc-400 hover:text-white pointer-events-auto ${adjacentClipSelected ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
           title="Add transition"
         >
           <span className="text-xs font-bold">+</span>

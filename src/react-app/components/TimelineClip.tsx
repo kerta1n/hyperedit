@@ -170,7 +170,7 @@ export default function TimelineClip({
       onMouseDown={handleMouseDown}
       className={`group absolute overflow-visible rounded-md bg-gradient-to-r ${colorClass} ${
         isDragging
-          ? 'opacity-80 scale-105 shadow-xl shadow-black/50 z-30 cursor-grabbing ring-2 ring-orange-400'
+          ? 'opacity-80 shadow-xl shadow-black/50 z-30 cursor-grabbing ring-2 ring-orange-400'
           : isResizingLeft || isResizingRight
             ? 'cursor-ew-resize z-20 ring-2 ring-orange-400'
             : isSelected
@@ -250,6 +250,7 @@ export default function TimelineClip({
 
       {/* Delete button (shown on hover) */}
       <button
+        onMouseDown={(e) => e.stopPropagation()}
         onClick={(e) => {
           e.stopPropagation();
           onDelete();
@@ -259,7 +260,7 @@ export default function TimelineClip({
         }`}
         title="Remove from timeline"
       >
-        <X className="w-3 h-3 text-white" />
+        <X className="w-3 h-3 text-white pointer-events-none" />
       </button>
 
       {/* Duration indicator (shown when resizing) */}

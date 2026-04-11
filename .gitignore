@@ -1,11 +1,9 @@
 dist/
 node_modules/
+sessions/
+out/
+src/remotion/transitions/custom
 .wrangler/
 .dev.vars
 worker-configuration.d.ts
-sessions/
-tmp/
 .claude/settings.local.json
-src/remotion/transitions/custom/index.ts
-out/
-/src/remotion/transitions/custom

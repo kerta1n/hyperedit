@@ -1,3 +1,5 @@
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/kerta1n/hyperedit)
+
 ## HyperEdit (Remotion Core V2)
 
 HyperEdit now runs on a deterministic **Remotion-first** rendering core with a production-focused V2 upgrade:
