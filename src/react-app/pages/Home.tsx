@@ -1413,7 +1413,7 @@ export default function Home() {
       console.error('Failed to create custom animation:', error);
       throw error;
     }
-  }, [session, currentTime, addClip, saveProject, refreshAssets, getDuration, switchTimelineTab, clips, assets]);
+  }, [session, currentTime, addClip, saveProject, refreshAssets, getDuration, switchTimelineTab, clips, assets, setStatus]);
 
   // Handle analyzing video for animation (returns concept for approval)
   const handleAnalyzeForAnimation = useCallback(async (request: {
@@ -1836,7 +1836,7 @@ export default function Home() {
       sceneCount: data.sceneCount,
       editCount: data.editCount,
     };
-  }, [session, assets, refreshAssets, updateTabAsset]);
+  }, [session, assets, refreshAssets, updateTabAsset, setStatus]);
 
   // Open an animation in a new timeline tab for isolated editing
   const handleOpenAnimationInTab = useCallback((assetId: string, animationName: string) => {

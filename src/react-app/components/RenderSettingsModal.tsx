@@ -249,7 +249,7 @@ export default function RenderSettingsModal({
       onUpdateOptions(next);
       return next;
     });
-  }, [onUpdateOptions, update]);
+  }, [onUpdateOptions]);
 
   // Available audio codecs for current video codec
   const audioOptions = useMemo(() => CODEC_AUDIO_MAP[opts.codec], [opts.codec]);
