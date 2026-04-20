@@ -80,10 +80,7 @@ export function getRenderMediaOptions(isPreview = false) {
   const useRemotionHW = envBool('HWACCEL_REMOTION');
   const encoder = caps.preferredEncoder;
 
-  // Allow user to override concurrency via .dev.vars (default: 4)
-  const userConcurrency = process.env.REMOTION_CONCURRENCY
-    ? parseInt(process.env.REMOTION_CONCURRENCY, 10)
-    : 4;
+  const userConcurrency = caps.concurrency;
 
   const result = {};
 
@@ -201,12 +198,7 @@ export function getAccelSummary() {
       chromeMode: envBool('HWACCEL_HEADFUL', caps.platform !== 'linux')
         ? 'chrome-for-testing (headful, real GPU)'
         : 'headless-shell (no GPU)',
-      concurrency: process.env.REMOTION_CONCURRENCY
-        ? parseInt(process.env.REMOTION_CONCURRENCY, 10)
-        : 4,
-      concurrencySource: process.env.REMOTION_CONCURRENCY
-        ? 'REMOTION_CONCURRENCY env var'
-        : 'default (safe cap)',
+      concurrency: caps.concurrency,
     },
   };
 }

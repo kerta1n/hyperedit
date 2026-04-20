@@ -156,4 +156,4 @@ The segment-based approach (extract + concat) is required — single-pass filter
 
 - Vite config uses `@cloudflare/vite-plugin` and `@getmocha/vite-plugins`. `chunkSizeWarningLimit: 5000` due to Remotion's size.
 - `wrangler.json` app name is a UUID (Mocha app ID). SPA routing via `not_found_handling: "single-page-application"`.
-- No tests exist in the codebase. No testing framework is configured.
+- No tests exist in the codebase and no testing framework is configured. Only test via `npm run lint` for validation.

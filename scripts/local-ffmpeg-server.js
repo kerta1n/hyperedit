@@ -434,6 +434,7 @@ function ensureProjectDefaults(project = {}) {
       ...(project.brandTheme || {}),
     },
     adTemplate: project.adTemplate || null,
+    renderOptions: project.renderOptions || null,
   };
 }
 
@@ -448,6 +449,7 @@ function serializeProjectForClient(project = {}) {
     timelineTransitions: normalized.timelineTransitions || [],
     brandTheme: normalized.brandTheme,
     adTemplate: normalized.adTemplate,
+    renderOptions: normalized.renderOptions || null,
   };
 }
 
@@ -546,6 +548,37 @@ function runFFmpeg(args, jobId) {
     });
     ffmpeg.on('error', reject);
   });
+}
+
+// Stream render progress as NDJSON, then write final result
+async function streamRender(res, renderFn) {
+  res.writeHead(200, {
+    'Content-Type': 'application/x-ndjson',
+    'Transfer-Encoding': 'chunked',
+    'Access-Control-Allow-Origin': '*',
+    'Cache-Control': 'no-cache',
+  });
+
+  const onProgress = ({ pct, renderedFrames, totalFrames, elapsed }) => {
+    const min = Math.floor(elapsed / 60);
+    const sec = String(elapsed % 60).padStart(2, '0');
+    try {
+      res.write(JSON.stringify({
+        type: 'progress', pct, frames: renderedFrames, total: totalFrames, elapsed: `${min}:${sec}`,
+      }) + '\n');
+    } catch (e) { /* client disconnected */ }
+  };
+
+  try {
+    const result = await renderFn(onProgress);
+    res.write(JSON.stringify({ type: 'result', ...result }) + '\n');
+    res.end();
+  } catch (err) {
+    try {
+      res.write(JSON.stringify({ type: 'error', message: err.message }) + '\n');
+      res.end();
+    } catch (e) { res.end(); }
+  }
 }
 
 // Run FFprobe command and return stdout
@@ -2102,6 +2135,7 @@ async function handleProjectSave(req, res, sessionId) {
     if (data.adTemplate) session.project.adTemplate = data.adTemplate;
     if (data.transitions) session.project.transitions = data.transitions;
     if (data.timelineTransitions) session.project.timelineTransitions = data.timelineTransitions;
+    if (data.renderOptions) session.project.renderOptions = data.renderOptions;
 
     // Save to disk for persistence
     const projectPath = join(session.dir, 'project.json');
@@ -2603,6 +2637,7 @@ async function handleProjectRenderRemotion(req, res, sessionId) {
     }
 
     const preview = options.preview === true;
+    const renderOpts = options.renderOptions || {};
     const specResult = options.spec
       ? parseIncomingRemotionSpec(options.spec, `api:/session/${sessionId}/render`)
       : {
@@ -2617,9 +2652,11 @@ async function handleProjectRenderRemotion(req, res, sessionId) {
       };
     const spec = specResult.spec;
 
+    // Derive file extension from renderOptions container format
+    const containerExt = preview ? 'mp4' : (renderOpts.containerFormat || 'mp4');
     const outputFilename = preview
       ? 'preview.mp4'
-      : `export-${Date.now()}.mp4`;
+      : `export-${Date.now()}.${containerExt}`;
     const outputPath = join(session.rendersDir, outputFilename);
 
     console.log(`\n[${sessionId}] === REMOTION ${preview ? 'PREVIEW' : 'EXPORT'} ===`);
@@ -2630,31 +2667,34 @@ async function handleProjectRenderRemotion(req, res, sessionId) {
       assetPathMap.set(id, asset.path);
     }
 
-    const renderInfo = await renderSpecWithRemotion({
-      spec,
-      outputPath,
-      preview,
-      logLevel: 'warn',
-      assetPathMap,
+    await streamRender(res, async (onProgress) => {
+      const renderInfo = await renderSpecWithRemotion({
+        spec,
+        outputPath,
+        preview,
+        logLevel: 'warn',
+        assetPathMap,
+        renderOptions: renderOpts,
+        onProgress,
+      });
+
+      const { stat } = await import('fs/promises');
+      const outputStats = await stat(outputPath);
+      const specSnapshotPath = saveSpecSnapshot(session, `${outputFilename.replace(/\.[^.]+$/, '')}.spec.json`, spec);
+
+      return {
+        success: true,
+        engine: 'remotion',
+        path: outputPath,
+        size: outputStats.size,
+        duration: renderInfo.durationInFrames / (renderInfo.fps || 30),
+        renderInfo,
+        specPath: specSnapshotPath,
+        migration: specResult.migration,
+        warnings: specResult.warnings,
+        downloadUrl: `/session/${sessionId}/renders/${preview ? 'preview' : 'export'}`,
+      };
     });
-
-    const { stat } = await import('fs/promises');
-    const outputStats = await stat(outputPath);
-    const specSnapshotPath = saveSpecSnapshot(session, `${outputFilename.replace(/\.mp4$/, '')}.spec.json`, spec);
-
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
-      success: true,
-      engine: 'remotion',
-      path: outputPath,
-      size: outputStats.size,
-      duration: renderInfo.durationInFrames / (renderInfo.fps || 30),
-      renderInfo,
-      specPath: specSnapshotPath,
-      migration: specResult.migration,
-      warnings: specResult.warnings,
-      downloadUrl: `/session/${sessionId}/renders/${preview ? 'preview' : 'export'}`,
-    }));
   } catch (error) {
     if (error instanceof RemotionSpecValidationError) {
       sendSpecValidationError(res, error);
@@ -2683,9 +2723,10 @@ async function handleRenderDownload(req, res, sessionId, renderType) {
   if (renderType === 'preview') {
     renderFile = files.find(f => f === 'preview.mp4');
   } else {
-    // Get most recent export (ensure it's the video, not the .spec.json snapshot)
+    // Get most recent export (any video extension, not just .mp4)
+    const videoExtensions = /\.(mp4|webm|mkv|mov)$/;
     renderFile = files
-      .filter(f => f.startsWith('export-') && f.endsWith('.mp4'))
+      .filter(f => f.startsWith('export-') && videoExtensions.test(f) && !f.endsWith('.spec.json'))
       .sort()
       .pop();
   }
@@ -2700,10 +2741,14 @@ async function handleRenderDownload(req, res, sessionId, renderType) {
   const { stat } = await import('fs/promises');
   const stats = await stat(renderPath);
 
-  const filename = renderType === 'preview' ? 'preview.mp4' : `${session.originalName.replace(/\.[^.]+$/, '')}-export.mp4`;
+  // Derive content type from extension
+  const extToMime = { '.mp4': 'video/mp4', '.webm': 'video/webm', '.mkv': 'video/x-matroska', '.mov': 'video/quicktime' };
+  const ext = renderFile.substring(renderFile.lastIndexOf('.'));
+  const mime = extToMime[ext] || 'application/octet-stream';
+  const filename = renderType === 'preview' ? 'preview.mp4' : `${session.originalName.replace(/\.[^.]+$/, '')}-export${ext}`;
 
   res.writeHead(200, {
-    'Content-Type': 'video/mp4',
+    'Content-Type': mime,
     'Content-Length': stats.size,
     'Content-Disposition': `attachment; filename="${filename}"`,
     'Access-Control-Allow-Origin': '*',
@@ -4982,78 +5027,82 @@ ${attachedAssetIds?.length ? `- IMPORTANT: Include media scenes to showcase the 
     // Step 3: Render with Remotion Node API
     console.log(`[${jobId}] Rendering with Remotion...`);
 
-    await renderDynamicAnimation({
-      sceneData,
-      outputPath,
-      width,
-      height,
-      fps,
-      logLevel: 'warn',
+    await streamRender(res, async (onProgress) => {
+      await renderDynamicAnimation({
+        sceneData,
+        outputPath,
+        width,
+        height,
+        fps,
+        logLevel: 'warn',
+        onProgress,
+      });
+
+      // Step 4: Generate thumbnail
+      await runFFmpeg([
+        '-y', '-i', outputPath,
+        '-vf', 'scale=160:90:force_original_aspect_ratio=decrease,pad=160:90:(ow-iw)/2:(oh-ih)/2',
+        '-frames:v', '1',
+        thumbPath
+      ], jobId);
+
+      // Store the scene data for future editing (don't delete props)
+      const sceneDataPath = join(session.dir, `${assetId}-scenes.json`);
+      writeFileSync(sceneDataPath, JSON.stringify(sceneData, null, 2));
+
+      // Clean up temporary props file (but keep scene data)
+      try {
+        unlinkSync(propsPath);
+      } catch (e) {
+        // Ignore cleanup errors
+      }
+
+      const { stat } = await import('fs/promises');
+      const stats = await stat(outputPath);
+
+      // Create asset entry with scene data for re-editing
+      const asset = {
+        id: assetId,
+        type: 'video',
+        filename: `animation-${Date.now()}.mp4`,
+        path: outputPath,
+        thumbPath: existsSync(thumbPath) ? thumbPath : null,
+        duration: durationInSeconds,
+        size: stats.size,
+        width,
+        height,
+        createdAt: Date.now(),
+        // Metadata for AI animations
+        aiGenerated: true,
+        description,
+        sceneCount: sceneData.scenes.length,
+        sceneDataPath,
+        sceneData,
+      };
+
+      session.assets.set(assetId, asset);
+      saveAssetMetadata(session);
+
+      console.log(`[${jobId}] AI animation rendered: ${assetId} (${durationInSeconds}s)`);
+      console.log(`[${jobId}] === GENERATION COMPLETE ===\n`);
+
+      return {
+        success: true,
+        assetId,
+        filename: asset.filename,
+        duration: durationInSeconds,
+        sceneCount: sceneData.scenes.length,
+        thumbnailUrl: `/session/${sessionId}/assets/${assetId}/thumbnail`,
+        streamUrl: `/session/${sessionId}/assets/${assetId}/stream`,
+      };
     });
-
-    // Step 4: Generate thumbnail
-    await runFFmpeg([
-      '-y', '-i', outputPath,
-      '-vf', 'scale=160:90:force_original_aspect_ratio=decrease,pad=160:90:(ow-iw)/2:(oh-ih)/2',
-      '-frames:v', '1',
-      thumbPath
-    ], jobId);
-
-    // Store the scene data for future editing (don't delete props)
-    const sceneDataPath = join(session.dir, `${assetId}-scenes.json`);
-    writeFileSync(sceneDataPath, JSON.stringify(sceneData, null, 2));
-
-    // Clean up temporary props file (but keep scene data)
-    try {
-      unlinkSync(propsPath);
-    } catch (e) {
-      // Ignore cleanup errors
-    }
-
-    const { stat } = await import('fs/promises');
-    const stats = await stat(outputPath);
-
-    // Create asset entry with scene data for re-editing
-    const asset = {
-      id: assetId,
-      type: 'video',
-      filename: `animation-${Date.now()}.mp4`,
-      path: outputPath,
-      thumbPath: existsSync(thumbPath) ? thumbPath : null,
-      duration: durationInSeconds,
-      size: stats.size,
-      width,
-      height,
-      createdAt: Date.now(),
-      // Metadata for AI animations
-      aiGenerated: true,
-      description,
-      sceneCount: sceneData.scenes.length,
-      sceneDataPath, // Store path to scene data for re-editing
-      sceneData, // Also keep in memory for quick access
-    };
-
-    session.assets.set(assetId, asset);
-    saveAssetMetadata(session); // Persist AI-generated flag to disk
-
-    console.log(`[${jobId}] AI animation rendered: ${assetId} (${durationInSeconds}s)`);
-    console.log(`[${jobId}] === GENERATION COMPLETE ===\n`);
-
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
-      success: true,
-      assetId,
-      filename: asset.filename,
-      duration: durationInSeconds,
-      sceneCount: sceneData.scenes.length,
-      thumbnailUrl: `/session/${sessionId}/assets/${assetId}/thumbnail`,
-      streamUrl: `/session/${sessionId}/assets/${assetId}/stream`,
-    }));
 
   } catch (error) {
     console.error('AI animation generation error:', error);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    if (!res.headersSent) {
+      res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
   }
 }
 
@@ -5357,73 +5406,72 @@ Return ONLY the complete JSON structure with your minimal change applied. No mar
     // Render with Remotion Node API
     console.log(`[${jobId}] Rendering with Remotion...`);
 
-    await renderDynamicAnimation({
-      sceneData: newSceneData,
-      outputPath,
-      width,
-      height,
-      fps,
-      logLevel: 'warn',
+    await streamRender(res, async (onProgress) => {
+      await renderDynamicAnimation({
+        sceneData: newSceneData,
+        outputPath,
+        width,
+        height,
+        fps,
+        logLevel: 'warn',
+        onProgress,
+      });
+
+      // Generate thumbnail
+      await runFFmpeg([
+        '-y', '-i', outputPath,
+        '-vf', 'scale=160:90:force_original_aspect_ratio=decrease,pad=160:90:(ow-iw)/2:(oh-ih)/2',
+        '-frames:v', '1',
+        thumbPath
+      ], jobId);
+
+      // Clean up props file
+      try {
+        unlinkSync(propsPath);
+      } catch (e) { }
+
+      const { stat } = await import('fs/promises');
+      const stats = await stat(outputPath);
+
+      // Update the existing asset entry IN-PLACE (no new asset, prevents asset creep)
+      originalAsset.duration = durationInSeconds;
+      originalAsset.size = stats.size;
+      originalAsset.thumbPath = existsSync(thumbPath) ? thumbPath : null;
+      originalAsset.sceneCount = newSceneData.scenes.length;
+      originalAsset.sceneDataPath = existingSceneDataPath;
+      originalAsset.sceneData = newSceneData;
+      originalAsset.lastEditedAt = Date.now();
+      originalAsset.lastEditPrompt = editPrompt;
+      originalAsset.editCount = (originalAsset.editCount || 0) + 1;
+      saveAssetMetadata(session);
+
+      console.log(`[${jobId}] ========================================`);
+      console.log(`[${jobId}] Animation updated IN-PLACE successfully!`);
+      console.log(`[${jobId}] SAME asset ID: ${assetId}`);
+      console.log(`[${jobId}] Duration: ${durationInSeconds}s`);
+      console.log(`[${jobId}] Edit count: ${originalAsset.editCount}`);
+      console.log(`[${jobId}] Total assets in session: ${session.assets.size}`);
+      console.log(`[${jobId}] === EDIT COMPLETE ===`);
+      console.log(`[${jobId}] ========================================\n`);
+
+      return {
+        success: true,
+        assetId: assetId,
+        filename: originalAsset.filename,
+        duration: durationInSeconds,
+        sceneCount: newSceneData.scenes.length,
+        editCount: originalAsset.editCount,
+        thumbnailUrl: `/session/${sessionId}/assets/${assetId}/thumbnail?t=${Date.now()}`,
+        streamUrl: `/session/${sessionId}/assets/${assetId}/stream?t=${Date.now()}`,
+      };
     });
-
-    // Generate thumbnail
-    await runFFmpeg([
-      '-y', '-i', outputPath,
-      '-vf', 'scale=160:90:force_original_aspect_ratio=decrease,pad=160:90:(ow-iw)/2:(oh-ih)/2',
-      '-frames:v', '1',
-      thumbPath
-    ], jobId);
-
-    // Clean up props file
-    try {
-      unlinkSync(propsPath);
-    } catch (e) { }
-
-    const { stat } = await import('fs/promises');
-    const stats = await stat(outputPath);
-
-    // Update the existing asset entry IN-PLACE (no new asset, prevents asset creep)
-    originalAsset.duration = durationInSeconds;
-    originalAsset.size = stats.size;
-    originalAsset.thumbPath = existsSync(thumbPath) ? thumbPath : null;
-    originalAsset.sceneCount = newSceneData.scenes.length;
-    originalAsset.sceneDataPath = existingSceneDataPath;
-    originalAsset.sceneData = newSceneData;
-    originalAsset.lastEditedAt = Date.now();
-    originalAsset.lastEditPrompt = editPrompt;
-    // Keep original description but track edit history
-    originalAsset.editCount = (originalAsset.editCount || 0) + 1;
-    saveAssetMetadata(session); // Persist updated metadata to disk
-
-    console.log(`[${jobId}] ========================================`);
-    console.log(`[${jobId}] Animation updated IN-PLACE successfully!`);
-    console.log(`[${jobId}] SAME asset ID: ${assetId}`);
-    console.log(`[${jobId}] Duration: ${durationInSeconds}s`);
-    console.log(`[${jobId}] Edit count: ${originalAsset.editCount}`);
-    console.log(`[${jobId}] Total assets in session: ${session.assets.size}`);
-    console.log(`[${jobId}] === EDIT COMPLETE ===`);
-    console.log(`[${jobId}] ========================================\n`);
-
-    const responseData = {
-      success: true,
-      assetId: assetId, // Same asset ID - no new asset created
-      filename: originalAsset.filename,
-      duration: durationInSeconds,
-      sceneCount: newSceneData.scenes.length,
-      editCount: originalAsset.editCount,
-      thumbnailUrl: `/session/${sessionId}/assets/${assetId}/thumbnail?t=${Date.now()}`, // Cache bust
-      streamUrl: `/session/${sessionId}/assets/${assetId}/stream?t=${Date.now()}`, // Cache bust
-    };
-
-    console.log(`[${jobId}] Sending response:`, JSON.stringify(responseData, null, 2));
-
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify(responseData));
 
   } catch (error) {
     console.error('Animation edit error:', error);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    if (!res.headersSent) {
+      res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: error.message }));
+    }
   }
 }
 
@@ -7931,7 +7979,7 @@ function validateTransitionCode(code) {
   }
   // Check for startFrom usage when rendering video (important for correct frame positioning)
   if ((code.includes('OffthreadVideo') || code.includes('<Video'))
-      && !code.includes('startFrom') && !code.includes('fromStartFrom')) {
+    && !code.includes('startFrom') && !code.includes('fromStartFrom')) {
     warnings.push('Transition renders video but does not use fromStartFrom/toStartFrom — video clips may start from frame 0 instead of the correct position. See the transition authoring spec.');
   }
   return { valid: errors.length === 0, errors, warnings, exportInfo };

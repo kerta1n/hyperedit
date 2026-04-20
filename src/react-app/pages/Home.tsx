@@ -13,7 +13,10 @@ import GifSearchPanel from '@/react-app/components/GifSearchPanel';
 import ResizablePanel from '@/react-app/components/ResizablePanel';
 import ResizableVerticalPanel from '@/react-app/components/ResizableVerticalPanel';
 import TimelineTabs from '@/react-app/components/TimelineTabs';
+import RenderSettingsModal from '@/react-app/components/RenderSettingsModal';
 import { useProject, Asset, TimelineClip, CaptionStyle } from '@/react-app/hooks/useProject';
+import type { RenderOptions } from '@/react-app/hooks/useProject';
+import { readNDJSONStream } from '@/react-app/utils/ndjson';
 import { useVideoSession } from '@/react-app/hooks/useVideoSession';
 import { Sparkles, ListOrdered, Copy, Check, X, Download, Play, Palette, Film } from 'lucide-react';
 import type { ActiveTransition } from '@/react-app/components/TransitionPreview';
@@ -42,6 +45,8 @@ export default function Home() {
   const [trackAutoSnap, setTrackAutoSnap] = useState<Record<string, boolean>>({});
   const [activeAgent, setActiveAgent] = useState<'director' | 'picasso' | 'dicaprio'>('director');
   const [showGifSearch, setShowGifSearch] = useState(false);
+  const [showRenderSettings, setShowRenderSettings] = useState(false);
+  const [recommendedConcurrency, setRecommendedConcurrency] = useState(4);
 
   const videoPreviewRef = useRef<VideoPreviewHandle>(null);
   const playbackRef = useRef<number | null>(null);
@@ -93,6 +98,10 @@ export default function Home() {
     updateTabAsset,
     // Settings
     setSettings,
+    setStatus,
+    // Render options
+    renderOptions,
+    setRenderOptions,
   } = useProject();
 
   // Compute the active clips based on which tab is selected
@@ -1350,7 +1359,11 @@ export default function Home() {
         throw new Error(error.error || 'Failed to generate animation');
       }
 
-      const data = await response.json();
+      setStatus('Generating animation...');
+      const data = await readNDJSONStream(response, ({ pct, frames, total, elapsed }) => {
+        setStatus(`Rendering animation: ${pct}% (${frames}/${total} frames) [${elapsed}]`);
+      });
+      setStatus('');
 
       // Refresh assets to sync with server (animation was just created)
       await refreshAssets();
@@ -1716,21 +1729,24 @@ export default function Home() {
   }, [session, assets, addClip, saveProject, getDuration, refreshAssets]);
 
   // Handle render/export
-  const handleExport = useCallback(async () => {
+  const handleExport = useCallback(async (exportOpts?: RenderOptions) => {
     if (clips.length === 0) {
       alert('Add some clips to the timeline first');
       return;
     }
 
     try {
-      const downloadUrl = await renderProject(false);
+      const downloadUrl = await renderProject(false, exportOpts);
+      // Derive file extension from container format
+      const ext = exportOpts?.containerFormat ? `.${exportOpts.containerFormat}` : '.mp4';
       // Trigger download
       const link = document.createElement('a');
       link.href = downloadUrl;
-      link.download = 'export.mp4';
+      link.download = `export${ext}`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
+      setShowRenderSettings(false);
     } catch (error) {
       console.error('Export failed:', error);
       alert(`Export failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -1777,7 +1793,11 @@ export default function Home() {
       throw new Error(error.error || 'Failed to edit animation');
     }
 
-    const data = await response.json();
+    setStatus('Editing animation...');
+    const data = await readNDJSONStream(response, ({ pct, frames, total, elapsed }) => {
+      setStatus(`Rendering animation: ${pct}% (${frames}/${total} frames) [${elapsed}]`);
+    });
+    setStatus('');
 
     console.log('[handleEditAnimation] ===== STEP 1: Server response =====');
     console.log('[handleEditAnimation] Server response:', {
@@ -1875,7 +1895,15 @@ export default function Home() {
               </button>
               {clips.length > 0 && (
                 <button
-                  onClick={handleExport}
+                  onClick={() => {
+                    setShowRenderSettings(true);
+                    fetch('http://localhost:3333/hwaccel-info')
+                      .then(r => r.json())
+                      .then(info => {
+                        if (info?.effective?.concurrency) setRecommendedConcurrency(info.effective.concurrency);
+                      })
+                      .catch(() => {});
+                  }}
                   disabled={isProcessing}
                   className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
                 >
@@ -1977,6 +2005,21 @@ export default function Home() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Render Settings Modal */}
+      {showRenderSettings && (
+        <RenderSettingsModal
+          renderOptions={renderOptions}
+          onClose={() => setShowRenderSettings(false)}
+          onExport={(opts) => handleExport(opts)}
+          onUpdateOptions={(opts) => {
+            setRenderOptions(opts);
+            saveProject();
+          }}
+          isExporting={loading}
+          recommendedConcurrency={recommendedConcurrency}
+        />
       )}
 
       <div className="flex flex-1 min-h-0">
@@ -2174,33 +2217,30 @@ export default function Home() {
             <div className="flex items-center gap-1 px-2 border-b border-zinc-800/50">
               <button
                 onClick={() => setActiveAgent('director')}
-                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${
-                  activeAgent === 'director'
+                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${activeAgent === 'director'
                     ? 'text-orange-500 border-b-2 border-orange-500 bg-zinc-800/30'
                     : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/20'
-                }`}
+                  }`}
               >
                 <Sparkles className="w-3.5 h-3.5" />
                 Director
               </button>
               <button
                 onClick={() => setActiveAgent('picasso')}
-                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${
-                  activeAgent === 'picasso'
+                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${activeAgent === 'picasso'
                     ? 'text-orange-300 border-b-2 border-orange-300 bg-zinc-800/30'
                     : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/20'
-                }`}
+                  }`}
               >
                 <Palette className="w-3.5 h-3.5" />
                 Picasso
               </button>
               <button
                 onClick={() => setActiveAgent('dicaprio')}
-                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${
-                  activeAgent === 'dicaprio'
+                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${activeAgent === 'dicaprio'
                     ? 'text-zinc-300 border-b-2 border-zinc-300 bg-zinc-800/30'
                     : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/20'
-                }`}
+                  }`}
               >
                 <Film className="w-3.5 h-3.5" />
                 DiCaprio

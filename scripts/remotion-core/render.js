@@ -12,7 +12,7 @@ const __dirname = dirname(__filename);
 const projectRoot = resolve(__dirname, '..', '..');
 const remotionEntry = resolve(projectRoot, 'src/remotion/index.tsx');
 
-function makeProgressLogger(totalFrames) {
+function makeProgressLogger(totalFrames, onProgressCallback) {
   const start = Date.now();
   return ({ renderedFrames, progress }) => {
     const elapsed = Math.floor((Date.now() - start) / 1000);
@@ -23,6 +23,9 @@ function makeProgressLogger(totalFrames) {
       `\r[Remotion] Rendering: ${pct}% (${renderedFrames}/${totalFrames} frames) [${min}:${sec} elapsed]`
     );
     if (progress === 1) process.stdout.write('\n');
+    if (onProgressCallback) {
+      onProgressCallback({ pct, renderedFrames, totalFrames, elapsed });
+    }
   };
 }
 
@@ -278,6 +281,8 @@ export async function renderSpecWithRemotion({
   logLevel = 'info',
   concurrency,
   assetPathMap,
+  renderOptions: userRenderOptions,
+  onProgress,
 }) {
   if (!spec) {
     throw new Error('spec is required for renderSpecWithRemotion');
@@ -304,7 +309,9 @@ export async function renderSpecWithRemotion({
   }
 
   const inputProps = { spec: normalizedSpec };
-  const resolvedCodec = codec || 'h264';
+
+  // Resolve final codec: explicit param → user renderOptions → default
+  const resolvedCodec = codec || userRenderOptions?.codec || 'h264';
 
   // Build hardware-accelerated options (falls back to software if unavailable)
   let hwOptions = {};
@@ -340,9 +347,21 @@ export async function renderSpecWithRemotion({
     puppeteerInstance: browser,
   });
 
-  const renderOptions = {
+  // Override composition dimensions/fps from user renderOptions if provided
+  const finalComposition = { ...composition };
+  if (userRenderOptions) {
+    if (userRenderOptions.outputWidth && userRenderOptions.outputHeight) {
+      finalComposition.width = userRenderOptions.outputWidth;
+      finalComposition.height = userRenderOptions.outputHeight;
+    }
+    if (userRenderOptions.outputFps) {
+      finalComposition.fps = userRenderOptions.outputFps;
+    }
+  }
+
+  const renderOpts = {
     serveUrl,
-    composition,
+    composition: finalComposition,
     codec: resolvedCodec,
     outputLocation: outputPath,
     inputProps,
@@ -357,21 +376,110 @@ export async function renderSpecWithRemotion({
     ...hwOptions,
   };
   // Remove concurrency from hwOptions spread to prefer explicit param
-  if (concurrency != null) renderOptions.concurrency = concurrency;
+  if (concurrency != null) renderOpts.concurrency = concurrency;
   // Ensure puppeteerInstance isn't overwritten by hwOptions spread
-  renderOptions.puppeteerInstance = browser;
+  renderOpts.puppeteerInstance = browser;
 
-  renderOptions.onProgress = makeProgressLogger(composition.durationInFrames);
+  // ── Apply user renderOptions overrides (take precedence over hwOptions) ──
+  if (userRenderOptions && typeof userRenderOptions === 'object') {
+    console.log('[Remotion] Applying user render options:', JSON.stringify(userRenderOptions));
 
-  await renderMedia(renderOptions);
+    // Quality mode: CRF vs Bitrate (mutually exclusive in Remotion)
+    if (userRenderOptions.qualityMode === 'bitrate' && userRenderOptions.videoBitrate) {
+      renderOpts.videoBitrate = userRenderOptions.videoBitrate;
+      delete renderOpts.crf;
+    } else if (userRenderOptions.crf != null) {
+      renderOpts.crf = userRenderOptions.crf;
+      delete renderOpts.videoBitrate;
+    }
+
+    // Audio codec
+    if (userRenderOptions.audioCodec) {
+      renderOpts.audioCodec = userRenderOptions.audioCodec;
+    }
+
+    // Audio bitrate
+    if (userRenderOptions.audioBitrate) {
+      renderOpts.audioBitrate = userRenderOptions.audioBitrate;
+    }
+
+    // Mute audio
+    if (userRenderOptions.muted === true) {
+      renderOpts.muted = true;
+    }
+
+    // Hardware acceleration — CRF is incompatible with Remotion HW accel,
+    // so force-disable to avoid noisy fallback warning
+    if (userRenderOptions.qualityMode === 'crf') {
+      delete renderOpts.hardwareAcceleration;
+    } else if (userRenderOptions.hardwareAcceleration) {
+      renderOpts.hardwareAcceleration = userRenderOptions.hardwareAcceleration;
+    }
+
+    // Encoder speed (x264 preset)
+    if (userRenderOptions.x264Preset) {
+      renderOpts.x264Preset = userRenderOptions.x264Preset;
+    }
+
+    // ProRes profile
+    if (resolvedCodec === 'prores' && userRenderOptions.proResProfile) {
+      renderOpts.proResProfileName = userRenderOptions.proResProfile;
+    }
+
+    // Concurrency (parallel Chrome instances)
+    if (userRenderOptions.concurrency && userRenderOptions.concurrency > 0) {
+      renderOpts.concurrency = userRenderOptions.concurrency;
+    }
+
+    // Render scale
+    if (userRenderOptions.scale && userRenderOptions.scale !== 1) {
+      renderOpts.scale = userRenderOptions.scale;
+    }
+
+    // Pixel format
+    if (userRenderOptions.pixelFormat) {
+      renderOpts.pixelFormat = userRenderOptions.pixelFormat;
+    }
+
+    // Custom FFmpeg flags (appended via ffmpegOverride callback)
+    if (userRenderOptions.enableCustomFfmpegFlags && userRenderOptions.customFfmpegFlags) {
+      const customFlags = userRenderOptions.customFfmpegFlags.trim().split(/\s+/);
+      const existingOverride = renderOpts.ffmpegOverride;
+      renderOpts.ffmpegOverride = ({ args, type }) => {
+        // Apply any existing hwaccel ffmpeg overrides first
+        let result = existingOverride ? existingOverride({ args, type }) : args;
+        // Then append user's custom flags (only to the final encoding pass)
+        if (type === 'stitcher') {
+          result = [...result, ...customFlags];
+        }
+        return result;
+      };
+    }
+
+    // Sample rate — not a direct Remotion param, inject via ffmpegOverride -ar flag
+    if (userRenderOptions.sampleRate && userRenderOptions.sampleRate !== 48000) {
+      const existingOverride = renderOpts.ffmpegOverride;
+      renderOpts.ffmpegOverride = ({ args, type }) => {
+        let result = existingOverride ? existingOverride({ args, type }) : args;
+        if (type === 'stitcher') {
+          result = [...result, '-ar', String(userRenderOptions.sampleRate)];
+        }
+        return result;
+      };
+    }
+  }
+
+  renderOpts.onProgress = makeProgressLogger(finalComposition.durationInFrames, onProgress);
+
+  await renderMedia(renderOpts);
 
   return {
     outputPath,
     compositionId,
-    width: composition.width,
-    height: composition.height,
-    fps: composition.fps,
-    durationInFrames: composition.durationInFrames,
+    width: finalComposition.width,
+    height: finalComposition.height,
+    fps: finalComposition.fps,
+    durationInFrames: finalComposition.durationInFrames,
   };
 }
 
@@ -442,12 +550,7 @@ export async function renderDynamicAnimation({
   // Ensure puppeteerInstance isn't overwritten by hwOptions spread
   renderOptions.puppeteerInstance = browser;
 
-  const logger = makeProgressLogger(finalComposition.durationInFrames);
-  if (onProgress) {
-    renderOptions.onProgress = (p) => { logger(p); onProgress(p); };
-  } else {
-    renderOptions.onProgress = logger;
-  }
+  renderOptions.onProgress = makeProgressLogger(finalComposition.durationInFrames, onProgress);
 
   await renderMedia(renderOptions);
 

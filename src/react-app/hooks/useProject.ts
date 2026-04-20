@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { readNDJSONStream } from '../utils/ndjson';
 
 const LOCAL_FFMPEG_URL = 'http://localhost:3333';
 const SESSION_STORAGE_KEY = 'clipwise-session';
@@ -193,6 +194,60 @@ export const defaultCaptionStyle: CaptionStyle = {
   highlightColor: '#FFD700',
 };
 
+// ── Render Options Types ────────────────────────────────────────────
+export type VideoCodec = 'h264' | 'h265' | 'vp8' | 'vp9' | 'av1' | 'prores';
+export type AudioCodec = 'aac' | 'mp3' | 'pcm-16' | 'opus';
+export type ContainerFormat = 'mp4' | 'mkv' | 'webm' | 'mov';
+export type HwAccelMode = 'disable' | 'if-possible' | 'required';
+
+export interface RenderOptions {
+  presetId: string;
+  codec: VideoCodec;
+  audioCodec: AudioCodec;
+  containerFormat: ContainerFormat;
+  outputWidth: number;
+  outputHeight: number;
+  outputFps: number;
+  qualityMode: 'crf' | 'bitrate';
+  crf: number | null;
+  videoBitrate: string;
+  audioBitrate: string;
+  sampleRate: number;
+  muted: boolean;
+  hardwareAcceleration: HwAccelMode;
+  x264Preset: string;
+  proResProfile: string;
+  scale: number;
+  pixelFormat: string;
+  enableCustomFfmpegFlags: boolean;
+  customFfmpegFlags: string;
+  concurrency: number;
+}
+
+export const defaultRenderOptions: RenderOptions = {
+  presetId: 'custom',
+  codec: 'h264',
+  audioCodec: 'aac',
+  containerFormat: 'mp4',
+  outputWidth: 1920,
+  outputHeight: 1080,
+  outputFps: 30,
+  qualityMode: 'crf',
+  crf: 23,
+  videoBitrate: '10M',
+  audioBitrate: '192k',
+  sampleRate: 48000,
+  muted: false,
+  hardwareAcceleration: 'if-possible',
+  x264Preset: 'fast',
+  proResProfile: 'hq',
+  scale: 1,
+  pixelFormat: 'yuv420p',
+  enableCustomFfmpegFlags: false,
+  customFfmpegFlags: '',
+  concurrency: 4,
+};
+
 export function useProject() {
   // Initialize session from localStorage if available
   const [session, setSessionInternal] = useState<SessionInfo | null>(loadSessionFromStorage);
@@ -224,6 +279,7 @@ export function useProject() {
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState('');
   const [serverAvailable, setServerAvailable] = useState<boolean | null>(null);
+  const [renderOptions, setRenderOptions] = useState<RenderOptions>(defaultRenderOptions);
 
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -234,6 +290,7 @@ export function useProject() {
   const captionDataRef = useRef(captionData);
   const transitionsRef = useRef(transitions);
   const timelineTransitionsRef = useRef(timelineTransitions);
+  const renderOptionsRef = useRef(renderOptions);
 
   // Keep refs in sync with state
   useEffect(() => { tracksRef.current = tracks; }, [tracks]);
@@ -242,6 +299,7 @@ export function useProject() {
   useEffect(() => { captionDataRef.current = captionData; }, [captionData]);
   useEffect(() => { transitionsRef.current = transitions; }, [transitions]);
   useEffect(() => { timelineTransitionsRef.current = timelineTransitions; }, [timelineTransitions]);
+  useEffect(() => { renderOptionsRef.current = renderOptions; }, [renderOptions]);
 
   // Wrapper to persist session to localStorage
   const setSession = useCallback((sessionOrUpdater: SessionInfo | null | ((prev: SessionInfo | null) => SessionInfo | null)) => {
@@ -872,6 +930,7 @@ export function useProject() {
             captionData: captionDataRef.current,
             transitions: transitionsRef.current,
             timelineTransitions: timelineTransitionsRef.current,
+            renderOptions: renderOptionsRef.current,
           }),
         });
         console.log('[Project] Saved');
@@ -930,6 +989,7 @@ export function useProject() {
         if (data.captionData) setCaptionData(data.captionData);
         if (data.transitions) setTransitions(data.transitions);
         if (data.timelineTransitions) setTimelineTransitions(data.timelineTransitions);
+        if (data.renderOptions) setRenderOptions({ ...defaultRenderOptions, ...data.renderOptions });
       }
     } catch (error) {
       console.error('[Project] Load failed:', error);
@@ -938,7 +998,7 @@ export function useProject() {
 
   // Render project
   // Uses refs to always get latest state
-  const renderProject = useCallback(async (preview = false): Promise<string> => {
+  const renderProject = useCallback(async (preview = false, exportRenderOptions?: RenderOptions): Promise<string> => {
     if (!session) throw new Error('No session');
 
     setLoading(true);
@@ -956,13 +1016,17 @@ export function useProject() {
           captionData: captionDataRef.current,
           transitions: transitionsRef.current,
           timelineTransitions: timelineTransitionsRef.current,
+          renderOptions: renderOptionsRef.current,
         }),
       });
 
       const response = await fetch(`${LOCAL_FFMPEG_URL}/session/${session.sessionId}/render`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ preview }),
+        body: JSON.stringify({
+          preview,
+          renderOptions: exportRenderOptions || renderOptionsRef.current,
+        }),
       });
 
       if (!response.ok) {
@@ -977,10 +1041,11 @@ export function useProject() {
         throw new Error(errorData.error || 'Render failed');
       }
 
-      const result = await response.json();
+      const result = await readNDJSONStream(response, ({ pct, frames, total, elapsed }) => {
+        setStatus(`Rendering: ${pct}% (${frames}/${total} frames) [${elapsed}]`);
+      }) as { warnings?: { message: string }[]; downloadUrl: string };
 
-      // Log migration/transition warnings if any
-      if (result.warnings?.length > 0) {
+      if (result.warnings?.length) {
         console.warn('[Render] Transition warnings:', result.warnings);
       }
 
@@ -1139,6 +1204,11 @@ export function useProject() {
     setTracks,
     setClips,
     setSettings,
+    setStatus,
+
+    // Render options
+    renderOptions,
+    setRenderOptions,
 
     // Timeline tabs
     timelineTabs,

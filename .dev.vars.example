@@ -45,5 +45,3 @@ GEMINI_API_KEY=your-gemini-api-key-here
 #   Headful mode uses real GPU drivers for faster CSS/WebGL rendering.
 #   Default: true on Windows/macOS, false on Linux (no display server typically).
 # HWACCEL_HEADFUL=true
-# REMOTION_CONCURRENCY: Number of concurrent Chrome instances for rendering (default: 4)
-# REMOTION_CONCURRENCY=4
