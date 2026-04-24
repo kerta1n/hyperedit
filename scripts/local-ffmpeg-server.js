@@ -550,10 +550,19 @@ function cleanupSession(sessionId) {
 // }, 30 * 60 * 1000); // Check every 30 minutes
 
 // Run FFmpeg command and return a promise
-function runFFmpeg(args, jobId) {
+function runFFmpeg(args, jobId, { timeout } = {}) {
   return new Promise((resolve, reject) => {
     const ffmpeg = spawn('ffmpeg', args);
     let stderr = '';
+    let killed = false;
+    let timer;
+
+    if (timeout) {
+      timer = setTimeout(() => {
+        killed = true;
+        ffmpeg.kill('SIGKILL');
+      }, timeout);
+    }
 
     ffmpeg.stderr.on('data', (data) => {
       stderr += data.toString();
@@ -566,13 +575,19 @@ function runFFmpeg(args, jobId) {
     });
 
     ffmpeg.on('close', (code) => {
-      if (code === 0) {
+      if (timer) clearTimeout(timer);
+      if (killed) {
+        reject(new Error(`FFmpeg timed out after ${timeout}ms`));
+      } else if (code === 0) {
         resolve(stderr);
       } else {
         reject(new Error(`FFmpeg failed with code ${code}: ${stderr.slice(-500)}`));
       }
     });
-    ffmpeg.on('error', reject);
+    ffmpeg.on('error', (err) => {
+      if (timer) clearTimeout(timer);
+      reject(err);
+    });
   });
 }
 
@@ -1833,17 +1848,16 @@ function handleSessionDelete(req, res, sessionId) {
 
 // Generate thumbnail for video/image asset
 async function generateThumbnail(inputPath, outputPath, isImage = false) {
+  const timeout = 15000;
   if (isImage) {
-    // For images, just resize
     const args = [
       '-y', '-i', inputPath,
       '-vf', 'scale=160:90:force_original_aspect_ratio=decrease,pad=160:90:(ow-iw)/2:(oh-ih)/2',
       '-frames:v', '1',
       outputPath
     ];
-    await runFFmpeg(args, 'thumb');
+    await runFFmpeg(args, 'thumb', { timeout });
   } else {
-    // For videos, extract frame at 1 second or 10% of duration
     const duration = await getVideoDuration(inputPath);
     const seekTime = Math.min(1, duration * 0.1);
     const args = [
@@ -1853,7 +1867,7 @@ async function generateThumbnail(inputPath, outputPath, isImage = false) {
       '-frames:v', '1',
       outputPath
     ];
-    await runFFmpeg(args, 'thumb');
+    await runFFmpeg(args, 'thumb', { timeout });
   }
 }
 
@@ -2706,6 +2720,7 @@ async function handleProjectRenderRemotion(req, res, sessionId) {
     return;
   }
 
+  activeRenders.add(sessionId);
   try {
     let body = '';
     for await (const chunk of req) body += chunk;
@@ -2716,6 +2731,7 @@ async function handleProjectRenderRemotion(req, res, sessionId) {
     if ((session.project.clips || []).length === 0 && !options.spec) {
       res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
       res.end(JSON.stringify({ error: 'No clips in timeline' }));
+      activeRenders.delete(sessionId);
       return;
     }
 
@@ -2763,6 +2779,31 @@ async function handleProjectRenderRemotion(req, res, sessionId) {
 
       const { stat } = await import('fs/promises');
       const outputStats = await stat(outputPath);
+
+      const renderDuration = renderInfo.durationInFrames / (renderInfo.fps || 30);
+      if (!preview) {
+        const thumbFilename = `${outputFilename.replace(/\.[^.]+$/, '')}_thumb.jpg`;
+        const thumbPath = join(session.rendersDir, thumbFilename);
+        try {
+          await generateThumbnail(outputPath, thumbPath, false);
+        } catch (thumbErr) {
+          console.warn(`[${sessionId}] Render thumbnail failed:`, thumbErr.message);
+        }
+        const now = new Date();
+        const pad = (n) => String(n).padStart(2, '0');
+        const defaultTitle = `Render-${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`;
+        spec._renderMeta = {
+          title: defaultTitle,
+          fileSize: outputStats.size,
+          duration: renderDuration,
+          codec: renderOpts.codec || 'h264',
+          containerFormat: renderOpts.containerFormat || 'mp4',
+          renderedAt: Date.now(),
+          filename: outputFilename,
+          thumbFilename: existsSync(thumbPath) ? thumbFilename : null,
+        };
+      }
+
       const specSnapshotPath = saveSpecSnapshot(session, `${outputFilename.replace(/\.[^.]+$/, '')}.spec.json`, spec);
 
       return {
@@ -2770,7 +2811,7 @@ async function handleProjectRenderRemotion(req, res, sessionId) {
         engine: 'remotion',
         path: outputPath,
         size: outputStats.size,
-        duration: renderInfo.durationInFrames / (renderInfo.fps || 30),
+        duration: renderDuration,
         renderInfo,
         specPath: specSnapshotPath,
         migration: specResult.migration,
@@ -2787,6 +2828,8 @@ async function handleProjectRenderRemotion(req, res, sessionId) {
     console.error(`[${sessionId}] Remotion render error:`, error.message);
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: error.message }));
+  } finally {
+    activeRenders.delete(sessionId);
   }
 }
 
@@ -2837,6 +2880,185 @@ async function handleRenderDownload(req, res, sessionId, renderType) {
     'Access-Control-Allow-Origin': '*',
   });
 
+  createReadStream(renderPath).pipe(res);
+}
+
+// ============== RENDER MANAGEMENT (Export Hub) ==============
+
+const RENDER_STEM_RE = /^export-\d+$/;
+const RENDER_FILE_RE = /^export-\d+\.(mp4|webm|mkv|mov)$/;
+const activeRenders = new Set();
+
+async function handleListRenders(req, res, sessionId) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+  const { readdir, stat } = await import('fs/promises');
+  const videoExt = /\.(mp4|webm|mkv|mov)$/;
+  let files;
+  try { files = await readdir(session.rendersDir); } catch { files = []; }
+
+  const videoFiles = files.filter(f => f.startsWith('export-') && videoExt.test(f));
+
+  const renders = await Promise.all(videoFiles.map(async (filename) => {
+    const videoPath = join(session.rendersDir, filename);
+    const stem = filename.replace(/\.[^.]+$/, '');
+    const specPath = join(session.rendersDir, `${stem}.spec.json`);
+    let spec = null;
+    try { spec = JSON.parse(readFileSync(specPath, 'utf-8')); } catch {}
+
+    const meta = spec?._renderMeta || {};
+    let fileSize = meta.fileSize;
+    if (!fileSize) {
+      try { fileSize = (await stat(videoPath)).size; } catch { fileSize = 0; }
+    }
+
+    return {
+      id: stem,
+      filename,
+      title: meta.title || spec?.title || stem,
+      createdAt: meta.renderedAt || null,
+      fileSize,
+      duration: meta.duration || null,
+      codec: meta.codec || null,
+      containerFormat: meta.containerFormat || null,
+      thumbnailUrl: meta.thumbFilename
+        ? `/session/${sessionId}/renders/${encodeURIComponent(stem)}/thumbnail`
+        : null,
+      downloadUrl: `/session/${sessionId}/renders/${encodeURIComponent(filename)}/download`,
+    };
+  }));
+
+  renders.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+  res.end(JSON.stringify({ renders }));
+}
+
+async function handleDeleteRender(req, res, sessionId, stem) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+  if (activeRenders.has(sessionId)) {
+    res.writeHead(409, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Render in progress' }));
+    return;
+  }
+  const { readdir } = await import('fs/promises');
+  const videoExt = /\.(mp4|webm|mkv|mov)$/;
+  let files;
+  try { files = await readdir(session.rendersDir); } catch { files = []; }
+
+  const videoFile = files.find(f => f.replace(/\.[^.]+$/, '') === stem && videoExt.test(f));
+  if (!videoFile) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Render not found' }));
+    return;
+  }
+  const toDelete = [
+    join(session.rendersDir, videoFile),
+    join(session.rendersDir, `${stem}.spec.json`),
+    join(session.rendersDir, `${stem}_thumb.jpg`),
+  ];
+  for (const p of toDelete) { try { unlinkSync(p); } catch {} }
+
+  res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+  res.end(JSON.stringify({ success: true }));
+}
+
+async function handleRenameRender(req, res, sessionId, stem) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+  let body = '';
+  for await (const chunk of req) body += chunk;
+  const { title } = body ? JSON.parse(body) : {};
+  if (!title || !title.trim()) {
+    res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'title is required' }));
+    return;
+  }
+  const specPath = join(session.rendersDir, `${stem}.spec.json`);
+  if (!existsSync(specPath)) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Spec file not found' }));
+    return;
+  }
+  let spec = {};
+  try { spec = JSON.parse(readFileSync(specPath, 'utf-8')); } catch {}
+
+  spec.title = title.trim();
+  if (spec._renderMeta) spec._renderMeta.title = title.trim();
+  writeFileSync(specPath, JSON.stringify(spec, null, 2));
+
+  res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+  res.end(JSON.stringify({ success: true, title: spec.title }));
+}
+
+async function handleRenderThumbnail(req, res, sessionId, stem) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+  const thumbPath = join(session.rendersDir, `${stem}_thumb.jpg`);
+  if (!existsSync(thumbPath)) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Thumbnail not found' }));
+    return;
+  }
+  const { stat } = await import('fs/promises');
+  const stats = await stat(thumbPath);
+  res.writeHead(200, {
+    'Content-Type': 'image/jpeg',
+    'Content-Length': stats.size,
+    'Cache-Control': 'public, max-age=31536000, immutable',
+    'Access-Control-Allow-Origin': '*',
+  });
+  createReadStream(thumbPath).pipe(res);
+}
+
+async function handleRenderFileDownload(req, res, sessionId, filename) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+  const renderPath = join(session.rendersDir, filename);
+  if (!existsSync(renderPath)) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'File not found' }));
+    return;
+  }
+  const { stat } = await import('fs/promises');
+  const stats = await stat(renderPath);
+  const ext = filename.substring(filename.lastIndexOf('.'));
+  const stem = filename.replace(/\.[^.]+$/, '');
+  const specPath = join(session.rendersDir, `${stem}.spec.json`);
+  let displayName = `${session.originalName.replace(/\.[^.]+$/, '')}-export${ext}`;
+  try {
+    const spec = JSON.parse(readFileSync(specPath, 'utf-8'));
+    const title = spec?._renderMeta?.title || spec?.title;
+    if (title) displayName = `${title}${ext}`;
+  } catch {}
+  const extToMime = { '.mp4': 'video/mp4', '.webm': 'video/webm', '.mkv': 'video/x-matroska', '.mov': 'video/quicktime' };
+  res.writeHead(200, {
+    'Content-Type': extToMime[ext] || 'application/octet-stream',
+    'Content-Length': stats.size,
+    'Content-Disposition': `attachment; filename="${displayName}"`,
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Expose-Headers': 'Content-Disposition',
+  });
   createReadStream(renderPath).pipe(res);
 }
 
@@ -8559,10 +8781,50 @@ const server = http.createServer(async (req, res) => {
     else if (req.method === 'PATCH' && action === 'name') {
       await handleSessionRename(req, res, sessionId);
     }
-    else if (action.startsWith('renders/')) {
-      const renderType = action.substring(8); // Remove 'renders/'
+    else if (action === 'renders') {
       if (req.method === 'GET') {
-        await handleRenderDownload(req, res, sessionId, renderType);
+        await handleListRenders(req, res, sessionId);
+      } else {
+        res.writeHead(405, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Method not allowed' }));
+      }
+    }
+    else if (action.startsWith('renders/')) {
+      const renderSub = action.substring(8);
+      const slashIdx = renderSub.indexOf('/');
+      const stemOrFile = decodeURIComponent(slashIdx === -1 ? renderSub : renderSub.substring(0, slashIdx));
+      const subAction = slashIdx === -1 ? undefined : renderSub.substring(slashIdx + 1);
+
+      if (subAction === 'thumbnail' && req.method === 'GET') {
+        if (!RENDER_STEM_RE.test(stemOrFile)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid render ID' }));
+        } else {
+          await handleRenderThumbnail(req, res, sessionId, stemOrFile);
+        }
+      } else if (subAction === 'download' && req.method === 'GET') {
+        if (!RENDER_FILE_RE.test(stemOrFile)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid filename' }));
+        } else {
+          await handleRenderFileDownload(req, res, sessionId, stemOrFile);
+        }
+      } else if (subAction === 'name' && req.method === 'PATCH') {
+        if (!RENDER_STEM_RE.test(stemOrFile)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid render ID' }));
+        } else {
+          await handleRenameRender(req, res, sessionId, stemOrFile);
+        }
+      } else if (!subAction && req.method === 'DELETE') {
+        if (!RENDER_STEM_RE.test(stemOrFile)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid render ID' }));
+        } else {
+          await handleDeleteRender(req, res, sessionId, stemOrFile);
+        }
+      } else if (!subAction && req.method === 'GET') {
+        await handleRenderDownload(req, res, sessionId, stemOrFile);
       } else {
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Render endpoint not found' }));

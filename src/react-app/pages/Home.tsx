@@ -2046,6 +2046,7 @@ export default function Home() {
           }}
           isExporting={loading}
           recommendedConcurrency={recommendedConcurrency}
+          sessionId={session?.sessionId ?? ''}
         />
       )}
 

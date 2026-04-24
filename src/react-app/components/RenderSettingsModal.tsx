@@ -1,6 +1,8 @@
 import { useState, useCallback, useMemo, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { X, Download, ChevronDown, Info } from 'lucide-react';
+import { X, Download, ChevronDown, Info, Trash2, PenLine } from 'lucide-react';
+import { useDeliverables } from '@/react-app/hooks/useDeliverables';
+import type { RenderItem } from '@/react-app/hooks/useDeliverables';
 import type {
   RenderOptions,
   VideoCodec,
@@ -203,6 +205,7 @@ interface RenderSettingsModalProps {
   onUpdateOptions: (options: RenderOptions) => void;
   isExporting: boolean;
   recommendedConcurrency: number;
+  sessionId: string;
 }
 
 export default function RenderSettingsModal({
@@ -212,10 +215,25 @@ export default function RenderSettingsModal({
   onUpdateOptions,
   isExporting,
   recommendedConcurrency,
+  sessionId,
 }: RenderSettingsModalProps) {
   const [opts, setOpts] = useState<RenderOptions>(renderOptions);
   const [customResolution, setCustomResolution] = useState(false);
-  const [crfDrag, setCrfDrag] = useState<number | null>(null); // local CRF during slider drag
+  const [crfDrag, setCrfDrag] = useState<number | null>(null);
+  const [activeTab, setActiveTab] = useState<'settings' | 'gallery'>('settings');
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const {
+    renders, selectedIds, loading: rendersLoading, error: rendersError,
+    pendingDelete, fetchRenders, deleteRenders, renameRender,
+    toggleSelect, clearSelection, totalSelectedSize, setPendingDelete,
+  } = useDeliverables();
+
+  useEffect(() => {
+    if (activeTab === 'gallery' && sessionId) {
+      fetchRenders(sessionId);
+    }
+  }, [activeTab, sessionId, fetchRenders]);
 
   // Detect if the current resolution matches a preset
   useEffect(() => {
@@ -312,7 +330,8 @@ export default function RenderSettingsModal({
     return 'Small File';
   }, [displayCrf, crfRange]);
 
-  return createPortal(
+  return (<>
+    {createPortal(
     <div
       id="render-settings-backdrop"
       className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 backdrop-blur-sm"
@@ -321,19 +340,36 @@ export default function RenderSettingsModal({
     >
       {/* Modal — max-w-5xl and no overflow-y-auto so everything fits without scrolling */}
       <div className="bg-zinc-900 rounded-2xl border border-zinc-800 w-full max-w-5xl flex flex-col shadow-2xl">
-        {/* ── Header + Preset dropdown ────────────────────────────── */}
+        {/* ── Header ──────────────────────────────────────────────── */}
         <div className="flex items-center justify-between px-6 py-3 border-b border-zinc-800">
-          <div className="flex items-center gap-4">
-            <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-              <Download className="w-5 h-5 text-orange-400" />
-              Export Settings
-            </h2>
-            {/* Preset dropdown */}
-            <div className="relative">
+          <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+            <Download className="w-5 h-5 text-orange-400" />
+            Export
+          </h2>
+
+          <div className="flex gap-1 bg-zinc-800 rounded-lg p-0.5">
+            <QualityModeButton active={activeTab === 'settings'} label="Render Settings" onClick={() => setActiveTab('settings')} />
+            <QualityModeButton active={activeTab === 'gallery'} label="Gallery" onClick={() => setActiveTab('gallery')} />
+          </div>
+
+          <button
+            onClick={onClose}
+            className="p-1.5 hover:bg-zinc-800 rounded-lg transition-colors"
+          >
+            <X className="w-5 h-5 text-zinc-400" />
+          </button>
+        </div>
+
+        <div className="relative">
+        <div className={activeTab !== 'settings' ? 'invisible' : ''}>
+        {/* Preset dropdown */}
+        <div className="px-6 pt-4 pb-0">
+          <Field label="Preset">
+            <div className="relative w-52">
               <select
                 value={opts.presetId}
                 onChange={e => applyPreset(e.target.value)}
-                className="appearance-none pl-3 pr-8 py-1.5 bg-zinc-800 border border-zinc-700 rounded-lg text-xs font-medium text-zinc-300 focus:outline-none focus:border-orange-500 transition-colors cursor-pointer"
+                className="appearance-none w-full pl-3 pr-8 py-1.5 bg-zinc-800 border border-zinc-700 rounded-lg text-xs font-medium text-zinc-300 focus:outline-none focus:border-orange-500 transition-colors cursor-pointer"
               >
                 <option value="custom">Custom</option>
                 {BUILT_IN_PRESETS.map(p => (
@@ -342,13 +378,7 @@ export default function RenderSettingsModal({
               </select>
               <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-500 pointer-events-none" />
             </div>
-          </div>
-          <button
-            onClick={onClose}
-            className="p-1.5 hover:bg-zinc-800 rounded-lg transition-colors"
-          >
-            <X className="w-5 h-5 text-zinc-400" />
-          </button>
+          </Field>
         </div>
 
         {/* ── Main content (2 columns, compact) ──────────────────── */}
@@ -596,10 +626,128 @@ export default function RenderSettingsModal({
             {isExporting ? 'Exporting…' : 'Export'}
           </button>
         </div>
+        </div>
+
+        {activeTab === 'gallery' && (
+          <div className="absolute inset-0 flex flex-col bg-zinc-900">
+            <div className="px-6 py-4 overflow-y-auto flex-1">
+              {rendersLoading && (
+                <div className="flex items-center justify-center h-40 text-zinc-500 text-sm">Loading renders…</div>
+              )}
+              {rendersError && !rendersLoading && (
+                <div className="flex items-center justify-center h-40 text-red-400 text-sm">{rendersError}</div>
+              )}
+              {!rendersLoading && !rendersError && renders.length === 0 && (
+                <div className="flex items-center justify-center h-40 text-zinc-500 text-sm">
+                  No renders yet. Export something first.
+                </div>
+              )}
+              {!rendersLoading && renders.length > 0 && (
+                <div className="grid grid-cols-4 gap-3">
+                  {renders.map(r => (
+                    <RenderCard
+                      key={r.id}
+                      render={r}
+                      isSelected={selectedIds.includes(r.id)}
+                      isRenaming={renamingId === r.id}
+                      renameValue={renameValue}
+                      onSelect={() => toggleSelect(r.id)}
+                      onRenameChange={setRenameValue}
+                      onRenameCommit={async () => {
+                        if (renameValue.trim()) await renameRender(sessionId, r.id, renameValue.trim());
+                        setRenamingId(null);
+                      }}
+                      onRenameCancel={() => setRenamingId(null)}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="px-6 py-3 border-t border-zinc-800 flex items-center justify-between">
+              <button
+                onClick={() => selectedIds.length > 0 && setPendingDelete([...selectedIds])}
+                disabled={selectedIds.length === 0}
+                className="flex items-center gap-1.5 px-3 py-2 bg-zinc-800 hover:bg-red-900/40 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg text-sm text-red-400 transition-colors"
+              >
+                <Trash2 className="w-4 h-4" />
+                Delete
+              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    const r = renders.find(x => x.id === selectedIds[0]);
+                    if (r) { setRenamingId(r.id); setRenameValue(r.title); }
+                  }}
+                  disabled={selectedIds.length !== 1}
+                  className="flex items-center gap-1.5 px-3 py-2 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg text-sm text-zinc-300 transition-colors"
+                >
+                  <PenLine className="w-4 h-4" />
+                  Edit title
+                </button>
+
+                <button
+                  onClick={async () => {
+                    for (const r of renders.filter(x => selectedIds.includes(x.id))) {
+                      const link = document.createElement('a');
+                      link.href = `http://localhost:3333${r.downloadUrl}`;
+                      link.download = r.filename;
+                      document.body.appendChild(link);
+                      link.click();
+                      document.body.removeChild(link);
+                      await new Promise(resolve => setTimeout(resolve, 500));
+                    }
+                  }}
+                  disabled={selectedIds.length === 0}
+                  className="flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg text-sm font-semibold text-white transition-all shadow-lg shadow-orange-500/20"
+                >
+                  <Download className="w-4 h-4" />
+                  {selectedIds.length > 0 ? `Download (${formatFileSize(totalSelectedSize)})` : 'Download'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        </div>
+
       </div>
     </div>,
     document.body
-  );
+  )}
+
+    {pendingDelete && createPortal(
+      <div
+        className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 backdrop-blur-sm"
+        onClick={(e) => { if (e.target === e.currentTarget) setPendingDelete(null); }}
+      >
+        <div className="bg-zinc-900 rounded-xl border border-zinc-700 p-6 max-w-sm w-full mx-4 text-white">
+          <h3 className="text-base font-semibold text-red-400 mb-2 flex items-center gap-2">
+            <Trash2 className="w-4 h-4 text-red-400" />
+            Delete {pendingDelete.length === 1 ? 'render' : `${pendingDelete.length} renders`}?
+          </h3>
+          <p className="text-sm text-zinc-500 mb-5">
+            The video file{pendingDelete.length > 1 ? 's' : ''} and associated data will be permanently deleted. This cannot be undone.
+          </p>
+          <div className="flex gap-2 justify-end">
+            <button
+              onClick={() => setPendingDelete(null)}
+              className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-sm text-white transition-colors"
+            >Cancel</button>
+            <button
+              onClick={async () => {
+                await deleteRenders(sessionId, pendingDelete);
+                setPendingDelete(null);
+                clearSelection();
+              }}
+              className="px-4 py-2 bg-red-600 hover:bg-red-500 rounded-lg text-sm font-medium transition-colors"
+            >Delete</button>
+          </div>
+        </div>
+      </div>,
+      document.body
+    )}
+  </>);
 }
 
 // ── Shared UI primitives ────────────────────────────────────────────
@@ -702,4 +850,93 @@ function ToggleSwitch({ checked, onChange }: { checked: boolean; onChange: (v: b
       />
     </button>
   );
+}
+
+function RenderCard({
+  render, isSelected, isRenaming, renameValue,
+  onSelect, onRenameChange, onRenameCommit, onRenameCancel,
+}: {
+  render: RenderItem;
+  isSelected: boolean;
+  isRenaming: boolean;
+  renameValue: string;
+  onSelect: () => void;
+  onRenameChange: (v: string) => void;
+  onRenameCommit: () => void;
+  onRenameCancel: () => void;
+}) {
+  const thumbSrc = render.thumbnailUrl ? `http://localhost:3333${render.thumbnailUrl}` : null;
+
+  return (
+    <div
+      onClick={onSelect}
+      className={`cursor-pointer rounded-lg overflow-hidden border transition-all select-none ${
+        isSelected
+          ? 'border-orange-500 ring-2 ring-orange-500/40'
+          : 'border-zinc-700/50 hover:border-orange-500/40'
+      }`}
+    >
+      <div className="relative aspect-video bg-zinc-800">
+        {thumbSrc ? (
+          <img src={thumbSrc} alt={render.title} className="w-full h-full object-cover" draggable={false} />
+        ) : (
+          <div className="w-full h-full bg-gradient-to-br from-zinc-700 to-zinc-800 flex items-center justify-center">
+            <Download className="w-6 h-6 text-zinc-500" />
+          </div>
+        )}
+      </div>
+
+      <div className="p-2 space-y-0.5">
+        {isRenaming ? (
+          <input
+            autoFocus
+            value={renameValue}
+            onChange={e => onRenameChange(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') onRenameCommit(); if (e.key === 'Escape') onRenameCancel(); }}
+            onBlur={onRenameCommit}
+            onClick={e => e.stopPropagation()}
+            className="w-full px-1.5 py-0.5 bg-zinc-700 border border-orange-500 rounded text-xs text-white focus:outline-none"
+          />
+        ) : (
+          <div className="text-xs font-medium text-white truncate" title={render.title}>
+            {render.title}
+          </div>
+        )}
+
+        <div className="text-[10px] text-zinc-400 flex items-center gap-1 truncate">
+          <span>{render.duration != null ? formatDuration(render.duration) : '—'}</span>
+          <span>&bull;</span>
+          <span>{formatFileSize(render.fileSize)}</span>
+          <span>&bull;</span>
+          <span title={render.createdAt ? new Date(render.createdAt).toLocaleString() : ''}>
+            {render.createdAt ? formatRelativeDate(render.createdAt) : '—'}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function formatRelativeDate(ts: number): string {
+  const diff = Date.now() - ts;
+  const m = Math.floor(diff / 60000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+function formatDuration(secs: number): string {
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = Math.floor(secs % 60);
+  if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
+  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`;
+  return `${(bytes / 1e3).toFixed(0)} KB`;
 }
