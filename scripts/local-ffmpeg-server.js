@@ -319,8 +319,20 @@ function restoreSessionsFromDisk() {
       }
     }
 
-    if (assets.size === 0) {
-      console.log(`[Session] Skipping ${sessionId} - no assets found`);
+    // Load session-meta.json if present (persists name + createdAt)
+    const sessionMetaPath = join(sessionDir, 'session-meta.json');
+    let sessionMeta = null;
+    if (existsSync(sessionMetaPath)) {
+      try {
+        sessionMeta = JSON.parse(readFileSync(sessionMetaPath, 'utf-8'));
+      } catch (e) {
+        console.log(`[Session] Could not read session-meta.json for ${sessionId}`);
+      }
+    }
+
+    // Skip sessions with no assets AND no meta (truly abandoned dirs)
+    if (assets.size === 0 && !sessionMeta) {
+      console.log(`[Session] Skipping ${sessionId} - no assets and no meta`);
       continue;
     }
 
@@ -330,8 +342,8 @@ function restoreSessionsFromDisk() {
       assetsDir,
       rendersDir,
       currentVideo: join(sessionDir, 'current.mp4'), // Legacy
-      originalName: 'Restored Project',
-      createdAt: Date.now(),
+      originalName: sessionMeta?.name || 'Restored Project',
+      createdAt: sessionMeta?.createdAt || Date.now(),
       editCount: 0,
       assets,
       project: projectState,
@@ -463,6 +475,19 @@ function getSessionAssetsAsArray(session) {
 // Run restoration on module load
 restoreSessionsFromDisk();
 
+// Session meta persistence (name + createdAt survive restarts)
+function saveSessionMeta(session) {
+  try {
+    const metaPath = join(session.dir, 'session-meta.json');
+    writeFileSync(metaPath, JSON.stringify({
+      name: session.originalName,
+      createdAt: session.createdAt,
+    }));
+  } catch (e) {
+    console.log(`[Session] Could not save session-meta.json: ${e.message}`);
+  }
+}
+
 // Session management
 function createSession(originalName) {
   const sessionId = randomUUID();
@@ -491,6 +516,7 @@ function createSession(originalName) {
     transcriptCache: new Map(), // assetId -> { text, words, cachedAt }
   };
   sessions.set(sessionId, session);
+  saveSessionMeta(session);
   console.log(`[Session] Created: ${sessionId}`);
   return session;
 }
@@ -1180,6 +1206,62 @@ Only return the JSON, no other text.`
   }
 }
 
+// ============== SESSION MANAGEMENT HANDLERS ==============
+
+function handleSessionList(req, res) {
+  const list = [];
+  for (const [id, s] of sessions) {
+    list.push({
+      sessionId: id,
+      name: s.originalName,
+      createdAt: s.createdAt,
+      assetCount: s.assets.size,
+      clipCount: s.project?.clips?.length || 0,
+    });
+  }
+  list.sort((a, b) => b.createdAt - a.createdAt);
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ sessions: list }));
+}
+
+async function handleSessionRename(req, res, sessionId) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+
+  try {
+    const body = await new Promise((resolve, reject) => {
+      let data = '';
+      req.on('data', chunk => { data += chunk; });
+      req.on('end', () => {
+        try { resolve(JSON.parse(data)); }
+        catch (e) { reject(new Error('Invalid JSON')); }
+      });
+      req.on('error', reject);
+    });
+
+    const name = (body.name || '').trim();
+    if (!name) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Name cannot be empty' }));
+      return;
+    }
+
+    session.originalName = name;
+    saveSessionMeta(session);
+    console.log(`[Session] Renamed ${sessionId} to "${name}"`);
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: true, name }));
+  } catch (error) {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: error.message }));
+  }
+}
+
 // ============== SESSION-BASED HANDLERS ==============
 // These keep videos on disk between edits for efficient large file handling
 
@@ -1194,6 +1276,7 @@ async function handleSessionCreate(req, res) {
     res.end(JSON.stringify({
       success: true,
       sessionId: session.id,
+      name: session.originalName,
     }));
 
   } catch (error) {
@@ -8293,7 +8376,7 @@ Return ONLY the .tsx code, no explanation.`;
 const server = http.createServer(async (req, res) => {
   // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
 
@@ -8472,6 +8555,10 @@ const server = http.createServer(async (req, res) => {
     else if (req.method === 'POST' && action === 'delete-transition') {
       await handleDeleteTransition(req, res, sessionId);
     }
+    // Session management
+    else if (req.method === 'PATCH' && action === 'name') {
+      await handleSessionRename(req, res, sessionId);
+    }
     else if (action.startsWith('renders/')) {
       const renderType = action.substring(8); // Remove 'renders/'
       if (req.method === 'GET') {
@@ -8485,6 +8572,12 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Session endpoint not found' }));
     }
+    return;
+  }
+
+  // Session management (top-level)
+  if (req.method === 'GET' && path === '/sessions') {
+    handleSessionList(req, res);
     return;
   }
 
@@ -8517,6 +8610,9 @@ server.listen(PORT, () => {
   // Clear stale Remotion bundle cache so builtin transition changes take effect
   invalidateBundleCache();
   console.log(`\n🎬 Local FFmpeg server running at http://localhost:${PORT}`);
+  console.log(`\n   Session Management:`);
+  console.log(`   GET  /sessions - List all sessions`);
+  console.log(`   PATCH /session/:id/name - Rename session`);
   console.log(`\n   Session API:`);
   console.log(`   POST /session/upload - Upload video, get sessionId`);
   console.log(`   GET  /session/:id/stream - Stream video for preview`);

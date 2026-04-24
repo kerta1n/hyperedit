@@ -157,15 +157,21 @@ export interface TimelineTab {
 // Session info
 export interface SessionInfo {
   sessionId: string;
+  name: string;
   createdAt: number;
 }
 
-// Helper to load session from localStorage
+// Helper to load session from localStorage (migrates old entries missing `name`)
 function loadSessionFromStorage(): SessionInfo | null {
   try {
     const stored = localStorage.getItem(SESSION_STORAGE_KEY);
     if (stored) {
-      return JSON.parse(stored);
+      const parsed = JSON.parse(stored);
+      return {
+        sessionId: parsed.sessionId,
+        name: parsed.name || 'Untitled Project',
+        createdAt: parsed.createdAt,
+      };
     }
   } catch (e) {
     console.error('Failed to load session from storage:', e);
@@ -372,6 +378,7 @@ export function useProject() {
     const tempId = crypto.randomUUID();
     const sessionInfo: SessionInfo = {
       sessionId: tempId,
+      name: 'Untitled Project',
       createdAt: Date.now(),
     };
     return sessionInfo;
@@ -400,6 +407,7 @@ export function useProject() {
         const createResult = await createResponse.json();
         currentSession = {
           sessionId: createResult.sessionId,
+          name: createResult.name || 'Untitled Project',
           createdAt: Date.now(),
         };
         setSession(currentSession);
@@ -940,6 +948,54 @@ export function useProject() {
     }, 500);
   }, [session]);
 
+  // Immediate (non-debounced) save — used before session switch
+  const saveProjectImmediate = useCallback(async (): Promise<void> => {
+    if (!session) return;
+
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
+    }
+
+    try {
+      await fetch(`${LOCAL_FFMPEG_URL}/session/${session.sessionId}/project`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tracks: tracksRef.current,
+          clips: clipsRef.current,
+          settings: settingsRef.current,
+          captionData: captionDataRef.current,
+          transitions: transitionsRef.current,
+          timelineTransitions: timelineTransitionsRef.current,
+          renderOptions: renderOptionsRef.current,
+        }),
+      });
+      console.log('[Project] Saved (immediate)');
+    } catch (error) {
+      console.error('[Project] Immediate save failed:', error);
+    }
+  }, [session]);
+
+  // Reset all hook-owned project state for clean session switch
+  const resetProjectState = useCallback((): void => {
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
+    }
+    setAssets([]);
+    setClips([]);
+    setTransitions([]);
+    setTimelineTransitions([]);
+    setCaptionData({});
+    setTimelineTabs([{ id: 'main', name: 'Main', type: 'main', clips: [], timelineTransitions: [] }]);
+    setActiveTabId('main');
+    setRenderOptions(defaultRenderOptions);
+    setSettings({ width: 1920, height: 1080, fps: 30 });
+    setLoading(false);
+    setStatus('');
+  }, []);
+
   // Load project from server (including assets)
   const loadProject = useCallback(async (): Promise<void> => {
     if (!session) return;
@@ -1155,9 +1211,12 @@ export function useProject() {
     serverAvailable,
 
     // Session
+    setSession,
     checkServer,
     createSession,
     closeSession,
+    saveProjectImmediate,
+    resetProjectState,
 
     // Assets
     uploadAsset,

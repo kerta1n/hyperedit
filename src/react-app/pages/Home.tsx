@@ -18,6 +18,7 @@ import { useProject, Asset, TimelineClip, CaptionStyle } from '@/react-app/hooks
 import type { RenderOptions } from '@/react-app/hooks/useProject';
 import { readNDJSONStream } from '@/react-app/utils/ndjson';
 import { useVideoSession } from '@/react-app/hooks/useVideoSession';
+import SessionManager from '@/react-app/components/SessionManager';
 import { Sparkles, ListOrdered, Copy, Check, X, Download, Play, Palette, Film } from 'lucide-react';
 import type { ActiveTransition } from '@/react-app/components/TransitionPreview';
 import type { TemplateId } from '@/remotion/templates';
@@ -102,7 +103,26 @@ export default function Home() {
     // Render options
     renderOptions,
     setRenderOptions,
+    // Session management
+    setSession,
+    saveProjectImmediate,
+    resetProjectState,
   } = useProject();
+
+  const resetLocalState = useCallback(() => {
+    setSelectedClipId(null);
+    setSelectedClipIds([]);
+    setSelectedTransitionId(null);
+    setSelectedAssetId(null);
+    setPreviewAssetId(null);
+    setCurrentTime(0);
+    setIsPlaying(false);
+    setChapterData(null);
+    setShowChapters(false);
+    setShowGifSearch(false);
+    setShowRenderSettings(false);
+    setSelectedTrackId(null);
+  }, []);
 
   // Compute the active clips based on which tab is selected
   const activeClips = useMemo(() => {
@@ -1876,6 +1896,13 @@ export default function Home() {
               HyperEdit
             </h1>
           </div>
+          <SessionManager
+            currentSession={session}
+            saveProjectImmediate={saveProjectImmediate}
+            setSession={setSession}
+            resetProjectState={resetProjectState}
+            resetLocalState={resetLocalState}
+          />
           {currentStatus && (
             <span className="text-xs text-zinc-400 bg-zinc-800 px-2 py-1 rounded">
               {currentStatus}
