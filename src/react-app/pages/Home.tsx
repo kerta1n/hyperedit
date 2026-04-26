@@ -1382,7 +1382,7 @@ export default function Home() {
       setStatus('Generating animation...');
       const data = await readNDJSONStream(response, ({ pct, frames, total, elapsed }) => {
         setStatus(`Rendering animation: ${pct}% (${frames}/${total} frames) [${elapsed}]`);
-      });
+      }) as { assetId: string; duration: number; sceneCount?: number };
       setStatus('');
 
       // Refresh assets to sync with server (animation was just created)
@@ -1683,6 +1683,67 @@ export default function Home() {
     };
   }, [session, clips, assets, refreshAssets, updateClip, addClip, saveProject]);
 
+  const handleAudioSync = useCallback(async (params: { assetA: string; assetB: string; sampleRate: number; correlationSampleSize: number; initialGranularity: number }) => {
+    if (!session?.sessionId) throw new Error('No active session');
+    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/audio-sync`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    if (!response.ok) {
+      const err = await response.json();
+      throw new Error(err.error || 'Audio sync failed');
+    }
+    return response.json();
+  }, [session]);
+
+  const handleApplyAudioSync = useCallback((result: { analyzedClipIds: [string, string]; analyzedTabId: string; anchorClipId: string; nonAnchorClipId: string; nonAnchorIsAssetB: boolean; anchorInPoint: number; nonAnchorInPoint: number; offsetSeconds: number }) => {
+    const { analyzedTabId, anchorClipId, nonAnchorClipId, nonAnchorIsAssetB, anchorInPoint, nonAnchorInPoint, offsetSeconds } = result;
+
+    const allClips = analyzedTabId !== 'main'
+      ? (timelineTabs.find(t => t.id === analyzedTabId)?.clips || [])
+      : clips;
+
+    const anchorClip = allClips.find(c => c.id === anchorClipId);
+    if (!anchorClip) return;
+
+    const assetOffset = nonAnchorIsAssetB ? offsetSeconds : -offsetSeconds;
+    const rawStart = anchorClip.start + assetOffset - anchorInPoint + nonAnchorInPoint;
+
+    console.log('[AudioSync Apply]', {
+      anchorClipId, nonAnchorClipId, nonAnchorIsAssetB,
+      offsetSeconds, assetOffset, rawStart,
+      anchorStart: anchorClip.start, anchorInPoint, nonAnchorInPoint,
+      analyzedTabId,
+    });
+
+    if (analyzedTabId !== 'main') {
+      const tab = timelineTabs.find(t => t.id === analyzedTabId);
+      if (tab) {
+        if (rawStart < 0) {
+          const shift = -rawStart;
+          updateTabClips(analyzedTabId, tab.clips.map(c => {
+            if (c.id === anchorClipId) return { ...c, start: c.start + shift };
+            if (c.id === nonAnchorClipId) return { ...c, start: 0 };
+            return c;
+          }));
+        } else {
+          updateTabClips(analyzedTabId, tab.clips.map(c =>
+            c.id === nonAnchorClipId ? { ...c, start: rawStart } : c
+          ));
+        }
+      }
+    } else {
+      if (rawStart < 0) {
+        const shift = -rawStart;
+        updateClip(anchorClipId, { start: anchorClip.start + shift });
+        updateClip(nonAnchorClipId, { start: 0 });
+      } else {
+        updateClip(nonAnchorClipId, { start: rawStart });
+      }
+    }
+  }, [clips, timelineTabs, updateClip, updateTabClips]);
+
   // Handle contextual animation creation (uses video content to inform the animation)
   const handleCreateContextualAnimation = useCallback(async (request: {
     type: 'intro' | 'outro' | 'transition' | 'highlight';
@@ -1816,7 +1877,7 @@ export default function Home() {
     setStatus('Editing animation...');
     const data = await readNDJSONStream(response, ({ pct, frames, total, elapsed }) => {
       setStatus(`Rendering animation: ${pct}% (${frames}/${total} frames) [${elapsed}]`);
-    });
+    }) as { assetId: string; duration: number; sceneCount: number; editCount: number };
     setStatus('');
 
     console.log('[handleEditAnimation] ===== STEP 1: Server response =====');
@@ -2293,6 +2354,8 @@ export default function Home() {
                   onGenerateTranscriptAnimation={handleGenerateTranscriptAnimation}
                   onGenerateBatchAnimations={handleGenerateBatchAnimations}
                   onExtractAudio={handleExtractAudio}
+                  onAudioSync={handleAudioSync}
+                  onApplyAudioSync={handleApplyAudioSync}
                   onCreateContextualAnimation={handleCreateContextualAnimation}
                   onOpenAnimationInTab={handleOpenAnimationInTab}
                   onEditAnimation={handleEditAnimation}

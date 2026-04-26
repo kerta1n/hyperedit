@@ -251,7 +251,7 @@ export const defaultRenderOptions: RenderOptions = {
   pixelFormat: 'yuv420p',
   enableCustomFfmpegFlags: false,
   customFfmpegFlags: '',
-  concurrency: 4,
+  concurrency: 2,
 };
 
 export function useProject() {

@@ -293,6 +293,14 @@ export async function renderSpecWithRemotion({
   }
 
   const normalizedSpec = withDefaults(spec);
+
+  // Apply fps override to spec BEFORE selectComposition so calculateMetadata
+  // returns the correct fps and durationInFrames from the start — no post-hoc
+  // override needed, and the component's safeSpec.settings.fps matches.
+  if (userRenderOptions?.outputFps) {
+    normalizedSpec.settings.fps = userRenderOptions.outputFps;
+  }
+
   await mkdir(dirname(outputPath), { recursive: true });
 
   const customIds = (normalizedSpec.transitions || [])
@@ -347,15 +355,13 @@ export async function renderSpecWithRemotion({
     puppeteerInstance: browser,
   });
 
-  // Override composition dimensions/fps from user renderOptions if provided
+  // Override composition dimensions from user renderOptions if provided
+  // (fps is already applied to the spec above, so calculateMetadata handled it)
   const finalComposition = { ...composition };
   if (userRenderOptions) {
     if (userRenderOptions.outputWidth && userRenderOptions.outputHeight) {
       finalComposition.width = userRenderOptions.outputWidth;
       finalComposition.height = userRenderOptions.outputHeight;
-    }
-    if (userRenderOptions.outputFps) {
-      finalComposition.fps = userRenderOptions.outputFps;
     }
   }
 

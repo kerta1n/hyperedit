@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Sparkles, Send, Wand2, Clock, Terminal, CheckCircle, Loader2, VolumeX, FileVideo, Type, Image, Zap, X, Scissors, Plus, Film, Music, MapPin, Timer, ImagePlus, Move, ChevronDown, ChevronRight } from 'lucide-react';
+import { Sparkles, Send, Wand2, Clock, Terminal, CheckCircle, Loader2, VolumeX, Volume2, FileVideo, Type, Image, Zap, X, Scissors, Plus, Film, Music, MapPin, Timer, ImagePlus, Move, ChevronDown, ChevronRight } from 'lucide-react';
 import type { TimelineClip, Track, Asset, CaptionStyle } from '@/react-app/hooks/useProject';
 import { MOTION_TEMPLATES, type TemplateId } from '@/remotion/templates';
 import MotionGraphicsPanel from './MotionGraphicsPanel';
@@ -168,6 +168,24 @@ interface ClarifyingQuestion {
   };
 }
 
+interface AudioSyncResult {
+  offsetSeconds: number;
+  correlation: number;
+  confidence: 'high' | 'medium' | 'low';
+  note?: string;
+}
+
+interface AudioSyncState extends AudioSyncResult {
+  analyzedClipIds: [string, string];
+  analyzedTabId: string;
+  anchorClipId: string;
+  nonAnchorClipId: string;
+  nonAnchorIsAssetB: boolean;
+  anchorInPoint: number;
+  nonAnchorInPoint: number;
+  requestId: number;
+}
+
 // Context info for V1 clip in edit tab (for hybrid asset approach)
 interface EditTabV1Context {
   assetId: string;
@@ -212,6 +230,9 @@ interface AIPromptPanelProps {
   onGenerateTransition?: (description: string) => Promise<{ transitionId: string; name: string; code: string }>;
   onApplyTransition?: (fromClipId: string, toClipId: string, type: string, durationSec: number, customTransitionId?: string) => void;
   availableTransitions?: { builtIn: string[]; custom: { id: string; name: string }[] };
+  // Audio sync
+  onAudioSync?: (params: { assetA: string; assetB: string; sampleRate: number; correlationSampleSize: number; initialGranularity: number; analysisRegion?: string; analysisDuration?: number }) => Promise<AudioSyncResult>;
+  onApplyAudioSync?: (result: AudioSyncState) => void;
   // Edit tab context
   activeTabId?: string;
   editTabAssetId?: string;
@@ -245,6 +266,8 @@ export default function AIPromptPanel({
   currentTime = 0,
   selectedClipId,
   selectedClipIds = [],
+  onAudioSync,
+  onApplyAudioSync,
   onUploadTransition,
   onDeleteTransition,
   onGenerateTransition,
@@ -275,6 +298,16 @@ export default function AIPromptPanel({
   const [transitionDuration, setTransitionDuration] = useState(0.5);
   const [generateTransitionPrompt, setGenerateTransitionPrompt] = useState('');
   const [isGeneratingTransition, setIsGeneratingTransition] = useState(false);
+  const [showAudioPanel, setShowAudioPanel] = useState(false);
+  const [audioSyncResult, setAudioSyncResult] = useState<AudioSyncState | null>(null);
+  const [isAnalyzingAudio, setIsAnalyzingAudio] = useState(false);
+  const [audioSyncSampleRate, setAudioSyncSampleRate] = useState(16000);
+  const [audioSyncAccuracy, setAudioSyncAccuracy] = useState(3200);
+  const [audioSyncSpeed, setAudioSyncSpeed] = useState(16);
+  const [audioSyncAnchor, setAudioSyncAnchor] = useState<0 | 1>(0);
+  const [audioSyncRegion, setAudioSyncRegion] = useState<'full' | 'start' | 'middle' | 'end'>('full');
+  const [audioSyncSegmentDuration, setAudioSyncSegmentDuration] = useState(15);
+  const audioSyncRequestIdRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const transitionFileInputRef = useRef<HTMLInputElement>(null);
   const quickActionsRef = useRef<HTMLDivElement>(null);
@@ -3057,6 +3090,208 @@ export default function AIPromptPanel({
           <Wand2 className="w-4 h-4" />
           Motion Graphics
         </button>
+
+        {/* Audio Button */}
+        <button
+          type="button"
+          onClick={() => setShowAudioPanel(!showAudioPanel)}
+          disabled={!hasVideo || isProcessing}
+          className={`w-full flex items-center justify-center gap-2 px-4 py-2.5 mb-2 rounded-lg text-sm font-medium transition-all ${
+            showAudioPanel
+              ? 'bg-teal-500/30 text-teal-200 ring-1 ring-teal-500/50'
+              : 'bg-gradient-to-r from-teal-500/20 to-cyan-500/20 hover:from-teal-500/30 hover:to-cyan-500/30 text-teal-300 hover:text-teal-200 border border-teal-500/30 hover:border-teal-500/50'
+          } disabled:opacity-50 disabled:cursor-not-allowed`}
+        >
+          <Volume2 className="w-4 h-4" />
+          Audio
+          {showAudioPanel && <X className="w-3 h-3 ml-auto" />}
+        </button>
+
+        {/* Audio Panel */}
+        {showAudioPanel && (
+          <div className="mb-3 p-3 bg-zinc-800/80 border border-teal-500/20 rounded-xl space-y-3">
+            {/* Menu items */}
+            <div className="space-y-1">
+              <button
+                type="button"
+                className="w-full text-left px-2 py-1.5 rounded text-xs text-teal-300 bg-teal-500/10 ring-1 ring-teal-500/30"
+              >
+                Align w/ Matching Audio
+              </button>
+              <div className="px-2 py-1.5 rounded text-xs text-zinc-500 opacity-50 cursor-not-allowed">Remove Dead Air (coming soon)</div>
+              <div className="px-2 py-1.5 rounded text-xs text-zinc-500 opacity-50 cursor-not-allowed">Remove Background Noise (coming soon)</div>
+              <div className="px-2 py-1.5 rounded text-xs text-zinc-500 opacity-50 cursor-not-allowed">Extract Audio (coming soon)</div>
+            </div>
+
+            <div className="border-t border-zinc-700/50 pt-2 space-y-2.5">
+              {/* Clip pair + anchor — only when 2 selected */}
+              {selectedClipIds.length === 2 ? (() => {
+                const cA = clips.find(c => c.id === selectedClipIds[0]);
+                const cB = clips.find(c => c.id === selectedClipIds[1]);
+                const nameA = cA ? (assets.find(a => a.id === cA.assetId)?.filename || cA.id.slice(0, 8)) : selectedClipIds[0].slice(0, 8);
+                const nameB = cB ? (assets.find(a => a.id === cB.assetId)?.filename || cB.id.slice(0, 8)) : selectedClipIds[1].slice(0, 8);
+                const truncName = (n: string, len: number) => n.length > len ? n.slice(0, len) + '...' : n;
+                return (
+                  <>
+                    <div className="text-xs text-zinc-400">
+                      Pair: <span className="text-zinc-200">{truncName(nameA, 16)}</span> → <span className="text-zinc-200">{truncName(nameB, 16)}</span>
+                    </div>
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="text-zinc-500">Anchor:</span>
+                      <button type="button" onClick={() => setAudioSyncAnchor(0)} className={`px-2 py-0.5 rounded ${audioSyncAnchor === 0 ? 'bg-teal-500/30 text-teal-200 ring-1 ring-teal-500/50' : 'bg-zinc-700/50 text-zinc-400 hover:bg-zinc-700'}`}>
+                        {truncName(nameA, 10)}
+                      </button>
+                      <button type="button" onClick={() => setAudioSyncAnchor(1)} className={`px-2 py-0.5 rounded ${audioSyncAnchor === 1 ? 'bg-teal-500/30 text-teal-200 ring-1 ring-teal-500/50' : 'bg-zinc-700/50 text-zinc-400 hover:bg-zinc-700'}`}>
+                        {truncName(nameB, 10)}
+                      </button>
+                    </div>
+                  </>
+                );
+              })() : !isAnalyzingAudio && !audioSyncResult && (
+                <div className="text-xs text-zinc-500 text-center py-1">
+                  Shift+click two clips on the timeline to select a sync pair
+                </div>
+              )}
+
+              {/* Controls — always visible */}
+              <div className="flex items-center gap-2 text-xs">
+                <span className="text-zinc-500 w-16">Accuracy:</span>
+                <span className="text-zinc-600 text-[10px]">Fast</span>
+                <input type="range" min={800} max={11025} step={400} value={audioSyncAccuracy} onChange={e => setAudioSyncAccuracy(Number(e.target.value))} className="flex-1 accent-teal-500" />
+                <span className="text-zinc-600 text-[10px]">Precise</span>
+              </div>
+              <div className="flex items-center gap-2 text-xs">
+                <span className="text-zinc-500 w-16">Speed:</span>
+                <span className="text-zinc-600 text-[10px]">Thorough</span>
+                <input type="range" min={1} max={64} step={1} value={audioSyncSpeed} onChange={e => setAudioSyncSpeed(Number(e.target.value))} className="flex-1 accent-teal-500" />
+                <span className="text-zinc-600 text-[10px]">Quick</span>
+              </div>
+              <div className="flex items-center gap-2 text-xs">
+                <span className="text-zinc-500 w-16">Rate:</span>
+                <select value={audioSyncSampleRate} onChange={e => setAudioSyncSampleRate(Number(e.target.value))} className="flex-1 bg-zinc-700/50 border border-zinc-600/50 rounded px-2 py-1 text-zinc-200 text-xs focus:outline-none focus:ring-1 focus:ring-teal-500/50">
+                  <option value={8000}>8,000 Hz (speech)</option>
+                  <option value={16000}>16,000 Hz (balanced)</option>
+                  <option value={44100}>44,100 Hz (music)</option>
+                </select>
+              </div>
+              <div className="flex items-center gap-2 text-xs">
+                <span className="text-zinc-500 w-16">Region:</span>
+                <div className="flex-1 flex gap-1">
+                  {(['full', 'start', 'middle', 'end'] as const).map(r => (
+                    <button key={r} type="button" onClick={() => setAudioSyncRegion(r)} className={`flex-1 px-1.5 py-0.5 rounded text-[10px] ${audioSyncRegion === r ? 'bg-teal-500/30 text-teal-200 ring-1 ring-teal-500/50' : 'bg-zinc-700/50 text-zinc-400 hover:bg-zinc-700'}`}>
+                      {r === 'full' ? 'Full' : r === 'start' ? 'L' : r === 'middle' ? 'M' : 'R'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {audioSyncRegion !== 'full' && (
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="text-zinc-500 w-16">Length:</span>
+                  <input type="range" min={3} max={60} step={1} value={audioSyncSegmentDuration} onChange={e => setAudioSyncSegmentDuration(Number(e.target.value))} className="flex-1 accent-teal-500" />
+                  <span className="text-zinc-400 text-[10px] w-8 text-right">{audioSyncSegmentDuration}s</span>
+                </div>
+              )}
+
+              {/* Confirmation card — persists through deselect */}
+              {audioSyncResult && !isAnalyzingAudio && (
+                <div className="p-2 bg-zinc-900/80 border border-teal-500/20 rounded-lg space-y-1.5">
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="text-zinc-400">Offset:</span>
+                    <span className="text-zinc-200 font-mono">{audioSyncResult.offsetSeconds >= 0 ? '+' : ''}{audioSyncResult.offsetSeconds.toFixed(3)}s</span>
+                  </div>
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="text-zinc-400">Correlation:</span>
+                    <span className="text-zinc-200">{(audioSyncResult.correlation * 100).toFixed(1)}%</span>
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                      audioSyncResult.confidence === 'high' ? 'bg-green-500/20 text-green-300' :
+                      audioSyncResult.confidence === 'medium' ? 'bg-yellow-500/20 text-yellow-300' :
+                      'bg-red-500/20 text-red-300'
+                    }`}>{audioSyncResult.confidence}</span>
+                  </div>
+                  {audioSyncResult.correlation < 0.2 && (
+                    <div className="text-[10px] text-red-400 font-medium">Very low correlation — result may be inaccurate. Try adjusting settings.</div>
+                  )}
+                  {audioSyncResult.confidence === 'low' && audioSyncResult.correlation >= 0.2 && (
+                    <div className="text-[10px] text-yellow-400">Low confidence — clips may not contain matching audio.</div>
+                  )}
+                  {audioSyncResult.note && (
+                    <div className="text-[10px] text-zinc-500">{audioSyncResult.note}</div>
+                  )}
+                  <div className="flex gap-1.5 pt-1">
+                    <button type="button" onClick={() => { if (onApplyAudioSync && audioSyncResult) onApplyAudioSync(audioSyncResult); setAudioSyncResult(null); }} className="flex-1 px-2 py-1.5 bg-gradient-to-r from-teal-500 to-cyan-500 hover:from-teal-600 hover:to-cyan-600 rounded text-xs font-medium text-white transition-all">
+                      Apply
+                    </button>
+                    <button type="button" onClick={() => setAudioSyncResult(null)} className="px-3 py-1.5 bg-zinc-700/50 hover:bg-zinc-700 rounded text-xs text-zinc-400 transition-colors">
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Spinner — persists through deselect */}
+              {isAnalyzingAudio && (
+                <div className="flex items-center gap-2 py-2">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-teal-400" />
+                  <span className="text-xs text-teal-300">Analyzing audio...</span>
+                </div>
+              )}
+
+              {/* Align button — disabled until 2 clips selected */}
+              {!audioSyncResult && !isAnalyzingAudio && (
+                <button
+                  type="button"
+                  disabled={!onAudioSync || selectedClipIds.length !== 2}
+                  onClick={async () => {
+                    const clipA = clips.find(c => c.id === selectedClipIds[0]);
+                    const clipB = clips.find(c => c.id === selectedClipIds[1]);
+                    if (!onAudioSync || !clipA || !clipB) return;
+                    const requestId = ++audioSyncRequestIdRef.current;
+                    setIsAnalyzingAudio(true);
+                    setAudioSyncResult(null);
+                    try {
+                      const anchorIdx = audioSyncAnchor;
+                      const nonAnchorIdx = anchorIdx === 0 ? 1 : 0;
+                      const anchorClip = anchorIdx === 0 ? clipA : clipB;
+                      const nonAnchorClip = nonAnchorIdx === 0 ? clipA : clipB;
+                      const result = await onAudioSync({
+                        assetA: clipA.assetId,
+                        assetB: clipB.assetId,
+                        sampleRate: audioSyncSampleRate,
+                        correlationSampleSize: audioSyncAccuracy,
+                        initialGranularity: audioSyncSpeed,
+                        analysisRegion: audioSyncRegion,
+                        analysisDuration: audioSyncRegion !== 'full' ? audioSyncSegmentDuration : undefined,
+                      });
+                      if (audioSyncRequestIdRef.current !== requestId) return;
+                      setAudioSyncResult({
+                        ...result,
+                        analyzedClipIds: [selectedClipIds[0], selectedClipIds[1]],
+                        analyzedTabId: activeTabId,
+                        anchorClipId: selectedClipIds[anchorIdx],
+                        nonAnchorClipId: selectedClipIds[nonAnchorIdx],
+                        nonAnchorIsAssetB: nonAnchorIdx === 1,
+                        anchorInPoint: anchorClip.inPoint,
+                        nonAnchorInPoint: nonAnchorClip.inPoint,
+                        requestId,
+                      });
+                    } catch (err) {
+                      if (audioSyncRequestIdRef.current === requestId) {
+                        console.error('Audio sync failed:', err);
+                      }
+                    } finally {
+                      if (audioSyncRequestIdRef.current === requestId) {
+                        setIsAnalyzingAudio(false);
+                      }
+                    }
+                  }}
+                  className="w-full px-3 py-2 bg-gradient-to-r from-teal-500 to-cyan-500 hover:from-teal-600 hover:to-cyan-600 rounded-lg text-xs font-medium text-white transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Align
+                </button>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Quick Actions Popover */}
         <div className="relative mb-3" ref={quickActionsRef}>
