@@ -298,11 +298,13 @@ export default function AIPromptPanel({
   const [generateTransitionPrompt, setGenerateTransitionPrompt] = useState('');
   const [isGeneratingTransition, setIsGeneratingTransition] = useState(false);
   const [showAudioPanel, setShowAudioPanel] = useState(false);
+  const [audioSubMode, setAudioSubMode] = useState<'menu' | 'align'>('menu');
   const [audioSyncResult, setAudioSyncResult] = useState<AudioSyncState | null>(null);
   const [isAnalyzingAudio, setIsAnalyzingAudio] = useState(false);
   const [audioSyncSampleRate, setAudioSyncSampleRate] = useState(16000);
-  const [audioSyncAccuracy, setAudioSyncAccuracy] = useState(3200);
-  const [audioSyncSpeed, setAudioSyncSpeed] = useState(16);
+  const [audioSyncAccuracy, setAudioSyncAccuracy] = useState(11025);
+  const [audioSyncSpeed, setAudioSyncSpeed] = useState(1);
+  const [showAudioAdvanced, setShowAudioAdvanced] = useState(false);
   const [audioSyncAnchor, setAudioSyncAnchor] = useState<0 | 1>(0);
   const [audioSyncRegion, setAudioSyncRegion] = useState<'full' | 'start' | 'middle' | 'end'>('full');
   const [audioSyncSegmentDuration, setAudioSyncSegmentDuration] = useState(15);
@@ -3090,113 +3092,78 @@ export default function AIPromptPanel({
           Motion Graphics
         </button>
 
-        {/* Audio Panel Button */}
-        <button
-          type="button"
-          onClick={() => setShowAudioPanel(!showAudioPanel)}
-          disabled={!hasVideo || isProcessing}
-          className={`w-full flex items-center justify-center gap-2 px-4 py-2.5 mb-2 rounded-lg text-sm font-medium transition-all ${
-            showAudioPanel
-              ? 'bg-teal-500/30 text-teal-200 ring-1 ring-teal-500/50'
-              : 'bg-gradient-to-r from-teal-500/20 to-cyan-500/20 hover:from-teal-500/30 hover:to-cyan-500/30 text-teal-300 hover:text-teal-200 border border-teal-500/30 hover:border-teal-500/50'
-          } disabled:opacity-50 disabled:cursor-not-allowed`}
-        >
-          <Volume2 className="w-4 h-4" />
-          Audio
-          {showAudioPanel && <X className="w-3 h-3 ml-auto" />}
-        </button>
+        {/* Audio Panel Button + Popover */}
+        <div className="relative mb-2">
+          <button
+            type="button"
+            onClick={() => setShowAudioPanel(!showAudioPanel)}
+            disabled={!hasVideo || isProcessing}
+            className={`w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-all ${
+              showAudioPanel
+                ? 'bg-teal-500/30 text-teal-200 ring-1 ring-teal-500/50'
+                : 'bg-gradient-to-r from-teal-500/20 to-cyan-500/20 hover:from-teal-500/30 hover:to-cyan-500/30 text-teal-300 hover:text-teal-200 border border-teal-500/30 hover:border-teal-500/50'
+            } disabled:opacity-50 disabled:cursor-not-allowed`}
+          >
+            <Volume2 className="w-4 h-4" />
+            Audio
+            {showAudioPanel && <X className="w-3 h-3 ml-auto" />}
+          </button>
 
-        {/* Audio Panel */}
-        {showAudioPanel && (
-          <div className="mb-3 p-3 bg-zinc-800/80 border border-teal-500/20 rounded-xl space-y-3">
-            {/* Menu items */}
-            <div className="space-y-1">
-              <button
-                type="button"
-                onClick={() => {/* active section */}}
-                className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-teal-300 bg-teal-500/10 border border-teal-500/20 font-medium"
-              >
-                <Volume2 className="w-3.5 h-3.5" />
-                Align w/ Matching Audio
-              </button>
-              {(['Remove Dead Air', 'Remove Background Noise', 'Extract Audio'] as const).map(label => (
-                <button
-                  key={label}
-                  type="button"
-                  disabled
-                  className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-zinc-500 cursor-not-allowed"
-                >
-                  <Volume2 className="w-3.5 h-3.5" />
-                  {label} <span className="ml-auto text-xs text-zinc-600">soon</span>
-                </button>
-              ))}
-            </div>
-
-            {/* Clip pair display or hint */}
-            {selectedClipIds.length === 2 ? (
-              <div className="space-y-2">
-                {/* Anchor selector */}
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-zinc-400 w-14 shrink-0">Anchor</span>
-                  {[0, 1].map(i => {
-                    const clip = (activeTabId !== 'main' ? editTabClips : clips).find(c => c.id === selectedClipIds[i]);
-                    const clipAsset = clip ? assets.find(a => a.id === clip.assetId) : undefined;
-                    const label = clipAsset ? clipAsset.filename : `Clip ${i + 1}`;
-                    return (
-                      <button
-                        key={i}
-                        type="button"
-                        onClick={() => setAudioSyncAnchor(i as 0 | 1)}
-                        className={`flex-1 flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-xs border transition-all ${
-                          audioSyncAnchor === i
-                            ? 'border-teal-400/60 bg-teal-500/15 text-teal-300'
-                            : 'border-zinc-600 bg-zinc-700/50 text-zinc-400 hover:border-zinc-500'
-                        }`}
-                      >
-                        <span className={`w-2 h-2 rounded-full border-2 ${audioSyncAnchor === i ? 'border-teal-400 bg-teal-400' : 'border-zinc-500'}`} />
-                        <span className="truncate max-w-[80px]">{label}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-
-                {/* Accuracy slider */}
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-zinc-400 w-14 shrink-0">Accuracy</span>
-                  <input
-                    type="range" min={800} max={11025} step={100}
-                    value={audioSyncAccuracy}
-                    onChange={e => setAudioSyncAccuracy(Number(e.target.value))}
-                    className="flex-1 accent-teal-400"
-                  />
-                  <span className="text-xs text-zinc-500 w-12 text-right">{audioSyncAccuracy < 2000 ? 'Fast' : 'Precise'}</span>
-                </div>
-
-                {/* Speed slider */}
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-zinc-400 w-14 shrink-0">Speed</span>
-                  <input
-                    type="range" min={1} max={64} step={1}
-                    value={audioSyncSpeed}
-                    onChange={e => setAudioSyncSpeed(Number(e.target.value))}
-                    className="flex-1 accent-teal-400"
-                  />
-                  <span className="text-xs text-zinc-500 w-12 text-right">{audioSyncSpeed <= 8 ? 'Thorough' : 'Quick'}</span>
-                </div>
-
-                {/* Sample rate */}
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-zinc-400 w-14 shrink-0">Sample rate</span>
-                  <select
-                    value={audioSyncSampleRate}
-                    onChange={e => setAudioSyncSampleRate(Number(e.target.value))}
-                    className="flex-1 bg-zinc-700 border border-zinc-600 rounded text-xs text-zinc-300 px-2 py-1"
+          {/* Audio Panel — grows upward */}
+          {showAudioPanel && (
+            <div className="absolute bottom-full left-0 right-0 mb-2 p-3 bg-zinc-800 border border-teal-500/20 rounded-xl shadow-xl z-10 animate-in fade-in slide-in-from-bottom-2 duration-200 space-y-3">
+              {audioSubMode === 'menu' ? (
+                <div className="space-y-1">
+                  <button
+                    type="button"
+                    onClick={() => setAudioSubMode('align')}
+                    className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-teal-300 bg-teal-500/10 border border-teal-500/20 font-medium hover:bg-teal-500/20 transition-all"
                   >
-                    <option value={8000}>8 000 Hz</option>
-                    <option value={16000}>16 000 Hz</option>
-                    <option value={44100}>44 100 Hz</option>
-                  </select>
+                    <Volume2 className="w-3.5 h-3.5" />
+                    Align w/ Matching Audio
+                  </button>
+                  {(['Remove Dead Air', 'Remove Background Noise', 'Extract Audio'] as const).map(label => (
+                    <button
+                      key={label}
+                      type="button"
+                      disabled
+                      className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-zinc-500 cursor-not-allowed"
+                    >
+                      <Volume2 className="w-3.5 h-3.5" />
+                      {label} <span className="ml-auto text-xs text-zinc-600">soon</span>
+                    </button>
+                  ))}
                 </div>
+              ) : <>
+              {/* Align sub-mode header */}
+              <div className="flex items-center gap-2 px-1 text-sm text-teal-300 font-medium">
+                <Volume2 className="w-3.5 h-3.5 shrink-0" />
+                <span className="flex-1">Align w/ Matching Audio</span>
+                <button type="button" onClick={() => setAudioSubMode('menu')} className="text-zinc-500 hover:text-zinc-300 transition-colors">
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              {/* Clip pair display or hint */}
+              {selectedClipIds.length === 2 ? (
+                <div className="space-y-2">
+                  {/* Anchor selector — dropdown, right-aligned text */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-zinc-400 w-14 shrink-0">Anchor</span>
+                    <select
+                      value={audioSyncAnchor}
+                      onChange={e => setAudioSyncAnchor(Number(e.target.value) as 0 | 1)}
+                      className="flex-1 min-w-0 bg-zinc-700 border border-zinc-600 rounded-lg text-xs text-zinc-300 px-2 py-1.5 text-right truncate"
+                      style={{ direction: 'rtl' }}
+                    >
+                      {[0, 1].map(i => {
+                        const clip = (activeTabId !== 'main' ? editTabClips : clips).find(c => c.id === selectedClipIds[i]);
+                        const clipAsset = clip ? assets.find(a => a.id === clip.assetId) : undefined;
+                        const label = clipAsset ? clipAsset.filename : `Clip ${i + 1}`;
+                        return <option key={i} value={i}>{label}</option>;
+                      })}
+                    </select>
+                  </div>
 
                 {/* Region */}
                 <div className="flex items-center gap-2">
@@ -3230,6 +3197,52 @@ export default function AIPromptPanel({
                       className="flex-1 accent-teal-400"
                     />
                     <span className="text-xs text-zinc-500 w-12 text-right">{audioSyncSegmentDuration}s</span>
+                  </div>
+                )}
+
+                {/* Advanced settings expander */}
+                <button
+                  type="button"
+                  onClick={() => setShowAudioAdvanced(!showAudioAdvanced)}
+                  className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-400 transition-colors w-full"
+                >
+                  <svg className={`w-3 h-3 transition-transform ${showAudioAdvanced ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
+                  Advanced
+                </button>
+                {showAudioAdvanced && (
+                  <div className="space-y-2 pl-1 border-l border-zinc-700/50">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-zinc-400 w-14 shrink-0">Accuracy</span>
+                      <input
+                        type="range" min={800} max={11025} step={100}
+                        value={audioSyncAccuracy}
+                        onChange={e => setAudioSyncAccuracy(Number(e.target.value))}
+                        className="flex-1 accent-teal-400"
+                      />
+                      <span className="text-xs text-zinc-500 w-12 text-right">{audioSyncAccuracy < 2000 ? 'Fast' : 'Precise'}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-zinc-400 w-14 shrink-0">Speed</span>
+                      <input
+                        type="range" min={1} max={64} step={1}
+                        value={audioSyncSpeed}
+                        onChange={e => setAudioSyncSpeed(Number(e.target.value))}
+                        className="flex-1 accent-teal-400"
+                      />
+                      <span className="text-xs text-zinc-500 w-12 text-right">{audioSyncSpeed <= 8 ? 'Thorough' : 'Quick'}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-zinc-400 w-14 shrink-0">Sample rate</span>
+                      <select
+                        value={audioSyncSampleRate}
+                        onChange={e => setAudioSyncSampleRate(Number(e.target.value))}
+                        className="flex-1 bg-zinc-700 border border-zinc-600 rounded text-xs text-zinc-300 px-2 py-1"
+                      >
+                        <option value={8000}>8,000 Hz (speech)</option>
+                        <option value={16000}>16,000 Hz (audible claps)</option>
+                        <option value={44100}>44,100 Hz (music)</option>
+                      </select>
+                    </div>
                   </div>
                 )}
               </div>
@@ -3343,8 +3356,10 @@ export default function AIPromptPanel({
                 <span className="flex items-center justify-center gap-2"><Loader2 className="w-4 h-4 animate-spin" />Analyzing…</span>
               ) : 'Align'}
             </button>
+          </>}
           </div>
         )}
+        </div>
 
         {/* Quick Actions Popover */}
         <div className="relative mb-3" ref={quickActionsRef}>
