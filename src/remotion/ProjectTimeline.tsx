@@ -3,7 +3,7 @@ import {
   AbsoluteFill,
   Audio,
   Img,
-  OffthreadVideo,
+  Video,
   Sequence,
   spring,
   useCurrentFrame,
@@ -361,7 +361,7 @@ const VideoVisualClip: React.FC<{
 
   const media = clip.assetType === 'video'
     ? (
-      <OffthreadVideo
+      <Video
         src={clip.src ?? ''}
         startFrom={toFrames(clip.inPointSec, fps)}
         endAt={toFrames(clip.outPointSec, fps)}

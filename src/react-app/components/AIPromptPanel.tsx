@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Sparkles, Send, Wand2, Clock, Terminal, CheckCircle, Loader2, VolumeX, FileVideo, Type, Image, Zap, X, Scissors, Plus, Film, Music, MapPin, Timer, ImagePlus, Move, ChevronDown, ChevronRight } from 'lucide-react';
+import { Sparkles, Send, Wand2, Clock, Terminal, CheckCircle, Loader2, VolumeX, FileVideo, Type, Image, Zap, X, Scissors, Plus, Film, Music, MapPin, Timer, ImagePlus, Move, ChevronDown, ChevronRight, Volume2 } from 'lucide-react';
 import type { TimelineClip, Track, Asset, CaptionStyle } from '@/react-app/hooks/useProject';
 import { MOTION_TEMPLATES, type TemplateId } from '@/remotion/templates';
 import MotionGraphicsPanel from './MotionGraphicsPanel';
@@ -120,6 +120,24 @@ interface ExtractAudioResult {
   originalAssetId: string;
 }
 
+interface AudioSyncResult {
+  offsetSeconds: number;
+  correlation: number;
+  confidence: 'high' | 'medium' | 'low';
+  note?: string;
+}
+
+interface AudioSyncState extends AudioSyncResult {
+  analyzedClipIds: [string, string];
+  analyzedTabId: string;
+  anchorClipId: string;
+  nonAnchorClipId: string;
+  nonAnchorIsAssetB: boolean;
+  anchorInPoint: number;
+  nonAnchorInPoint: number;
+  requestId: number;
+}
+
 interface ContextualAnimationRequest {
   type: 'intro' | 'outro' | 'transition' | 'highlight';
   description?: string;
@@ -216,6 +234,8 @@ interface AIPromptPanelProps {
   activeTabId?: string;
   editTabAssetId?: string;
   editTabClips?: TimelineClip[]; // Clips in the edit tab's timeline
+  onAudioSync?: (params: { assetA: string; assetB: string; sampleRate: number; correlationSampleSize: number; initialGranularity: number; analysisRegion?: string; analysisDuration?: number }) => Promise<AudioSyncResult>;
+  onApplyAudioSync?: (result: AudioSyncState) => void;
 }
 
 export default function AIPromptPanel({
@@ -253,6 +273,8 @@ export default function AIPromptPanel({
   activeTabId = 'main',
   editTabAssetId,
   editTabClips = [],
+  onAudioSync,
+  onApplyAudioSync,
 }: AIPromptPanelProps) {
   const [prompt, setPrompt] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -275,6 +297,16 @@ export default function AIPromptPanel({
   const [transitionDuration, setTransitionDuration] = useState(0.5);
   const [generateTransitionPrompt, setGenerateTransitionPrompt] = useState('');
   const [isGeneratingTransition, setIsGeneratingTransition] = useState(false);
+  const [showAudioPanel, setShowAudioPanel] = useState(false);
+  const [audioSyncResult, setAudioSyncResult] = useState<AudioSyncState | null>(null);
+  const [isAnalyzingAudio, setIsAnalyzingAudio] = useState(false);
+  const [audioSyncSampleRate, setAudioSyncSampleRate] = useState(16000);
+  const [audioSyncAccuracy, setAudioSyncAccuracy] = useState(3200);
+  const [audioSyncSpeed, setAudioSyncSpeed] = useState(16);
+  const [audioSyncAnchor, setAudioSyncAnchor] = useState<0 | 1>(0);
+  const [audioSyncRegion, setAudioSyncRegion] = useState<'full' | 'start' | 'middle' | 'end'>('full');
+  const [audioSyncSegmentDuration, setAudioSyncSegmentDuration] = useState(15);
+  const audioSyncRequestIdRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const transitionFileInputRef = useRef<HTMLInputElement>(null);
   const quickActionsRef = useRef<HTMLDivElement>(null);
@@ -3057,6 +3089,262 @@ export default function AIPromptPanel({
           <Wand2 className="w-4 h-4" />
           Motion Graphics
         </button>
+
+        {/* Audio Panel Button */}
+        <button
+          type="button"
+          onClick={() => setShowAudioPanel(!showAudioPanel)}
+          disabled={!hasVideo || isProcessing}
+          className={`w-full flex items-center justify-center gap-2 px-4 py-2.5 mb-2 rounded-lg text-sm font-medium transition-all ${
+            showAudioPanel
+              ? 'bg-teal-500/30 text-teal-200 ring-1 ring-teal-500/50'
+              : 'bg-gradient-to-r from-teal-500/20 to-cyan-500/20 hover:from-teal-500/30 hover:to-cyan-500/30 text-teal-300 hover:text-teal-200 border border-teal-500/30 hover:border-teal-500/50'
+          } disabled:opacity-50 disabled:cursor-not-allowed`}
+        >
+          <Volume2 className="w-4 h-4" />
+          Audio
+          {showAudioPanel && <X className="w-3 h-3 ml-auto" />}
+        </button>
+
+        {/* Audio Panel */}
+        {showAudioPanel && (
+          <div className="mb-3 p-3 bg-zinc-800/80 border border-teal-500/20 rounded-xl space-y-3">
+            {/* Menu items */}
+            <div className="space-y-1">
+              <button
+                type="button"
+                onClick={() => {/* active section */}}
+                className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-teal-300 bg-teal-500/10 border border-teal-500/20 font-medium"
+              >
+                <Volume2 className="w-3.5 h-3.5" />
+                Align w/ Matching Audio
+              </button>
+              {(['Remove Dead Air', 'Remove Background Noise', 'Extract Audio'] as const).map(label => (
+                <button
+                  key={label}
+                  type="button"
+                  disabled
+                  className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-zinc-500 cursor-not-allowed"
+                >
+                  <Volume2 className="w-3.5 h-3.5" />
+                  {label} <span className="ml-auto text-xs text-zinc-600">soon</span>
+                </button>
+              ))}
+            </div>
+
+            {/* Clip pair display or hint */}
+            {selectedClipIds.length === 2 ? (
+              <div className="space-y-2">
+                {/* Anchor selector */}
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-zinc-400 w-14 shrink-0">Anchor</span>
+                  {[0, 1].map(i => {
+                    const clip = (activeTabId !== 'main' ? editTabClips : clips).find(c => c.id === selectedClipIds[i]);
+                    const clipAsset = clip ? assets.find(a => a.id === clip.assetId) : undefined;
+                    const label = clipAsset ? clipAsset.filename : `Clip ${i + 1}`;
+                    return (
+                      <button
+                        key={i}
+                        type="button"
+                        onClick={() => setAudioSyncAnchor(i as 0 | 1)}
+                        className={`flex-1 flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-xs border transition-all ${
+                          audioSyncAnchor === i
+                            ? 'border-teal-400/60 bg-teal-500/15 text-teal-300'
+                            : 'border-zinc-600 bg-zinc-700/50 text-zinc-400 hover:border-zinc-500'
+                        }`}
+                      >
+                        <span className={`w-2 h-2 rounded-full border-2 ${audioSyncAnchor === i ? 'border-teal-400 bg-teal-400' : 'border-zinc-500'}`} />
+                        <span className="truncate max-w-[80px]">{label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Accuracy slider */}
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-zinc-400 w-14 shrink-0">Accuracy</span>
+                  <input
+                    type="range" min={800} max={11025} step={100}
+                    value={audioSyncAccuracy}
+                    onChange={e => setAudioSyncAccuracy(Number(e.target.value))}
+                    className="flex-1 accent-teal-400"
+                  />
+                  <span className="text-xs text-zinc-500 w-12 text-right">{audioSyncAccuracy < 2000 ? 'Fast' : 'Precise'}</span>
+                </div>
+
+                {/* Speed slider */}
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-zinc-400 w-14 shrink-0">Speed</span>
+                  <input
+                    type="range" min={1} max={64} step={1}
+                    value={audioSyncSpeed}
+                    onChange={e => setAudioSyncSpeed(Number(e.target.value))}
+                    className="flex-1 accent-teal-400"
+                  />
+                  <span className="text-xs text-zinc-500 w-12 text-right">{audioSyncSpeed <= 8 ? 'Thorough' : 'Quick'}</span>
+                </div>
+
+                {/* Sample rate */}
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-zinc-400 w-14 shrink-0">Sample rate</span>
+                  <select
+                    value={audioSyncSampleRate}
+                    onChange={e => setAudioSyncSampleRate(Number(e.target.value))}
+                    className="flex-1 bg-zinc-700 border border-zinc-600 rounded text-xs text-zinc-300 px-2 py-1"
+                  >
+                    <option value={8000}>8 000 Hz</option>
+                    <option value={16000}>16 000 Hz</option>
+                    <option value={44100}>44 100 Hz</option>
+                  </select>
+                </div>
+
+                {/* Region */}
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-zinc-400 w-14 shrink-0">Region</span>
+                  <div className="flex gap-1 flex-1">
+                    {(['full', 'start', 'middle', 'end'] as const).map(r => (
+                      <button
+                        key={r}
+                        type="button"
+                        onClick={() => setAudioSyncRegion(r)}
+                        className={`flex-1 px-1 py-1 rounded text-xs transition-all ${
+                          audioSyncRegion === r
+                            ? 'bg-teal-500/30 text-teal-300 border border-teal-400/50'
+                            : 'bg-zinc-700 text-zinc-400 border border-zinc-600 hover:border-zinc-500'
+                        }`}
+                      >
+                        {r === 'full' ? 'Full' : r === 'start' ? 'L' : r === 'middle' ? 'M' : 'R'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Segment duration (when region ≠ full) */}
+                {audioSyncRegion !== 'full' && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-zinc-400 w-14 shrink-0">Length</span>
+                    <input
+                      type="range" min={5} max={60} step={5}
+                      value={audioSyncSegmentDuration}
+                      onChange={e => setAudioSyncSegmentDuration(Number(e.target.value))}
+                      className="flex-1 accent-teal-400"
+                    />
+                    <span className="text-xs text-zinc-500 w-12 text-right">{audioSyncSegmentDuration}s</span>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <p className="text-xs text-zinc-500 text-center py-2">Select 2 clips on the timeline to align</p>
+            )}
+
+            {/* Result card */}
+            {(isAnalyzingAudio || audioSyncResult) && (
+              <div className="mt-2 p-3 bg-zinc-900/60 border border-teal-500/20 rounded-lg space-y-2">
+                {isAnalyzingAudio ? (
+                  <div className="flex items-center gap-2 text-sm text-zinc-300">
+                    <Loader2 className="w-4 h-4 animate-spin text-teal-400" />
+                    Analyzing audio…
+                  </div>
+                ) : audioSyncResult && (
+                  <>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-medium text-zinc-100">
+                        {audioSyncResult.offsetSeconds >= 0 ? '+' : ''}{audioSyncResult.offsetSeconds.toFixed(3)}s offset
+                      </span>
+                      <span className="text-sm text-zinc-400">{Math.round(audioSyncResult.correlation * 100)}%</span>
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                        audioSyncResult.confidence === 'high' ? 'bg-green-500/20 text-green-400' :
+                        audioSyncResult.confidence === 'medium' ? 'bg-yellow-500/20 text-yellow-400' :
+                        'bg-red-500/20 text-red-400'
+                      }`}>
+                        {audioSyncResult.confidence === 'high' ? '🟢' : audioSyncResult.confidence === 'medium' ? '🟡' : '🔴'} {audioSyncResult.confidence}
+                      </span>
+                    </div>
+                    {audioSyncResult.note && (
+                      <p className="text-xs text-zinc-500">{audioSyncResult.note}</p>
+                    )}
+                    {audioSyncResult.confidence === 'low' && (
+                      <p className="text-xs text-yellow-500/80">⚠️ Low confidence — try a different region or shorter segment containing a clap.</p>
+                    )}
+                    <div className="flex gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => { onApplyAudioSync?.(audioSyncResult); setAudioSyncResult(null); }}
+                        className="flex-1 px-3 py-1.5 bg-teal-500/20 hover:bg-teal-500/30 text-teal-300 rounded-lg text-xs font-medium border border-teal-500/30 transition-all"
+                      >
+                        Apply
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAudioSyncResult(null)}
+                        className="flex-1 px-3 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded-lg text-xs font-medium border border-zinc-600 transition-all"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* Align button */}
+            <button
+              type="button"
+              disabled={selectedClipIds.length !== 2 || isAnalyzingAudio || !onAudioSync}
+              onClick={async () => {
+                if (!onAudioSync || selectedClipIds.length !== 2) return;
+                const activeClips = activeTabId !== 'main' ? editTabClips : clips;
+                const clipA = activeClips.find(c => c.id === selectedClipIds[0]);
+                const clipB = activeClips.find(c => c.id === selectedClipIds[1]);
+                if (!clipA || !clipB) return;
+
+                const anchorClip = audioSyncAnchor === 0 ? clipA : clipB;
+                const nonAnchorClip = audioSyncAnchor === 0 ? clipB : clipA;
+                const assetA = anchorClip.assetId;
+                const assetB = nonAnchorClip.assetId;
+
+                const requestId = ++audioSyncRequestIdRef.current;
+                setIsAnalyzingAudio(true);
+                setAudioSyncResult(null);
+                try {
+                  const result = await onAudioSync({
+                    assetA,
+                    assetB,
+                    sampleRate: audioSyncSampleRate,
+                    correlationSampleSize: audioSyncAccuracy,
+                    initialGranularity: audioSyncSpeed,
+                    analysisRegion: audioSyncRegion,
+                    analysisDuration: audioSyncRegion !== 'full' ? audioSyncSegmentDuration : undefined,
+                  });
+                  if (requestId !== audioSyncRequestIdRef.current) return;
+                  setAudioSyncResult({
+                    ...result,
+                    analyzedClipIds: [selectedClipIds[0], selectedClipIds[1]],
+                    analyzedTabId: activeTabId,
+                    anchorClipId: anchorClip.id,
+                    nonAnchorClipId: nonAnchorClip.id,
+                    nonAnchorIsAssetB: true,
+                    anchorInPoint: anchorClip.inPoint ?? 0,
+                    nonAnchorInPoint: nonAnchorClip.inPoint ?? 0,
+                    requestId,
+                  });
+                } catch (err) {
+                  if (requestId !== audioSyncRequestIdRef.current) return;
+                  const msg = err instanceof Error ? err.message : 'Unknown error';
+                  setAudioSyncResult(null);
+                  setChatHistory(prev => [...prev, { type: 'assistant' as const, text: `Audio sync failed: ${msg}` }]);
+                } finally {
+                  if (requestId === audioSyncRequestIdRef.current) setIsAnalyzingAudio(false);
+                }
+              }}
+              className="w-full px-4 py-2 rounded-lg text-sm font-medium bg-teal-500/20 hover:bg-teal-500/30 text-teal-300 border border-teal-500/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isAnalyzingAudio ? (
+                <span className="flex items-center justify-center gap-2"><Loader2 className="w-4 h-4 animate-spin" />Analyzing…</span>
+              ) : 'Align'}
+            </button>
+          </div>
+        )}
 
         {/* Quick Actions Popover */}
         <div className="relative mb-3" ref={quickActionsRef}>

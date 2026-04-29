@@ -7,6 +7,7 @@ import { randomUUID } from 'crypto';
 import formidable from 'formidable';
 import { GoogleGenAI } from '@google/genai';
 import { fal } from '@fal-ai/client';
+import SynAudio from 'synaudio';
 import { timelineToRemotionSpec } from './remotion-core/timeline-to-spec.js';
 import {
   normalizeSpec,
@@ -7954,6 +7955,158 @@ Use specific terms, concepts, and themes from the transcript.`;
   }
 }
 
+// Cross-correlate audio from two assets to compute alignment offset
+async function handleAudioSync(req, res, sessionId) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+
+  const jobId = randomUUID().substring(0, 8);
+  const pcmPathA = join(TEMP_DIR, `${jobId}-a.pcm`);
+  const pcmPathB = join(TEMP_DIR, `${jobId}-b.pcm`);
+
+  try {
+    const body = await parseBody(req);
+    const { assetA, assetB, sampleRate = 16000, correlationSampleSize = 3200, initialGranularity = 16 } = body;
+
+    if (!assetA || !assetB) {
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'assetA and assetB are required' }));
+      return;
+    }
+
+    const assetObjA = session.assets.get(assetA);
+    const assetObjB = session.assets.get(assetB);
+    if (!assetObjA) {
+      res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'Asset not found', assetId: assetA }));
+      return;
+    }
+    if (!assetObjB) {
+      res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'Asset not found', assetId: assetB }));
+      return;
+    }
+
+    console.log(`\n[${jobId}] === AUDIO SYNC ===`);
+    console.log(`[${jobId}] Asset A: ${assetObjA.filename}, Asset B: ${assetObjB.filename}`);
+
+    // Verify both assets have an audio stream
+    for (const [, asset] of [['A', assetObjA], ['B', assetObjB]]) {
+      const probeOut = await runFFmpegProbe([
+        '-v', 'error', '-select_streams', 'a:0',
+        '-show_entries', 'stream=codec_name',
+        '-of', 'json', asset.path
+      ], jobId);
+      const probeData = JSON.parse(probeOut);
+      if (!probeData.streams || probeData.streams.length === 0) {
+        res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        res.end(JSON.stringify({ error: 'Asset has no audio stream', assetId: asset.id }));
+        return;
+      }
+    }
+
+    // Probe durations for region slicing
+    let note = undefined;
+    const durationArgs = ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1'];
+    const durA = parseFloat(await runFFmpegProbe([...durationArgs, assetObjA.path], jobId));
+    const durB = parseFloat(await runFFmpegProbe([...durationArgs, assetObjB.path], jobId));
+
+    const region = body.analysisRegion || 'full';
+    const segDuration = body.analysisDuration || null;
+    const safetyLimit = 600;
+
+    const computeSeekAndDuration = (clipDur) => {
+      if (region === 'full') {
+        const t = clipDur > safetyLimit ? safetyLimit : null;
+        return { ss: null, t };
+      }
+      const seg = Math.min(segDuration || 15, clipDur);
+      if (region === 'start') return { ss: 0, t: seg };
+      if (region === 'end') return { ss: Math.max(0, clipDur - seg), t: seg };
+      return { ss: Math.max(0, (clipDur / 2) - (seg / 2)), t: seg };
+    };
+
+    const sliceA = computeSeekAndDuration(durA);
+    const sliceB = computeSeekAndDuration(durB);
+
+    if (region !== 'full') {
+      note = `Analyzed ${region} ${segDuration || 15}s segment`;
+      console.log(`[${jobId}] Region: ${region}, segment: ${segDuration || 15}s (A: ss=${sliceA.ss}, B: ss=${sliceB.ss})`);
+    } else if (sliceA.t || sliceB.t) {
+      note = `Analyzed first ${safetyLimit}s only`;
+      console.log(`[${jobId}] Safety cap: ${safetyLimit}s (A=${durA.toFixed(1)}s, B=${durB.toFixed(1)}s)`);
+    }
+
+    // Bandpass 2-8kHz isolates transient energy (claps/clicks) shared between mic types.
+    // Compressor + dynaudnorm normalize gain differences between USB condenser and DSLR onboard mics.
+    // -ac 1 handles both mono and stereo input (pan=mono crashes on mono).
+    const extractArgs = (inputPath, outputPath, slice) => {
+      const args = ['-y'];
+      if (slice.ss !== null) args.push('-ss', String(slice.ss));
+      args.push('-i', inputPath);
+      if (slice.t !== null) args.push('-t', String(slice.t));
+      args.push('-map', '0:a:0', '-vn',
+        '-af', 'highpass=f=2000,lowpass=f=8000,acompressor=threshold=-20dB:ratio=8:attack=0.5:release=50,dynaudnorm=p=0.95:m=5',
+        '-ac', '1', '-ar', String(sampleRate),
+        '-c:a', 'pcm_f32le', '-f', 'f32le', outputPath);
+      return args;
+    };
+
+    console.log(`[${jobId}] Extracting PCM at ${sampleRate}Hz...`);
+    await Promise.all([
+      runFFmpeg(extractArgs(assetObjA.path, pcmPathA, sliceA), jobId),
+      runFFmpeg(extractArgs(assetObjB.path, pcmPathB, sliceB), jobId),
+    ]);
+
+    const bufA = readFileSync(pcmPathA);
+    const bufB = readFileSync(pcmPathB);
+    const floatsA = new Float32Array(bufA.buffer, bufA.byteOffset, bufA.byteLength / 4);
+    const floatsB = new Float32Array(bufB.buffer, bufB.byteOffset, bufB.byteLength / 4);
+
+    // synaudio requires base.samplesDecoded >= comparison.samplesDecoded
+    let swapped = false;
+    let base = { channelData: [floatsA], samplesDecoded: floatsA.length };
+    let comparison = { channelData: [floatsB], samplesDecoded: floatsB.length };
+    if (floatsA.length < floatsB.length) {
+      swapped = true;
+      [base, comparison] = [comparison, base];
+    }
+
+    console.log(`[${jobId}] Cross-correlating (base=${base.samplesDecoded} samples, comparison=${comparison.samplesDecoded}, swapped=${swapped})...`);
+    const synAudio = new SynAudio({ correlationSampleSize, initialGranularity });
+    const result = await synAudio.sync(base, comparison);
+
+    // Convert segment-relative offset to absolute clip time.
+    // Convention: assetB[0] aligns with assetA[offsetSeconds].
+    const rawOffset = result.sampleOffset / sampleRate;
+    const seekA = sliceA.ss || 0;
+    const seekB = sliceB.ss || 0;
+    const offsetSeconds = seekA + (swapped ? -rawOffset : rawOffset) - seekB;
+
+    const correlation = result.correlation;
+    const confidence = correlation > 0.7 ? 'high' : correlation >= 0.4 ? 'medium' : 'low';
+
+    console.log(`[${jobId}] Result: offset=${offsetSeconds.toFixed(4)}s, correlation=${correlation.toFixed(4)}, confidence=${confidence}`);
+
+    const response = { offsetSeconds, correlation, confidence };
+    if (note) response.note = note;
+
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify(response));
+  } catch (err) {
+    console.error(`[${jobId}] Audio sync failed:`, err);
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Correlation failed', details: err.message }));
+  } finally {
+    try { unlinkSync(pcmPathA); } catch {}
+    try { unlinkSync(pcmPathB); } catch {}
+  }
+}
+
 // Extract audio from video - creates separate audio asset and mutes the video
 async function handleExtractAudio(req, res, sessionId) {
   const session = getSession(sessionId);
@@ -8780,6 +8933,9 @@ const server = http.createServer(async (req, res) => {
     // Session management
     else if (req.method === 'PATCH' && action === 'name') {
       await handleSessionRename(req, res, sessionId);
+    }
+    else if (req.method === 'POST' && action === 'audio-sync') {
+      await handleAudioSync(req, res, sessionId);
     }
     else if (action === 'renders') {
       if (req.method === 'GET') {
