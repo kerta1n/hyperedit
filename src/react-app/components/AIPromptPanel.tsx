@@ -301,13 +301,13 @@ export default function AIPromptPanel({
   const [audioSubMode, setAudioSubMode] = useState<'menu' | 'align'>('menu');
   const [audioSyncResult, setAudioSyncResult] = useState<AudioSyncState | null>(null);
   const [isAnalyzingAudio, setIsAnalyzingAudio] = useState(false);
-  const [audioSyncSampleRate, setAudioSyncSampleRate] = useState(16000);
+  const [audioSyncSampleRate, setAudioSyncSampleRate] = useState(8000);
   const [audioSyncAccuracy, setAudioSyncAccuracy] = useState(11025);
   const [audioSyncSpeed, setAudioSyncSpeed] = useState(1);
   const [showAudioAdvanced, setShowAudioAdvanced] = useState(false);
   const [audioSyncAnchor, setAudioSyncAnchor] = useState<0 | 1>(0);
   const [audioSyncRegion, setAudioSyncRegion] = useState<'full' | 'start' | 'middle' | 'end'>('full');
-  const [audioSyncSegmentDuration, setAudioSyncSegmentDuration] = useState(15);
+  const [audioSyncSegmentDuration, setAudioSyncSegmentDuration] = useState(45);
   const audioSyncRequestIdRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const transitionFileInputRef = useRef<HTMLInputElement>(null);

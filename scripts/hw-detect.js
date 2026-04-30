@@ -21,14 +21,22 @@ let cached = null;
  * @property {number}   cpuCores          - logical CPU core count
  * @property {string}   cpuModel          - first CPU model string
  * @property {number}   totalMemoryGB     - total system memory in GB
- * @property {string|null} gpuName        - detected GPU name or null
+ * @property {string|null} gpuName        - detected GPU name or null (null = no real GPU found)
  * @property {string[]} ffmpegHwEncoders  - available h264 HW encoder names
  * @property {string|null} preferredEncoder - best HW encoder for this system
- * @property {string|null} preferredGl    - recommended Chromium --gl value
  * @property {number}   concurrency       - recommended Remotion concurrency
+ *
+ * NOTE: GL backend is intentionally absent from this object — it depends on
+ * headful/headless mode, which is an env-var toggle resolved at render time.
+ * Use pickGlBackend(platform, gpuName, headful) to get the correct value.
  */
 
 // --------------- detection helpers ---------------
+
+// Software/virtual adapters that have no real GPU silicon — treat as no GPU.
+// Blocklist approach: reject known-bad rather than allow known-good, so real
+// integrated GPUs (Intel UHD, Iris, QuickSync) pass through automatically.
+const VIRTUAL_GPU = /basic render|basic display|vmware|virtualbox|hyper-v|virtio|qxl paravirtual|bochs|llvmpipe|swrast|microsoft remote/i;
 
 function detectGpuName() {
   const p = process.platform;
@@ -39,12 +47,12 @@ function detectGpuName() {
         'wmic path win32_videocontroller get Name /format:list',
         { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] },
       );
-      // Grab all GPU names and prefer dedicated GPUs over virtual/basic adapters
       const names = [...out.matchAll(/Name=(.+)/gi)].map(m => m[1].trim()).filter(Boolean);
-      const dedicated = names.find(n =>
-        /nvidia|geforce|radeon|rtx|gtx|arc\s*a/i.test(n)
-      );
-      return dedicated || names[0] || null;
+      // Prefer discrete GPU; fall back to any real adapter (Intel UHD, Iris, etc.)
+      const dedicated = names.find(n => /nvidia|geforce|radeon|rtx|gtx|arc\s*a/i.test(n));
+      if (dedicated) return dedicated;
+      const real = names.find(n => !VIRTUAL_GPU.test(n));
+      return real || null;
     }
     if (p === 'linux') {
       // Try nvidia-smi first, fall back to lspci
@@ -58,7 +66,9 @@ function detectGpuName() {
         const lspci = execSync("lspci | grep -i 'vga\\|3d\\|display'", {
           encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'],
         });
-        if (lspci.trim()) return lspci.trim().split('\n')[0].trim();
+        // Filter out virtual/software adapters (VMware SVGA, virtio-vga, etc.)
+        const real = lspci.trim().split('\n').find(l => l.trim() && !VIRTUAL_GPU.test(l));
+        if (real) return real.trim();
       } catch { /* no lspci */ }
       return null;
     }
@@ -111,12 +121,38 @@ function pickPreferredEncoder(platform, available) {
   return null;
 }
 
-/** Recommend a Chromium --gl backend for the platform. */
-function pickGlBackend(platform, gpuName) {
-  if (platform === 'darwin') return 'angle';
-  if (platform === 'win32')  return 'angle';
-  // Linux: egl if a GPU is detected, otherwise swangle (software)
-  if (platform === 'linux')  return gpuName ? 'egl' : 'swangle';
+/**
+ * Recommend a Chromium --gl backend based on OS, GPU presence, and render mode.
+ *
+ * headful=true  → chrome-for-testing with real GPU drivers
+ * headful=false → headless-shell (limited GPU access)
+ *
+ * win32 + GPU: angle-egl — faster than angle in benchmarks (headful and headless)
+ * win32 + no GPU: swangle (software ANGLE)
+ * darwin: angle always — Metal/ANGLE works in all modes; Apple always has real GPU
+ * linux + GPU + headful: angle-egl — Remotion docs recommend for GPU instances
+ * linux + GPU + headless: egl — native EGL, reliable headless
+ * linux + no GPU: swangle (software ANGLE)
+ *
+ * @param {string}      platform
+ * @param {string|null} gpuName  - null means no real GPU detected
+ * @param {boolean}     headful  - true when using chrome-for-testing (headful mode)
+ * @returns {string|null}
+ */
+export function pickGlBackend(platform, gpuName, headful) {
+  const hasGpu = Boolean(gpuName);
+
+  if (platform === 'win32') {
+    if (!hasGpu) return 'swangle';
+    return 'angle-egl';
+  }
+  if (platform === 'darwin') {
+    return 'angle';
+  }
+  if (platform === 'linux') {
+    if (!hasGpu) return 'swangle';
+    return headful ? 'angle-egl' : 'egl';
+  }
   return null;
 }
 
@@ -143,7 +179,6 @@ export async function detectCapabilities() {
   const gpuName = detectGpuName();
   const ffmpegHwEncoders = detectFFmpegHwEncoders();
   const preferredEncoder = pickPreferredEncoder(platform, ffmpegHwEncoders);
-  const preferredGl = pickGlBackend(platform, gpuName);
   const concurrency = pickConcurrency(cpuCores);
 
   cached = {
@@ -155,7 +190,6 @@ export async function detectCapabilities() {
     gpuName,
     ffmpegHwEncoders,
     preferredEncoder,
-    preferredGl,
     concurrency,
   };
 
@@ -186,5 +220,8 @@ if (isMain) {
   detectCapabilities().then((caps) => {
     console.log('\n=== HyperEdit Hardware Detection ===');
     console.log(JSON.stringify(caps, null, 2));
+    console.log('\n--- GL Backend (resolved at render time) ---');
+    console.log('  headful :', pickGlBackend(caps.platform, caps.gpuName, true));
+    console.log('  headless:', pickGlBackend(caps.platform, caps.gpuName, false));
   });
 }

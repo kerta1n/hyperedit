@@ -325,14 +325,16 @@ All endpoints are on `localhost:3333`. CORS headers (`*`) are set on every respo
 | `detectGpuName()` | 33 | `wmic` (Windows), `nvidia-smi`/`lspci` (Linux), `system_profiler` (macOS) |
 | `detectFFmpegHwEncoders()` | 77 | Runs `ffmpeg -encoders`; filters against known encoder list |
 | `pickPreferredEncoder(platform, available)` | 99 | Priority: win32 `[nvenc, amf, qsv]`, linux `[nvenc, vaapi, qsv]`, darwin `[videotoolbox]` |
-| `pickGlBackend(platform, gpuName)` | 115 | darwin/win32 → `angle`; linux with GPU → `egl`; linux no GPU → `swangle` |
+| `pickGlBackend(platform, gpuName, headful)` | 115 | win32+GPU → `angle-egl` (headful+headless); win32 no GPU → `swangle`; darwin → `angle`; linux+GPU+headful → `angle-egl`; linux+GPU+headless → `egl`; linux no GPU → `swangle`. Exported — called by hwaccel-config at render time. |
 | `pickConcurrency(cpuCores)` | 124 | `<=2→1`, `<=4→2`, else `floor(cores×0.6)` |
 
 ### HWCapabilities Shape
 
 ```js
 { platform, arch, cpuCores, cpuModel, totalMemoryGB, gpuName,
-  ffmpegHwEncoders, preferredEncoder, preferredGl, concurrency }
+  ffmpegHwEncoders, preferredEncoder, concurrency }
+// preferredGl intentionally absent — GL depends on headful mode (env toggle).
+// Use pickGlBackend(platform, gpuName, headful) to resolve at render time.
 ```
 
 Standalone: `node scripts/hw-detect.js` prints diagnostics.
@@ -359,7 +361,7 @@ Standalone: `node scripts/hw-detect.js` prints diagnostics.
 
 ```text
 Always set:
-  chromiumOptions.gl  ← preferredGl
+  chromiumOptions.gl  ← pickGlBackend(platform, gpuName, useHeadful)  [resolved at render time]
   chromeMode          ← 'chrome-for-testing' (headful, real GPU) if HWACCEL_HEADFUL
   concurrency         ← pickConcurrency result
   offthreadVideoThreads ← floor(cores × 0.4), min 2
