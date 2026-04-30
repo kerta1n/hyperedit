@@ -20,7 +20,7 @@
  *     Requires a display server (always available on Windows/macOS).
  */
 
-import { getCapabilities } from './hw-detect.js';
+import { getCapabilities, pickGlBackend } from './hw-detect.js';
 
 // --------------- env helpers ---------------
 
@@ -84,15 +84,18 @@ export function getRenderMediaOptions(isPreview = false) {
 
   const result = {};
 
-  // GL backend for Chromium content rendering (CSS transforms, gradients, blur, shadows)
-  if (caps.preferredGl) {
-    result.chromiumOptions = { gl: caps.preferredGl };
-  }
-
-  // Headful rendering — use visible browser with real GPU drivers
+  // Headful rendering — resolve this first so GL backend selection can use it
   // Default: true on Windows/macOS (always have a display), false on Linux
   const headfulDefault = caps.platform !== 'linux';
   const useHeadful = envBool('HWACCEL_HEADFUL', headfulDefault);
+
+  // GL backend depends on OS + GPU presence + headful mode.
+  // Resolved at render time (not cached) because HWACCEL_HEADFUL is an env toggle.
+  const gl = pickGlBackend(caps.platform, caps.gpuName, useHeadful);
+  if (gl) {
+    result.chromiumOptions = { gl };
+  }
+
   if (useHeadful) {
     // chrome-for-testing = full Chrome with GPU, visible window
     // headless-shell = stripped headless binary, no real GPU
@@ -194,7 +197,7 @@ export function getAccelSummary() {
       ffmpegEncoder: envBool('HWACCEL_FFMPEG') && caps.preferredEncoder
         ? caps.preferredEncoder
         : 'libx264 (software)',
-      chromiumGl: caps.preferredGl || 'default',
+      chromiumGl: pickGlBackend(caps.platform, caps.gpuName, envBool('HWACCEL_HEADFUL', caps.platform !== 'linux')) || 'default',
       chromeMode: envBool('HWACCEL_HEADFUL', caps.platform !== 'linux')
         ? 'chrome-for-testing (headful, real GPU)'
         : 'headless-shell (no GPU)',
