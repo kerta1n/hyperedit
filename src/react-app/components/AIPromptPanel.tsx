@@ -306,8 +306,8 @@ export default function AIPromptPanel({
   const [audioSyncSpeed, setAudioSyncSpeed] = useState(1);
   const [showAudioAdvanced, setShowAudioAdvanced] = useState(false);
   const [audioSyncAnchor, setAudioSyncAnchor] = useState<0 | 1>(0);
-  const [audioSyncRegion, setAudioSyncRegion] = useState<'full' | 'start' | 'middle' | 'end'>('full');
-  const [audioSyncSegmentDuration, setAudioSyncSegmentDuration] = useState(45);
+  const [audioSyncRegion, setAudioSyncRegion] = useState<'full' | 'start' | 'middle' | 'end'>('start');
+  const [audioSyncSegmentDuration, setAudioSyncSegmentDuration] = useState(60);
   const audioSyncRequestIdRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const transitionFileInputRef = useRef<HTMLInputElement>(null);
