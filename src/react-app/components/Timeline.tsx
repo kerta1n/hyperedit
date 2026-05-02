@@ -37,6 +37,7 @@ interface TimelineProps {
   onSelectTransition?: (id: string | null) => void;
   onUpdateTimelineTransition?: (id: string, updates: Partial<Omit<TimelineTransition, 'id'>>) => void;
   onRemoveTimelineTransition?: (id: string) => void;
+  mutedTracks?: Record<string, boolean>;
 }
 
 const TRACK_HEIGHTS: Record<string, number> = {
@@ -84,6 +85,7 @@ export default function Timeline({
   onSelectTransition,
   onUpdateTimelineTransition,
   onRemoveTimelineTransition,
+  mutedTracks = {},
 }: TimelineProps) {
   const [zoom, setZoom] = useState(1);
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
@@ -412,7 +414,7 @@ export default function Timeline({
               return (
                 <div
                   key={track.id}
-                  className="flex items-center justify-center gap-1 text-xs font-medium text-zinc-400 border-b border-zinc-800/50 px-1"
+                  className={`flex items-center justify-center gap-1 text-xs font-medium text-zinc-400 border-b border-zinc-800/50 px-1 ${mutedTracks[track.id] ? 'bg-red-900/70' : ''}`}
                   style={{ height: TRACK_HEIGHTS[track.type] }}
                 >
                   <span

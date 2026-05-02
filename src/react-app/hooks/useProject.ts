@@ -46,6 +46,7 @@ export interface Track {
   type: 'video' | 'audio' | 'text';
   name: string;
   order: number;
+  muted?: boolean;
 }
 
 // Caption word with timing
@@ -1038,8 +1039,14 @@ export function useProject() {
       const response = await fetch(`${LOCAL_FFMPEG_URL}/session/${session.sessionId}/project`);
       if (response.ok) {
         const data = await response.json();
-        // Don't load tracks from server - always use client's default tracks
-        // Server tracks may be outdated (e.g., missing T1, V3, A2)
+        // Don't replace tracks from server (may be outdated), but merge per-track prefs like muted
+        if (data.tracks?.length) {
+          const serverTrackMap = new Map(data.tracks.map((t: Track) => [t.id, t]));
+          setTracks(prev => prev.map(t => {
+            const saved = serverTrackMap.get(t.id);
+            return saved?.muted !== undefined ? { ...t, muted: saved.muted } : t;
+          }));
+        }
         if (data.clips) setClips(data.clips);
         if (data.settings) setSettings(data.settings);
         if (data.captionData) setCaptionData(data.captionData);
@@ -1199,6 +1206,12 @@ export function useProject() {
   //   }
   // }, [clips, session, saveProject]);
 
+  const toggleTrackMuted = useCallback((trackId: string) => {
+    setTracks(prev => prev.map(t =>
+      t.id === trackId ? { ...t, muted: !t.muted } : t
+    ));
+  }, []);
+
   return {
     // State
     session,
@@ -1258,6 +1271,9 @@ export function useProject() {
     loadProject,
     renderProject,
     getDuration,
+
+    // Track actions
+    toggleTrackMuted,
 
     // Setters for direct state manipulation
     setTracks,

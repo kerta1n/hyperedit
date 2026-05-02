@@ -52,6 +52,7 @@ export default function Home() {
   const videoPreviewRef = useRef<VideoPreviewHandle>(null);
   const playbackRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(0);
+  const activeV1ClipRef = useRef<{ start: number; inPoint: number } | null>(null);
 
   // Use the new project hook for multi-asset management
   const {
@@ -75,6 +76,7 @@ export default function Home() {
     loadProject,
     renderProject,
     getDuration,
+    toggleTrackMuted,
     // Captions
     addCaptionClip,
     addCaptionClipsBatch,
@@ -274,6 +276,22 @@ export default function Home() {
   const previewLayers = getPreviewLayers();
   const hasPreviewContent = previewLayers.length > 0;
 
+  useEffect(() => {
+    const v1Clip = activeClips.find(c =>
+      c.trackId === 'V1' &&
+      currentTime >= c.start &&
+      currentTime < c.start + c.duration
+    );
+    activeV1ClipRef.current = v1Clip
+      ? { start: v1Clip.start, inPoint: v1Clip.inPoint || 0 }
+      : null;
+  }, [activeClips, currentTime]);
+
+  const mutedTracks = useMemo(() =>
+    Object.fromEntries(tracks.filter(t => t.muted).map(t => [t.id, true])),
+    [tracks]
+  );
+
   // Detect active transitions at current playhead for preview overlay
   const previewActiveTransitions = useMemo((): ActiveTransition[] => {
     if (previewAssetId) return []; // No transitions in single-asset preview mode
@@ -315,22 +333,35 @@ export default function Home() {
     return Math.max(...activeClips.map(c => c.start + c.duration));
   }, [activeClips]);
 
-  // Timeline playback effect
+  // Timeline playback effect — wall-clock delta baseline, snap to video element when valid
   useEffect(() => {
     if (isPlaying && duration > 0) {
       lastTimeRef.current = performance.now();
 
       const animate = (now: number) => {
-        const delta = (now - lastTimeRef.current) / 1000; // Convert to seconds
+        const videoEl = videoPreviewRef.current?.getVideoElement();
+        const v1Clip = activeV1ClipRef.current;
+        const delta = (now - lastTimeRef.current) / 1000;
         lastTimeRef.current = now;
 
         setCurrentTime(prev => {
-          const newTime = prev + delta;
-          if (newTime >= duration) {
+          let nextTime = prev + delta;
+
+          if (videoEl && v1Clip) {
+            const timelineTime = videoEl.currentTime - v1Clip.inPoint + v1Clip.start;
+            const videoAdvanced = timelineTime > prev + 0.001;
+            const videoCloseToExpected = Math.abs(timelineTime - nextTime) < 0.25;
+
+            if (Number.isFinite(timelineTime) && videoAdvanced && videoCloseToExpected) {
+              nextTime = timelineTime;
+            }
+          }
+
+          if (nextTime >= duration) {
             setIsPlaying(false);
             return duration;
           }
-          return newTime;
+          return nextTime;
         });
 
         playbackRef.current = requestAnimationFrame(animate);
@@ -2180,6 +2211,9 @@ export default function Home() {
                 <TrackPropertiesPanel
                   trackId={selectedTrackId}
                   trackName={tracks.find(t => t.id === selectedTrackId)?.name ?? selectedTrackId}
+                  showMuteToggle={(() => { const t = tracks.find(tr => tr.id === selectedTrackId); return t?.type === 'video' || t?.type === 'audio'; })()}
+                  isMuted={tracks.find(t => t.id === selectedTrackId)?.muted ?? false}
+                  onToggleMute={() => toggleTrackMuted(selectedTrackId)}
                   autoSnap={trackAutoSnap[selectedTrackId] ?? false}
                   onToggleAutoSnap={(enabled) => setTrackAutoSnap(prev => ({ ...prev, [selectedTrackId]: enabled }))}
                   onClose={() => setSelectedTrackId(null)}
@@ -2204,6 +2238,7 @@ export default function Home() {
                 selectedLayerId={selectedClipId}
                 activeTransitions={previewActiveTransitions}
                 currentTime={currentTime}
+                mutedTracks={mutedTracks}
               />
             ) : clips.length > 0 ? (
               // Assets exist but playhead is not over any clip
@@ -2285,6 +2320,7 @@ export default function Home() {
                 removeTransition(id);
                 if (selectedTransitionId === id) setSelectedTransitionId(null);
               }}
+              mutedTracks={mutedTracks}
             />
           </ResizableVerticalPanel>
         </div>

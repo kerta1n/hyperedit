@@ -3,6 +3,9 @@ import { X } from 'lucide-react';
 interface TrackPropertiesPanelProps {
   trackId: string;
   trackName: string;
+  showMuteToggle: boolean;
+  isMuted: boolean;
+  onToggleMute: () => void;
   autoSnap: boolean;
   onToggleAutoSnap: (enabled: boolean) => void;
   onClose: () => void;
@@ -10,6 +13,9 @@ interface TrackPropertiesPanelProps {
 
 export default function TrackPropertiesPanel({
   trackName,
+  showMuteToggle,
+  isMuted,
+  onToggleMute,
   autoSnap,
   onToggleAutoSnap,
   onClose,
@@ -29,6 +35,29 @@ export default function TrackPropertiesPanel({
       </div>
 
       <div className="p-3 space-y-3 overflow-y-auto flex-1">
+        {showMuteToggle && (
+          <div className="flex items-center justify-between">
+            <span
+              className="text-xs text-zinc-300 cursor-default"
+              title="Mute this track in preview and rendered output."
+            >
+              Mute track
+            </span>
+            <button
+              onClick={onToggleMute}
+              className={`relative w-8 h-[18px] rounded-full transition-colors flex-shrink-0 ${
+                isMuted ? 'bg-red-700' : 'bg-zinc-600'
+              }`}
+              title={isMuted ? 'Unmute track' : 'Mute track'}
+            >
+              <span
+                className={`absolute top-0.5 left-0 w-3.5 h-3.5 rounded-full bg-white shadow transition-transform ${
+                  isMuted ? 'translate-x-[14px]' : 'translate-x-0.5'
+                }`}
+              />
+            </button>
+          </div>
+        )}
         <div className="flex items-center justify-between">
           <span
             className="text-xs text-zinc-300 cursor-default"

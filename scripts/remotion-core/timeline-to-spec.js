@@ -79,6 +79,7 @@ export function timelineToRemotionSpec({
       type: track.type,
       name: track.name || track.id,
       order: Number.isFinite(track.order) ? track.order : index,
+      muted: track.muted ?? false,
     }))
     .sort((a, b) => a.order - b.order);
 
@@ -140,7 +141,7 @@ export function timelineToRemotionSpec({
       outPointSec,
       playbackRate: 1,
       volume: 1,
-      muted: false,
+      muted: track?.muted ?? false,
       transform: clip.transform || {},
       transitionIn: clip.transitionIn || { type: 'fade', durationSec: 0.12 },
       transitionOut: clip.transitionOut || { type: 'fade', durationSec: 0.12 },
@@ -156,7 +157,7 @@ export function timelineToRemotionSpec({
           src: remotionClip.src,
           startSec,
           durationSec,
-          volume: 1,
+          volume: track?.muted ? 0 : 1,
         });
       }
     }

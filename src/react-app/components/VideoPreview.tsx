@@ -37,6 +37,7 @@ interface VideoPreviewProps {
   selectedLayerId?: string | null;
   activeTransitions?: ActiveTransition[];
   currentTime?: number;
+  mutedTracks?: Record<string, boolean>;
 }
 
 export interface VideoPreviewHandle {
@@ -92,10 +93,12 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   selectedLayerId,
   activeTransitions = [],
   currentTime = 0,
+  mutedTracks,
 }, ref) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const loadedSrcRef = useRef<string | null>(null);
   const overlayVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
+  const overlayTrackIdRef = useRef<Map<string, string>>(new Map());
   const containerRef = useRef<HTMLDivElement>(null);
   const [draggingLayer, setDraggingLayer] = useState<string | null>(null);
   const [dragStart, setDragStart] = useState<{ x: number; y: number; layerX: number; layerY: number } | null>(null);
@@ -203,10 +206,30 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     });
   }, [layers, isPlaying]);
 
-  // Seek on load
+  // Imperatively mute/unmute V1 base video (React muted prop unreliable for runtime toggles)
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.muted = !!mutedTracks?.['V1'];
+    }
+  }, [mutedTracks]);
+
+  // Imperatively mute/unmute overlay video and audio elements
+  useEffect(() => {
+    overlayVideoRefs.current.forEach((el, id) => {
+      const trackId = overlayTrackIdRef.current.get(id);
+      if (trackId !== undefined) {
+        el.muted = !!mutedTracks?.[trackId];
+      }
+    });
+  }, [mutedTracks]);
+
+  // Seek on load + apply mute state
   const handleLoaded = () => {
-    if (videoRef.current && baseLayerClipTime !== undefined) {
-      videoRef.current.currentTime = baseLayerClipTime;
+    if (videoRef.current) {
+      if (baseLayerClipTime !== undefined) {
+        videoRef.current.currentTime = baseLayerClipTime;
+      }
+      videoRef.current.muted = !!mutedTracks?.['V1'];
     }
   };
 
@@ -319,8 +342,10 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
               ref={(el) => {
                 if (el) {
                   overlayVideoRefs.current.set(layer.id, el);
+                  overlayTrackIdRef.current.set(layer.id, layer.trackId);
                 } else {
                   overlayVideoRefs.current.delete(layer.id);
+                  overlayTrackIdRef.current.delete(layer.id);
                 }
               }}
               src={layer.url}
@@ -330,14 +355,12 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
               style={styles}
               playsInline
               preload="auto"
-              muted
               onLoadedData={(e) => {
-                // Seek to correct time when loaded
                 const video = e.currentTarget;
                 if (layer.clipTime !== undefined) {
                   video.currentTime = layer.clipTime;
                 }
-                // Auto-play if timeline is playing
+                video.muted = !!mutedTracks?.[layer.trackId];
                 if (isPlaying) {
                   video.play().catch(() => {});
                 }
@@ -425,8 +448,10 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
               ref={(el) => {
                 if (el) {
                   overlayVideoRefs.current.set(layer.id, el as unknown as HTMLVideoElement);
+                  overlayTrackIdRef.current.set(layer.id, layer.trackId);
                 } else {
                   overlayVideoRefs.current.delete(layer.id);
+                  overlayTrackIdRef.current.delete(layer.id);
                 }
               }}
               src={layer.url}
@@ -436,6 +461,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
                 if (layer.clipTime !== undefined) {
                   audio.currentTime = layer.clipTime;
                 }
+                audio.muted = !!mutedTracks?.[layer.trackId];
                 if (isPlaying) {
                   audio.play().catch(() => {});
                 }
