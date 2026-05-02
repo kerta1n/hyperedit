@@ -52,6 +52,7 @@ export default function Home() {
   const videoPreviewRef = useRef<VideoPreviewHandle>(null);
   const playbackRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(0);
+  const activeV1ClipRef = useRef<{ start: number; inPoint: number } | null>(null);
 
   // Use the new project hook for multi-asset management
   const {
@@ -97,6 +98,8 @@ export default function Home() {
     closeTimelineTab,
     updateTabClips,
     updateTabAsset,
+    // Track operations
+    toggleTrackMuted,
     // Settings
     setSettings,
     setStatus,
@@ -309,22 +312,55 @@ export default function Home() {
       });
   }, [previewAssetId, activeTabId, timelineTransitions, timelineTabs, currentTime, activeClips, assets, getAssetStreamUrl]);
 
+  // Muted tracks map for VideoPreview
+  const mutedTracks = useMemo(() =>
+    Object.fromEntries(tracks.filter(t => t.muted).map(t => [t.id, true])),
+    [tracks]
+  );
+
   // Get duration based on active tab's clips
   const duration = useMemo(() => {
     if (activeClips.length === 0) return 0;
     return Math.max(...activeClips.map(c => c.start + c.duration));
   }, [activeClips]);
 
-  // Timeline playback effect
+  // Keep active V1 clip ref updated for rAF (avoids stale closure on currentTime)
+  useEffect(() => {
+    const v1Clip = activeClips.find(c =>
+      c.trackId === 'V1' &&
+      currentTime >= c.start &&
+      currentTime < c.start + c.duration
+    );
+    activeV1ClipRef.current = v1Clip
+      ? { start: v1Clip.start, inPoint: v1Clip.inPoint || 0 }
+      : null;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeClips]);
+
+  // Timeline playback — video-driven clock with wall-clock fallback
   useEffect(() => {
     if (isPlaying && duration > 0) {
       lastTimeRef.current = performance.now();
 
       const animate = (now: number) => {
-        const delta = (now - lastTimeRef.current) / 1000; // Convert to seconds
+        const delta = (now - lastTimeRef.current) / 1000;
         lastTimeRef.current = now;
 
         setCurrentTime(prev => {
+          const videoEl = videoPreviewRef.current?.getVideoElement();
+          const v1Clip = activeV1ClipRef.current;
+
+          if (videoEl && v1Clip && videoEl.readyState >= 2) {
+            const timelineTime = videoEl.currentTime - v1Clip.inPoint + v1Clip.start;
+            if (Number.isFinite(timelineTime) && timelineTime >= 0) {
+              if (timelineTime >= duration) {
+                setIsPlaying(false);
+                return duration;
+              }
+              return timelineTime;
+            }
+          }
+
           const newTime = prev + delta;
           if (newTime >= duration) {
             setIsPlaying(false);
@@ -361,11 +397,21 @@ export default function Home() {
     setCurrentTime(0);
   }, []);
 
-  // Handle timeline seeking
+  // Handle timeline seeking — also seeks video element during playback
   const handleTimelineSeek = useCallback((time: number) => {
     setCurrentTime(time);
-    // Don't seek the video directly - let the clipTime prop handle it
-  }, []);
+    if (isPlaying) {
+      const v1Clip = activeClips.find(c =>
+        c.trackId === 'V1' &&
+        time >= c.start &&
+        time < c.start + c.duration
+      );
+      if (v1Clip) {
+        const targetClipTime = (time - v1Clip.start) + (v1Clip.inPoint || 0);
+        videoPreviewRef.current?.seekTo(targetClipTime);
+      }
+    }
+  }, [isPlaying, activeClips]);
 
 
   // Handle asset upload
@@ -2182,6 +2228,8 @@ export default function Home() {
                   trackName={tracks.find(t => t.id === selectedTrackId)?.name ?? selectedTrackId}
                   autoSnap={trackAutoSnap[selectedTrackId] ?? false}
                   onToggleAutoSnap={(enabled) => setTrackAutoSnap(prev => ({ ...prev, [selectedTrackId]: enabled }))}
+                  isMuted={tracks.find(t => t.id === selectedTrackId)?.muted ?? false}
+                  onToggleMute={() => toggleTrackMuted(selectedTrackId)}
                   onClose={() => setSelectedTrackId(null)}
                 />
               </div>
@@ -2204,6 +2252,7 @@ export default function Home() {
                 selectedLayerId={selectedClipId}
                 activeTransitions={previewActiveTransitions}
                 currentTime={currentTime}
+                mutedTracks={mutedTracks}
               />
             ) : clips.length > 0 ? (
               // Assets exist but playhead is not over any clip

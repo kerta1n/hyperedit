@@ -46,6 +46,7 @@ export interface Track {
   type: 'video' | 'audio' | 'text';
   name: string;
   order: number;
+  muted?: boolean;
 }
 
 // Caption word with timing
@@ -546,6 +547,13 @@ export function useProject() {
     setClips(prev => [...prev, clip]);
     return clip;
   }, [assets]);
+
+  // Toggle track mute state
+  const toggleTrackMuted = useCallback((trackId: string): void => {
+    setTracks(prev => prev.map(t =>
+      t.id === trackId ? { ...t, muted: !t.muted } : t
+    ));
+  }, []);
 
   // Update clip
   const updateClip = useCallback((clipId: string, updates: Partial<TimelineClip>): void => {
@@ -1258,6 +1266,9 @@ export function useProject() {
     loadProject,
     renderProject,
     getDuration,
+
+    // Track operations
+    toggleTrackMuted,
 
     // Setters for direct state manipulation
     setTracks,

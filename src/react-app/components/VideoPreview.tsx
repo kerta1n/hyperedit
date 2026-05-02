@@ -37,6 +37,7 @@ interface VideoPreviewProps {
   selectedLayerId?: string | null;
   activeTransitions?: ActiveTransition[];
   currentTime?: number;
+  mutedTracks?: Record<string, boolean>;
 }
 
 export interface VideoPreviewHandle {
@@ -92,6 +93,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   selectedLayerId,
   activeTransitions = [],
   currentTime = 0,
+  mutedTracks,
 }, ref) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const loadedSrcRef = useRef<string | null>(null);
@@ -148,16 +150,15 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     }
   }, [baseLayerUrl]);
 
-  // Seek control for base video (only when paused/scrubbing)
+  // Seek control for base video — threshold-gated, works during playback too
   useEffect(() => {
     const video = videoRef.current;
     if (!video || baseLayerClipTime === undefined) return;
-    if (isPlaying) return;
 
     if (Math.abs(video.currentTime - baseLayerClipTime) > 0.1) {
       video.currentTime = baseLayerClipTime;
     }
-  }, [baseLayerClipTime, isPlaying]);
+  }, [baseLayerClipTime]);
 
   // Play/pause control for base video
   useEffect(() => {
@@ -184,11 +185,8 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     });
   }, [isPlaying]);
 
-  // Sync overlay video and audio seeking when scrubbing
+  // Sync overlay video and audio seeking — threshold-gated, works during playback too
   useEffect(() => {
-    if (isPlaying) return; // Don't interfere during playback
-
-    // Find overlay video and audio layers and sync their time
     const overlayMediaLayers = layers.filter(
       l => (l.type === 'video' && l.trackId !== 'V1') || l.type === 'audio'
     );
@@ -201,12 +199,32 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
         }
       }
     });
-  }, [layers, isPlaying]);
+  }, [layers]);
 
-  // Seek on load
+  // Mute control for base video (V1) — imperative to avoid remount
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.muted = !!mutedTracks?.['V1'];
+    }
+  }, [mutedTracks]);
+
+  // Mute control for overlay video and audio elements
+  useEffect(() => {
+    overlayVideoRefs.current.forEach((el, id) => {
+      const layer = layers.find(l => l.id === id);
+      if (layer) {
+        el.muted = !!mutedTracks?.[layer.trackId];
+      }
+    });
+  }, [mutedTracks, layers]);
+
+  // Seek on load + auto-play if timeline is playing (needed for V1 clip transitions)
   const handleLoaded = () => {
     if (videoRef.current && baseLayerClipTime !== undefined) {
       videoRef.current.currentTime = baseLayerClipTime;
+      if (isPlaying) {
+        videoRef.current.play().catch(() => {});
+      }
     }
   };
 
@@ -330,7 +348,6 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
               style={styles}
               playsInline
               preload="auto"
-              muted
               onLoadedData={(e) => {
                 // Seek to correct time when loaded
                 const video = e.currentTarget;

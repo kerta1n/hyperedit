@@ -1,19 +1,26 @@
-import { X } from 'lucide-react';
+import { X, Volume2, VolumeX } from 'lucide-react';
 
 interface TrackPropertiesPanelProps {
   trackId: string;
   trackName: string;
   autoSnap: boolean;
   onToggleAutoSnap: (enabled: boolean) => void;
+  isMuted?: boolean;
+  onToggleMute?: () => void;
   onClose: () => void;
 }
 
 export default function TrackPropertiesPanel({
+  trackId,
   trackName,
   autoSnap,
   onToggleAutoSnap,
+  isMuted = false,
+  onToggleMute,
   onClose,
 }: TrackPropertiesPanelProps) {
+  const showMuteToggle = trackId !== 'T1' && onToggleMute;
+
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
@@ -50,6 +57,28 @@ export default function TrackPropertiesPanel({
             />
           </button>
         </div>
+
+        {showMuteToggle && (
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-zinc-300 cursor-default flex items-center gap-1.5">
+              {isMuted ? <VolumeX className="w-3 h-3" /> : <Volume2 className="w-3 h-3" />}
+              Mute
+            </span>
+            <button
+              onClick={onToggleMute}
+              className={`relative w-8 h-[18px] rounded-full transition-colors flex-shrink-0 ${
+                isMuted ? 'bg-red-500' : 'bg-zinc-600'
+              }`}
+              title={isMuted ? 'Unmute track' : 'Mute track'}
+            >
+              <span
+                className={`absolute top-0.5 left-0 w-3.5 h-3.5 rounded-full bg-white shadow transition-transform ${
+                  isMuted ? 'translate-x-[14px]' : 'translate-x-0.5'
+                }`}
+              />
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
