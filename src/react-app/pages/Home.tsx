@@ -350,7 +350,7 @@ export default function Home() {
           const videoEl = videoPreviewRef.current?.getVideoElement();
           const v1Clip = activeV1ClipRef.current;
 
-          if (videoEl && v1Clip && videoEl.readyState >= 2) {
+          if (videoEl && v1Clip && videoEl.readyState >= 2 && !videoEl.seeking) {
             const timelineTime = videoEl.currentTime - v1Clip.inPoint + v1Clip.start;
             if (Number.isFinite(timelineTime) && timelineTime >= 0) {
               if (timelineTime >= duration) {
@@ -397,19 +397,20 @@ export default function Home() {
     setCurrentTime(0);
   }, []);
 
-  // Handle timeline seeking — also seeks video element during playback
+  // Handle timeline seeking — seeks video + overlays and updates ref eagerly
   const handleTimelineSeek = useCallback((time: number) => {
     setCurrentTime(time);
-    if (isPlaying) {
-      const v1Clip = activeClips.find(c =>
-        c.trackId === 'V1' &&
-        time >= c.start &&
-        time < c.start + c.duration
-      );
-      if (v1Clip) {
-        const targetClipTime = (time - v1Clip.start) + (v1Clip.inPoint || 0);
-        videoPreviewRef.current?.seekTo(targetClipTime);
-      }
+    const v1Clip = activeClips.find(c =>
+      c.trackId === 'V1' &&
+      time >= c.start &&
+      time < c.start + c.duration
+    );
+    activeV1ClipRef.current = v1Clip
+      ? { start: v1Clip.start, inPoint: v1Clip.inPoint || 0 }
+      : null;
+    if (isPlaying && v1Clip) {
+      const targetClipTime = (time - v1Clip.start) + (v1Clip.inPoint || 0);
+      videoPreviewRef.current?.seekTo(targetClipTime);
     }
   }, [isPlaying, activeClips]);
 
@@ -2094,8 +2095,16 @@ export default function Home() {
                   <button
                     key={i}
                     onClick={() => {
-                      videoPreviewRef.current?.seekTo(ch.start);
                       setCurrentTime(ch.start);
+                      const v1Clip = activeClips.find(c =>
+                        c.trackId === 'V1' &&
+                        ch.start >= c.start &&
+                        ch.start < c.start + c.duration
+                      );
+                      if (v1Clip) {
+                        const clipTime = (ch.start - v1Clip.start) + (v1Clip.inPoint || 0);
+                        videoPreviewRef.current?.seekTo(clipTime);
+                      }
                     }}
                     className="w-full text-left px-3 py-2 rounded-lg bg-zinc-800/50 hover:bg-zinc-700/50 transition-colors flex items-center justify-between"
                   >
