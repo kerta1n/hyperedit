@@ -52,7 +52,7 @@ export default function Home() {
   const videoPreviewRef = useRef<VideoPreviewHandle>(null);
   const playbackRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(0);
-  const activeV1ClipRef = useRef<{ start: number; inPoint: number } | null>(null);
+  const wasPlayingRef = useRef(false);
 
   // Use the new project hook for multi-asset management
   const {
@@ -274,7 +274,7 @@ export default function Home() {
     return layers;
   }, [previewAssetId, assets, activeClips, currentTime, getAssetStreamUrl, getCaptionData]);
 
-  const previewLayers = getPreviewLayers();
+  const previewLayers = useMemo(() => getPreviewLayers(), [getPreviewLayers]);
   const hasPreviewContent = previewLayers.length > 0;
 
   // Detect active transitions at current playhead for preview overlay
@@ -324,43 +324,14 @@ export default function Home() {
     return Math.max(...activeClips.map(c => c.start + c.duration));
   }, [activeClips]);
 
-  // Keep active V1 clip ref updated for rAF (avoids stale closure on currentTime)
-  useEffect(() => {
-    const v1Clip = activeClips.find(c =>
-      c.trackId === 'V1' &&
-      currentTime >= c.start &&
-      currentTime < c.start + c.duration
-    );
-    activeV1ClipRef.current = v1Clip
-      ? { start: v1Clip.start, inPoint: v1Clip.inPoint || 0 }
-      : null;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeClips]);
-
-  // Timeline playback — video-driven clock with wall-clock fallback
+  // Timeline playback — wall-clock rAF
   useEffect(() => {
     if (isPlaying && duration > 0) {
       lastTimeRef.current = performance.now();
-
       const animate = (now: number) => {
         const delta = (now - lastTimeRef.current) / 1000;
         lastTimeRef.current = now;
-
         setCurrentTime(prev => {
-          const videoEl = videoPreviewRef.current?.getVideoElement();
-          const v1Clip = activeV1ClipRef.current;
-
-          if (videoEl && v1Clip && videoEl.readyState >= 2 && !videoEl.seeking) {
-            const timelineTime = videoEl.currentTime - v1Clip.inPoint + v1Clip.start;
-            if (Number.isFinite(timelineTime) && timelineTime >= 0) {
-              if (timelineTime >= duration) {
-                setIsPlaying(false);
-                return duration;
-              }
-              return timelineTime;
-            }
-          }
-
           const newTime = prev + delta;
           if (newTime >= duration) {
             setIsPlaying(false);
@@ -368,16 +339,11 @@ export default function Home() {
           }
           return newTime;
         });
-
         playbackRef.current = requestAnimationFrame(animate);
       };
-
       playbackRef.current = requestAnimationFrame(animate);
-
       return () => {
-        if (playbackRef.current) {
-          cancelAnimationFrame(playbackRef.current);
-        }
+        if (playbackRef.current) cancelAnimationFrame(playbackRef.current);
       };
     }
   }, [isPlaying, duration]);
@@ -397,22 +363,21 @@ export default function Home() {
     setCurrentTime(0);
   }, []);
 
-  // Handle timeline seeking — seeks video + overlays and updates ref eagerly
   const handleTimelineSeek = useCallback((time: number) => {
     setCurrentTime(time);
-    const v1Clip = activeClips.find(c =>
-      c.trackId === 'V1' &&
-      time >= c.start &&
-      time < c.start + c.duration
-    );
-    activeV1ClipRef.current = v1Clip
-      ? { start: v1Clip.start, inPoint: v1Clip.inPoint || 0 }
-      : null;
-    if (isPlaying && v1Clip) {
-      const targetClipTime = (time - v1Clip.start) + (v1Clip.inPoint || 0);
-      videoPreviewRef.current?.seekTo(targetClipTime);
+  }, []);
+
+  const handleSeekStart = useCallback(() => {
+    wasPlayingRef.current = isPlaying;
+    if (isPlaying) setIsPlaying(false);
+  }, [isPlaying]);
+
+  const handleSeekEnd = useCallback(() => {
+    if (wasPlayingRef.current) {
+      setIsPlaying(true);
+      wasPlayingRef.current = false;
     }
-  }, [isPlaying, activeClips]);
+  }, []);
 
 
   // Handle asset upload
@@ -2343,6 +2308,8 @@ export default function Home() {
                 removeTransition(id);
                 if (selectedTransitionId === id) setSelectedTransitionId(null);
               }}
+              onSeekStart={handleSeekStart}
+              onSeekEnd={handleSeekEnd}
             />
           </ResizableVerticalPanel>
         </div>

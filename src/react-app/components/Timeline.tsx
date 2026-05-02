@@ -37,6 +37,8 @@ interface TimelineProps {
   onSelectTransition?: (id: string | null) => void;
   onUpdateTimelineTransition?: (id: string, updates: Partial<Omit<TimelineTransition, 'id'>>) => void;
   onRemoveTimelineTransition?: (id: string) => void;
+  onSeekStart?: () => void;
+  onSeekEnd?: () => void;
 }
 
 const TRACK_HEIGHTS: Record<string, number> = {
@@ -84,6 +86,8 @@ export default function Timeline({
   onSelectTransition,
   onUpdateTimelineTransition,
   onRemoveTimelineTransition,
+  onSeekStart,
+  onSeekEnd,
 }: TimelineProps) {
   const [zoom, setZoom] = useState(1);
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
@@ -190,15 +194,18 @@ export default function Timeline({
     const clickX = e.clientX - rect.left + scrollLeft;
     const newTime = Math.max(0, Math.min(clickX / pixelsPerSecond, duration));
 
+    onSeekStart?.();
     onTimeChange(newTime);
     onSelectClip(null);
-  }, [pixelsPerSecond, duration, onTimeChange, onSelectClip]);
+    setTimeout(() => onSeekEnd?.(), 0);
+  }, [pixelsPerSecond, duration, onTimeChange, onSelectClip, onSeekStart, onSeekEnd]);
 
   // Handle playhead dragging
   const handlePlayheadMouseDown = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
+    onSeekStart?.();
     setIsDraggingPlayhead(true);
-  }, []);
+  }, [onSeekStart]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     if (!isDraggingPlayhead || !tracksContainerRef.current) return;
@@ -212,8 +219,11 @@ export default function Timeline({
   }, [isDraggingPlayhead, pixelsPerSecond, duration, onTimeChange]);
 
   const handleMouseUp = useCallback(() => {
-    setIsDraggingPlayhead(false);
-  }, []);
+    if (isDraggingPlayhead) {
+      setIsDraggingPlayhead(false);
+      onSeekEnd?.();
+    }
+  }, [isDraggingPlayhead, onSeekEnd]);
 
   // Handle drop from asset library
   const handleDragOver = useCallback((e: React.DragEvent, trackId: string) => {

@@ -99,6 +99,9 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   const loadedSrcRef = useRef<string | null>(null);
   const overlayVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
   const containerRef = useRef<HTMLDivElement>(null);
+  const overlayTrackIdRef = useRef<Map<string, string>>(new Map());
+  const overlayClipTimeRef = useRef<Map<string, number>>(new Map());
+  const baseClipTimeRef = useRef<number | undefined>(undefined);
   const [draggingLayer, setDraggingLayer] = useState<string | null>(null);
   const [dragStart, setDragStart] = useState<{ x: number; y: number; layerX: number; layerY: number } | null>(null);
 
@@ -150,15 +153,15 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     }
   }, [baseLayerUrl]);
 
-  // Seek control for base video — threshold-gated, works during playback too
+  // Seek control for base video (only when paused/scrubbing)
   useEffect(() => {
     const video = videoRef.current;
     if (!video || baseLayerClipTime === undefined) return;
-
+    if (isPlaying) return;
     if (Math.abs(video.currentTime - baseLayerClipTime) > 0.1) {
       video.currentTime = baseLayerClipTime;
     }
-  }, [baseLayerClipTime]);
+  }, [baseLayerClipTime, isPlaying]);
 
   // Play/pause control for base video
   useEffect(() => {
@@ -185,12 +188,12 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     });
   }, [isPlaying]);
 
-  // Sync overlay video and audio seeking — threshold-gated, works during playback too
+  // Sync overlay video and audio seeking when scrubbing
   useEffect(() => {
+    if (isPlaying) return;
     const overlayMediaLayers = layers.filter(
       l => (l.type === 'video' && l.trackId !== 'V1') || l.type === 'audio'
     );
-
     overlayMediaLayers.forEach((layer) => {
       const mediaEl = overlayVideoRefs.current.get(layer.id);
       if (mediaEl && layer.clipTime !== undefined) {
@@ -199,24 +202,44 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
         }
       }
     });
-  }, [layers]);
+  }, [layers, isPlaying]);
 
-  // Mute control for base video (V1) — imperative to avoid remount
+  // Mute control for base video (V1) — resync position on toggle to prevent drift
   useEffect(() => {
     if (videoRef.current) {
       videoRef.current.muted = !!mutedTracks?.['V1'];
+      if (baseClipTimeRef.current !== undefined) {
+        videoRef.current.currentTime = baseClipTimeRef.current;
+      }
     }
   }, [mutedTracks]);
 
-  // Mute control for overlay video and audio elements
+  // Track layer→trackId and clipTime mappings (avoids mute effect depending on layers)
+  useEffect(() => {
+    const trackMap = new Map<string, string>();
+    const clipTimeMap = new Map<string, number>();
+    layers.forEach(l => {
+      if (l.trackId) trackMap.set(l.id, l.trackId);
+      if (l.clipTime !== undefined) clipTimeMap.set(l.id, l.clipTime);
+    });
+    overlayTrackIdRef.current = trackMap;
+    overlayClipTimeRef.current = clipTimeMap;
+    baseClipTimeRef.current = baseLayerClipTime;
+  }, [layers, baseLayerClipTime]);
+
+  // Mute control for overlay video and audio elements — resync position on toggle
   useEffect(() => {
     overlayVideoRefs.current.forEach((el, id) => {
-      const layer = layers.find(l => l.id === id);
-      if (layer) {
-        el.muted = !!mutedTracks?.[layer.trackId];
+      const trackId = overlayTrackIdRef.current.get(id);
+      if (trackId) {
+        el.muted = !!mutedTracks?.[trackId];
+        const clipTime = overlayClipTimeRef.current.get(id);
+        if (clipTime !== undefined) {
+          el.currentTime = clipTime;
+        }
       }
     });
-  }, [mutedTracks, layers]);
+  }, [mutedTracks]);
 
   // Seek on load + auto-play if timeline is playing (needed for V1 clip transitions)
   const handleLoaded = () => {
@@ -347,16 +370,20 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
               }`}
               style={styles}
               playsInline
+              muted
               preload="auto"
               onLoadedData={(e) => {
-                // Seek to correct time when loaded
                 const video = e.currentTarget;
                 if (layer.clipTime !== undefined) {
                   video.currentTime = layer.clipTime;
                 }
-                // Auto-play if timeline is playing
                 if (isPlaying) {
                   video.play().catch(() => {});
+                }
+                // Apply mute state from track settings
+                const trackId = layer.trackId;
+                if (trackId && mutedTracks) {
+                  video.muted = !!mutedTracks[trackId];
                 }
               }}
               onMouseDown={(e) => handleLayerMouseDown(e, layer)}
