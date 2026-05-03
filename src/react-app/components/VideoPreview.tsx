@@ -105,7 +105,6 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   const baseLayerId = foundBaseLayer?.id;
   const baseLayerUrl = foundBaseLayer?.url;
   const baseLayerClipTime = foundBaseLayer?.clipTime;
-
   // Memoize to prevent effect triggers when only caption layers change
   const baseVideoLayer = useMemo(() => {
     return foundBaseLayer;
@@ -202,10 +201,13 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     });
   }, [layers, isPlaying]);
 
-  // Seek on load
+  // Seek on load and resume playback if needed
   const handleLoaded = () => {
     if (videoRef.current && baseLayerClipTime !== undefined) {
       videoRef.current.currentTime = baseLayerClipTime;
+      if (isPlaying) {
+        videoRef.current.play().catch(() => {});
+      }
     }
   };
 
