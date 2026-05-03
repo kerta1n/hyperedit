@@ -364,7 +364,6 @@ export default function Home() {
   // Handle timeline seeking
   const handleTimelineSeek = useCallback((time: number) => {
     setCurrentTime(time);
-    // Don't seek the video directly - let the clipTime prop handle it
   }, []);
 
 
@@ -2048,7 +2047,6 @@ export default function Home() {
                   <button
                     key={i}
                     onClick={() => {
-                      videoPreviewRef.current?.seekTo(ch.start);
                       setCurrentTime(ch.start);
                     }}
                     className="w-full text-left px-3 py-2 rounded-lg bg-zinc-800/50 hover:bg-zinc-700/50 transition-colors flex items-center justify-between"

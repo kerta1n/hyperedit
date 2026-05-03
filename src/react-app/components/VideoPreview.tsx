@@ -148,13 +148,14 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     }
   }, [baseLayerUrl]);
 
-  // Seek control for base video (only when paused/scrubbing)
+  // Seek control for base video
   useEffect(() => {
     const video = videoRef.current;
     if (!video || baseLayerClipTime === undefined) return;
-    if (isPlaying) return;
 
-    if (Math.abs(video.currentTime - baseLayerClipTime) > 0.1) {
+    const drift = Math.abs(video.currentTime - baseLayerClipTime);
+    const threshold = isPlaying ? 0.3 : 0.05;
+    if (drift > threshold) {
       video.currentTime = baseLayerClipTime;
     }
   }, [baseLayerClipTime, isPlaying]);
@@ -184,19 +185,17 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     });
   }, [isPlaying]);
 
-  // Sync overlay video and audio seeking when scrubbing
+  // Sync overlay video and audio seeking
   useEffect(() => {
-    if (isPlaying) return; // Don't interfere during playback
-
-    // Find overlay video and audio layers and sync their time
     const overlayMediaLayers = layers.filter(
       l => (l.type === 'video' && l.trackId !== 'V1') || l.type === 'audio'
     );
 
+    const threshold = isPlaying ? 0.3 : 0.05;
     overlayMediaLayers.forEach((layer) => {
       const mediaEl = overlayVideoRefs.current.get(layer.id);
       if (mediaEl && layer.clipTime !== undefined) {
-        if (Math.abs(mediaEl.currentTime - layer.clipTime) > 0.1) {
+        if (Math.abs(mediaEl.currentTime - layer.clipTime) > threshold) {
           mediaEl.currentTime = layer.clipTime;
         }
       }
