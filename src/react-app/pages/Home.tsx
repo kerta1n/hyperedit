@@ -52,7 +52,6 @@ export default function Home() {
   const videoPreviewRef = useRef<VideoPreviewHandle>(null);
   const playbackRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(0);
-  const v1ClockOffsetRef = useRef<number | null>(null);
 
   // Use the new project hook for multi-asset management
   const {
@@ -275,15 +274,7 @@ export default function Home() {
   const previewLayers = getPreviewLayers();
   const hasPreviewContent = previewLayers.length > 0;
 
-  // Track V1 clip offset for video-clock-master playback
-  const activeV1Clip = activeClips.find(c =>
-    c.trackId === 'V1' &&
-    currentTime >= c.start &&
-    currentTime < c.start + c.duration
-  );
-  v1ClockOffsetRef.current = activeV1Clip
-    ? activeV1Clip.start - (activeV1Clip.inPoint || 0)
-    : null;
+
 
   // Detect active transitions at current playhead for preview overlay
   const previewActiveTransitions = useMemo((): ActiveTransition[] => {
@@ -336,14 +327,7 @@ export default function Home() {
         lastTimeRef.current = now;
 
         setCurrentTime(prev => {
-          const baseVideo = videoPreviewRef.current?.getVideoElement();
-          const offset = v1ClockOffsetRef.current;
-          let newTime: number;
-          if (baseVideo && offset !== null && baseVideo.readyState >= 2 && !baseVideo.paused) {
-            newTime = baseVideo.currentTime + offset;
-          } else {
-            newTime = prev + delta;
-          }
+          const newTime = prev + delta;
           if (newTime >= duration) {
             setIsPlaying(false);
             return duration;

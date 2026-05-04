@@ -153,7 +153,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     if (!video || baseLayerClipTime === undefined) return;
 
     const drift = Math.abs(video.currentTime - baseLayerClipTime);
-    const threshold = isPlaying ? 0.3 : 0.05;
+    const threshold = isPlaying ? 0.15 : 0.05;
     if (drift > threshold) {
       video.currentTime = baseLayerClipTime;
     }
@@ -190,7 +190,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
       l => (l.type === 'video' && l.trackId !== 'V1') || l.type === 'audio'
     );
 
-    const threshold = isPlaying ? 0.3 : 0.05;
+    const threshold = isPlaying ? 0.15 : 0.05;
     overlayMediaLayers.forEach((layer) => {
       const mediaEl = overlayVideoRefs.current.get(layer.id);
       if (mediaEl && layer.clipTime !== undefined) {
