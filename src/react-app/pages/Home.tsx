@@ -4,8 +4,6 @@ import Timeline from '@/react-app/components/Timeline';
 import AssetLibrary from '@/react-app/components/AssetLibrary';
 import ClipPropertiesPanel from '@/react-app/components/ClipPropertiesPanel';
 import CaptionPropertiesPanel from '@/react-app/components/CaptionPropertiesPanel';
-import TransitionPropertiesPanel from '@/react-app/components/TransitionPropertiesPanel';
-import TrackPropertiesPanel from '@/react-app/components/TrackPropertiesPanel';
 import AIPromptPanel from '@/react-app/components/AIPromptPanel';
 import PicassoPanel from '@/react-app/components/PicassoPanel';
 import DiCaprioPanel from '@/react-app/components/DiCaprioPanel';
@@ -13,14 +11,9 @@ import GifSearchPanel from '@/react-app/components/GifSearchPanel';
 import ResizablePanel from '@/react-app/components/ResizablePanel';
 import ResizableVerticalPanel from '@/react-app/components/ResizableVerticalPanel';
 import TimelineTabs from '@/react-app/components/TimelineTabs';
-import RenderSettingsModal from '@/react-app/components/RenderSettingsModal';
 import { useProject, Asset, TimelineClip, CaptionStyle } from '@/react-app/hooks/useProject';
-import type { RenderOptions } from '@/react-app/hooks/useProject';
-import { readNDJSONStream } from '@/react-app/utils/ndjson';
 import { useVideoSession } from '@/react-app/hooks/useVideoSession';
-import SessionManager from '@/react-app/components/SessionManager';
 import { Sparkles, ListOrdered, Copy, Check, X, Download, Play, Palette, Film } from 'lucide-react';
-import type { ActiveTransition } from '@/react-app/components/TransitionPreview';
 import type { TemplateId } from '@/remotion/templates';
 
 interface ChapterData {
@@ -31,23 +24,18 @@ interface ChapterData {
 
 export default function Home() {
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
-  const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
-  const [selectedTransitionId, setSelectedTransitionId] = useState<string | null>(null);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
-  const [availableTransitions, setAvailableTransitions] = useState<{ builtIn: string[]; custom: { id: string; name: string }[] }>({ builtIn: ['crossfade', 'slide-left', 'slide-right', 'dip-to-black'], custom: [] });
   const [currentTime, setCurrentTime] = useState(0);
+  const [seekVersion, setSeekVersion] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [chapterData, setChapterData] = useState<ChapterData | null>(null);
   const [showChapters, setShowChapters] = useState(false);
   const [copied, setCopied] = useState(false);
   const [previewAssetId, setPreviewAssetId] = useState<string | null>(null);
   const [aspectRatio, setAspectRatio] = useState<'16:9' | '9:16'>('16:9');
-  const [selectedTrackId, setSelectedTrackId] = useState<string | null>(null);
-  const [trackAutoSnap, setTrackAutoSnap] = useState<Record<string, boolean>>({});
+  const [autoSnap, setAutoSnap] = useState(true); // Ripple delete mode - shift clips when deleting
   const [activeAgent, setActiveAgent] = useState<'director' | 'picasso' | 'dicaprio'>('director');
   const [showGifSearch, setShowGifSearch] = useState(false);
-  const [showRenderSettings, setShowRenderSettings] = useState(false);
-  const [recommendedConcurrency, setRecommendedConcurrency] = useState(4);
 
   const videoPreviewRef = useRef<VideoPreviewHandle>(null);
   const playbackRef = useRef<number | null>(null);
@@ -76,19 +64,9 @@ export default function Home() {
     renderProject,
     getDuration,
     // Captions
-    addCaptionClip,
     addCaptionClipsBatch,
     updateCaptionStyle,
     getCaptionData,
-    // Transitions (legacy v1)
-    transitions,
-    setTransitions,
-    addLegacyTransition,
-    // Timeline Transitions (v2)
-    timelineTransitions,
-    addTransition,
-    updateTransition,
-    removeTransition,
     // Timeline tabs
     timelineTabs,
     activeTabId,
@@ -99,30 +77,7 @@ export default function Home() {
     updateTabAsset,
     // Settings
     setSettings,
-    setStatus,
-    // Render options
-    renderOptions,
-    setRenderOptions,
-    // Session management
-    setSession,
-    saveProjectImmediate,
-    resetProjectState,
   } = useProject();
-
-  const resetLocalState = useCallback(() => {
-    setSelectedClipId(null);
-    setSelectedClipIds([]);
-    setSelectedTransitionId(null);
-    setSelectedAssetId(null);
-    setPreviewAssetId(null);
-    setCurrentTime(0);
-    setIsPlaying(false);
-    setChapterData(null);
-    setShowChapters(false);
-    setShowGifSearch(false);
-    setShowRenderSettings(false);
-    setSelectedTrackId(null);
-  }, []);
 
   // Compute the active clips based on which tab is selected
   const activeClips = useMemo(() => {
@@ -274,41 +229,6 @@ export default function Home() {
   const previewLayers = getPreviewLayers();
   const hasPreviewContent = previewLayers.length > 0;
 
-  // Detect active transitions at current playhead for preview overlay
-  const previewActiveTransitions = useMemo((): ActiveTransition[] => {
-    if (previewAssetId) return []; // No transitions in single-asset preview mode
-    const currentTransitions = activeTabId === 'main'
-      ? timelineTransitions
-      : (timelineTabs.find(t => t.id === activeTabId)?.timelineTransitions || []);
-
-    return currentTransitions
-      .filter(t => currentTime >= t.startTime && currentTime < t.startTime + t.durationSec)
-      .map(t => {
-        const fromClip = t.fromClipId ? activeClips.find(c => c.id === t.fromClipId) : null;
-        const toClip = t.toClipId ? activeClips.find(c => c.id === t.toClipId) : null;
-        const fromAsset = fromClip ? assets.find(a => a.id === fromClip.assetId) : null;
-        const toAsset = toClip ? assets.find(a => a.id === toClip.assetId) : null;
-
-        return {
-          id: t.id,
-          transitionFileId: t.transitionFileId,
-          startTime: t.startTime,
-          durationSec: t.durationSec,
-          fromSrc: fromAsset ? (fromAsset.streamUrl || getAssetStreamUrl(fromAsset.id) || undefined) : undefined,
-          toSrc: toAsset ? (toAsset.streamUrl || getAssetStreamUrl(toAsset.id) || undefined) : undefined,
-          fromAssetType: fromAsset?.type === 'video' ? 'video' as const : fromAsset ? 'image' as const : undefined,
-          toAssetType: toAsset?.type === 'video' ? 'video' as const : toAsset ? 'image' as const : undefined,
-          fromStartFrom: fromClip
-            ? Math.max(0, Math.round(((t.startTime - fromClip.start) + (fromClip.inPoint || 0)) * 30))
-            : 0,
-          toStartFrom: toClip
-            ? Math.max(0, Math.round(((t.startTime - toClip.start) + (toClip.inPoint || 0)) * 30))
-            : 0,
-          params: t.params,
-        };
-      });
-  }, [previewAssetId, activeTabId, timelineTransitions, timelineTabs, currentTime, activeClips, assets, getAssetStreamUrl]);
-
   // Get duration based on active tab's clips
   const duration = useMemo(() => {
     if (activeClips.length === 0) return 0;
@@ -364,7 +284,8 @@ export default function Home() {
   // Handle timeline seeking
   const handleTimelineSeek = useCallback((time: number) => {
     setCurrentTime(time);
-    // Don't seek the video directly - let the clipTime prop handle it
+    setSeekVersion(v => v + 1);
+    lastTimeRef.current = performance.now();
   }, []);
 
 
@@ -395,7 +316,7 @@ export default function Home() {
   }, [refreshAssets]);
 
   // Handle drag start from asset library
-  const handleAssetDragStart = useCallback(() => {
+  const handleAssetDragStart = useCallback((_asset: Asset) => {
     // Asset drag is handled by the browser's native drag-drop
   }, []);
 
@@ -468,7 +389,6 @@ export default function Home() {
         updateTabClips(activeTabId, updatedClips);
       }
     } else {
-      // Cross-track transitions are now valid in v2 — no need to remove transitions on track change
       moveClip(clipId, newStart, newTrackId);
     }
   }, [moveClip, activeTabId, timelineTabs, updateTabClips]);
@@ -511,7 +431,7 @@ export default function Home() {
     }
   }, [clips, updateClip, activeTabId, timelineTabs, updateTabClips]);
 
-  // Handle deleting clip from timeline (with per-track auto-snap ripple)
+  // Handle deleting clip from timeline (with autoSnap/ripple support)
   const handleDeleteClip = useCallback((clipId: string) => {
     // Check if we're on an edit tab
     if (activeTabId !== 'main') {
@@ -521,15 +441,13 @@ export default function Home() {
         updateTabClips(activeTabId, updatedClips);
       }
     } else {
-      const clip = clips.find(c => c.id === clipId);
-      const ripple = clip ? (trackAutoSnap[clip.trackId] ?? false) : false;
-      deleteClip(clipId, ripple);
+      deleteClip(clipId, autoSnap);
     }
 
     if (selectedClipId === clipId) {
       setSelectedClipId(null);
     }
-  }, [deleteClip, selectedClipId, trackAutoSnap, clips, activeTabId, timelineTabs, updateTabClips]);
+  }, [deleteClip, selectedClipId, autoSnap, activeTabId, timelineTabs, updateTabClips]);
 
   // Handle cutting clips at the playhead position
   const handleCutAtPlayhead = useCallback(() => {
@@ -550,24 +468,12 @@ export default function Home() {
     saveProject();
   }, [clips, currentTime, splitClip, saveProject]);
 
-  // Handle adding text overlay at playhead
+  // Handle adding text overlay
   const handleAddText = useCallback(() => {
-    const clip = addCaptionClip(
-      [{ text: 'Text', start: 0, end: 5 }],
-      currentTime,
-      5,
-    );
-
-    // Tab awareness: also add to active tab's clips if not on main
-    if (activeTabId !== 'main') {
-      const activeTab = timelineTabs.find(tab => tab.id === activeTabId);
-      if (activeTab) {
-        updateTabClips(activeTabId, [...activeTab.clips, clip]);
-      }
-    }
-
-    saveProject();
-  }, [currentTime, addCaptionClip, activeTabId, timelineTabs, updateTabClips, saveProject]);
+    // Create a text clip on T1 track at current playhead
+    // TODO: Open text editor modal or add default text
+    console.log('Add text overlay at', currentTime);
+  }, [currentTime]);
 
   // Handle toggling aspect ratio
   const handleToggleAspectRatio = useCallback(() => {
@@ -583,151 +489,12 @@ export default function Home() {
     });
   }, [setSettings]);
 
-  // Handle selecting clip (supports shift+click for multi-select)
-  const handleSelectClip = useCallback((clipId: string | null, shiftKey?: boolean) => {
-    if (clipId === null) {
-      setSelectedClipId(null);
-      setSelectedClipIds([]);
-      setPreviewAssetId(null);
-      return;
-    }
-    if (shiftKey) {
-      setSelectedClipIds(prev => {
-        if (prev.includes(clipId)) {
-          return prev.filter(id => id !== clipId);
-        }
-        if (prev.length >= 2) {
-          return [prev[1], clipId];
-        }
-        return [...prev, clipId];
-      });
-      setSelectedClipId(clipId);
-    } else {
-      setSelectedClipId(clipId);
-      setSelectedClipIds([clipId]);
-    }
+  // Handle selecting clip
+  const handleSelectClip = useCallback((clipId: string | null) => {
+    setSelectedClipId(clipId);
+    // Clear asset preview mode - let timeline-based preview take over
     setPreviewAssetId(null);
   }, []);
-
-  // Fetch available transitions from server
-  const fetchAvailableTransitions = useCallback(async () => {
-    if (!session) return;
-    try {
-      const response = await fetch(`http://localhost:3333/session/${session.sessionId}/transitions`);
-      if (response.ok) {
-        const data = await response.json();
-        setAvailableTransitions(data);
-      }
-    } catch { /* ignore */ }
-  }, [session]);
-
-  // Fetch transitions when session becomes available
-  useEffect(() => {
-    if (session) {
-      fetchAvailableTransitions();
-    }
-  }, [session, fetchAvailableTransitions]);
-
-  // Upload a custom transition .tsx file
-  const handleUploadTransition = useCallback(async (file: File) => {
-    if (!session) throw new Error('No session');
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('name', file.name.replace(/\.tsx$/, ''));
-    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/upload-transition`, {
-      method: 'POST',
-      body: formData,
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'Upload failed');
-    await fetchAvailableTransitions();
-    return data;
-  }, [session, fetchAvailableTransitions]);
-
-  // Delete a custom transition
-  const handleDeleteTransition = useCallback(async (transitionId: string) => {
-    if (!session) throw new Error('No session');
-    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/delete-transition`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ transitionId }),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'Delete failed');
-    await fetchAvailableTransitions();
-  }, [session, fetchAvailableTransitions]);
-
-  // Generate a custom transition with AI
-  const handleGenerateTransition = useCallback(async (description: string) => {
-    if (!session) throw new Error('No session');
-    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/generate-transition`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ description }),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'Generation failed');
-    await fetchAvailableTransitions();
-    return data;
-  }, [session, fetchAvailableTransitions]);
-
-  // Apply a transition between two selected clips (v2 internal)
-  const handleApplyTransitionV2 = useCallback((
-    fromClipId: string | null,
-    toClipId: string | null,
-    transitionFileId: string,
-    durationSec: number,
-    params: Record<string, number | string | boolean> = {},
-  ) => {
-    // Compute startTime from clip positions
-    const activeClipsList = activeTabId === 'main' ? clips : (timelineTabs.find(t => t.id === activeTabId)?.clips || []);
-    const fromClip = fromClipId ? activeClipsList.find(c => c.id === fromClipId) : null;
-    const toClip = toClipId ? activeClipsList.find(c => c.id === toClipId) : null;
-
-    let startTime = 0;
-    if (fromClip && toClip) {
-      const fromEnd = fromClip.start + fromClip.duration;
-      const toStart = toClip.start;
-      if (fromEnd > toStart) {
-        // Overlapping: start at overlap begin
-        startTime = toStart;
-      } else if (fromEnd === toStart) {
-        // Adjacent: center on junction
-        startTime = fromEnd - durationSec / 2;
-      } else {
-        // Gap: start at from clip end
-        startTime = fromEnd;
-      }
-    } else if (fromClip) {
-      startTime = fromClip.start + fromClip.duration - durationSec;
-    } else if (toClip) {
-      startTime = toClip.start;
-    }
-    startTime = Math.max(0, startTime);
-
-    addTransition(fromClipId, toClipId, transitionFileId, startTime, durationSec, params);
-    saveProject();
-  }, [addTransition, saveProject, clips, activeTabId, timelineTabs]);
-
-  // Bridge: legacy AIPromptPanel calls old signature, we map to v2
-  const handleApplyTransition = useCallback((
-    fromClipId: string,
-    toClipId: string,
-    type: string,
-    durationSec: number,
-    customTransitionId?: string,
-  ) => {
-    // Map old type names to v2 transitionFileId
-    const typeToFileId: Record<string, string> = {
-      crossfade: 'builtin-crossfade',
-      'slide-left': 'builtin-slide-left',
-      'slide-right': 'builtin-slide-right',
-      'dip-to-black': 'builtin-dip-to-black',
-      custom: customTransitionId || 'builtin-crossfade',
-    };
-    const transitionFileId = typeToFileId[type] || customTransitionId || 'builtin-crossfade';
-    handleApplyTransitionV2(fromClipId, toClipId, transitionFileId, durationSec);
-  }, [handleApplyTransitionV2]);
 
   // Handle updating clip transform (scale, rotation, crop, etc.)
   const handleUpdateClipTransform = useCallback((clipId: string, transform: TimelineClip['transform']) => {
@@ -908,7 +675,7 @@ export default function Home() {
     // Get current project state from server
     const projectResponse = await fetch(`http://localhost:3333/session/${session.sessionId}/project`);
     const projectData = await projectResponse.json();
-    const currentClips: TimelineClip[] = projectData.clips || [];
+    let currentClips: TimelineClip[] = projectData.clips || [];
 
     // Process all cuts by directly manipulating the clips array
     // This avoids React state batching issues
@@ -1166,7 +933,7 @@ export default function Home() {
   }, [session, assets, clips, refreshAssets, updateClip, saveProject]);
 
   // Handle transcribing video and adding captions
-  const handleTranscribeAndAddCaptions = useCallback(async (options?: Partial<CaptionStyle>) => {
+  const handleTranscribeAndAddCaptions = useCallback(async (options?: { highlightColor?: string; fontFamily?: string }) => {
     if (!session) {
       throw new Error('No session available');
     }
@@ -1178,18 +945,11 @@ export default function Home() {
       throw new Error('Please upload a video first');
     }
 
-    // Find the V1 clip for this asset to respect trim (inPoint/outPoint)
-    const v1Clip = activeClips.find(c => c.trackId === 'V1' && c.assetId === videoAsset.id);
-
-    // Call the transcribe endpoint with trim bounds
+    // Call the transcribe endpoint
     const response = await fetch(`http://localhost:3333/session/${session.sessionId}/transcribe`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        assetId: videoAsset.id,
-        startTime: v1Clip?.inPoint ?? 0,
-        endTime: v1Clip?.outPoint ?? undefined,
-      }),
+      body: JSON.stringify({ assetId: videoAsset.id }),
     });
 
     if (!response.ok) {
@@ -1252,9 +1012,12 @@ export default function Home() {
         }));
         return {
           words: relativeWords,
-          start: chunk.start + (v1Clip?.start ?? 0),
+          start: chunk.start,
           duration,
-          style: options ? { ...options } : {},
+          style: {
+            ...(options?.highlightColor && { highlightColor: options.highlightColor }),
+            ...(options?.fontFamily && { fontFamily: options.fontFamily }),
+          },
         };
       });
 
@@ -1266,7 +1029,7 @@ export default function Home() {
     }
 
     return data;
-  }, [session, assets, activeClips, addCaptionClipsBatch, saveProject]);
+  }, [session, assets, addCaptionClipsBatch, saveProject]);
 
   // Handle updating caption style
   const handleUpdateCaptionStyle = useCallback((clipId: string, styleUpdates: Partial<CaptionStyle>) => {
@@ -1379,11 +1142,7 @@ export default function Home() {
         throw new Error(error.error || 'Failed to generate animation');
       }
 
-      setStatus('Generating animation...');
-      const data = await readNDJSONStream(response, ({ pct, frames, total, elapsed }) => {
-        setStatus(`Rendering animation: ${pct}% (${frames}/${total} frames) [${elapsed}]`);
-      }) as { assetId: string; duration: number; sceneCount?: number };
-      setStatus('');
+      const data = await response.json();
 
       // Refresh assets to sync with server (animation was just created)
       await refreshAssets();
@@ -1433,7 +1192,7 @@ export default function Home() {
       console.error('Failed to create custom animation:', error);
       throw error;
     }
-  }, [session, currentTime, addClip, saveProject, refreshAssets, getDuration, switchTimelineTab, clips, assets, setStatus]);
+  }, [session, currentTime, addClip, saveProject, refreshAssets, getDuration, switchTimelineTab, clips, assets]);
 
   // Handle analyzing video for animation (returns concept for approval)
   const handleAnalyzeForAnimation = useCallback(async (request: {
@@ -1683,62 +1442,6 @@ export default function Home() {
     };
   }, [session, clips, assets, refreshAssets, updateClip, addClip, saveProject]);
 
-  const handleAudioSync = useCallback(async (params: { assetA: string; assetB: string; sampleRate: number; correlationSampleSize: number; initialGranularity: number; analysisRegion?: string; analysisDuration?: number }) => {
-    if (!session?.sessionId) throw new Error('No active session');
-    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/audio-sync`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
-    });
-    if (!response.ok) {
-      const err = await response.json() as { error?: string };
-      throw new Error(err.error || 'Audio sync failed');
-    }
-    return response.json() as Promise<{ offsetSeconds: number; correlation: number; confidence: 'high' | 'medium' | 'low'; note?: string }>;
-  }, [session]);
-
-  const handleApplyAudioSync = useCallback((result: { analyzedClipIds: [string, string]; analyzedTabId: string; anchorClipId: string; nonAnchorClipId: string; nonAnchorIsAssetB: boolean; anchorInPoint: number; nonAnchorInPoint: number; offsetSeconds: number }) => {
-    const { analyzedTabId, anchorClipId, nonAnchorClipId, nonAnchorIsAssetB, anchorInPoint, nonAnchorInPoint, offsetSeconds } = result;
-
-    const allClips = analyzedTabId !== 'main'
-      ? (timelineTabs.find(t => t.id === analyzedTabId)?.clips || [])
-      : clips;
-
-    const anchorClip = allClips.find(c => c.id === anchorClipId);
-    if (!anchorClip) return;
-
-    const assetOffset = nonAnchorIsAssetB ? offsetSeconds : -offsetSeconds;
-    const rawStart = anchorClip.start + assetOffset - anchorInPoint + nonAnchorInPoint;
-
-    console.log('[AudioSync Apply]', { anchorClipId, nonAnchorClipId, nonAnchorIsAssetB, offsetSeconds, assetOffset, rawStart, anchorStart: anchorClip.start, anchorInPoint, nonAnchorInPoint, analyzedTabId });
-
-    if (analyzedTabId !== 'main') {
-      const tab = timelineTabs.find(t => t.id === analyzedTabId);
-      if (tab) {
-        if (rawStart < 0) {
-          const shift = -rawStart;
-          updateTabClips(analyzedTabId, tab.clips.map(c => {
-            if (c.id === anchorClipId) return { ...c, start: c.start + shift };
-            if (c.id === nonAnchorClipId) return { ...c, start: 0 };
-            return c;
-          }));
-        } else {
-          updateTabClips(analyzedTabId, tab.clips.map(c =>
-            c.id === nonAnchorClipId ? { ...c, start: rawStart } : c
-          ));
-        }
-      }
-    } else {
-      if (rawStart < 0) {
-        const shift = -rawStart;
-        updateClip(anchorClipId, { start: anchorClip.start + shift });
-        updateClip(nonAnchorClipId, { start: 0 });
-      } else {
-        updateClip(nonAnchorClipId, { start: rawStart });
-      }
-    }
-  }, [clips, timelineTabs, updateClip, updateTabClips]);
-
   // Handle contextual animation creation (uses video content to inform the animation)
   const handleCreateContextualAnimation = useCallback(async (request: {
     type: 'intro' | 'outro' | 'transition' | 'highlight';
@@ -1805,24 +1508,21 @@ export default function Home() {
   }, [session, assets, addClip, saveProject, getDuration, refreshAssets]);
 
   // Handle render/export
-  const handleExport = useCallback(async (exportOpts?: RenderOptions) => {
+  const handleExport = useCallback(async () => {
     if (clips.length === 0) {
       alert('Add some clips to the timeline first');
       return;
     }
 
     try {
-      const downloadUrl = await renderProject(false, exportOpts);
-      // Derive file extension from container format
-      const ext = exportOpts?.containerFormat ? `.${exportOpts.containerFormat}` : '.mp4';
+      const downloadUrl = await renderProject(false);
       // Trigger download
       const link = document.createElement('a');
       link.href = downloadUrl;
-      link.download = `export${ext}`;
+      link.download = 'export.mp4';
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-      setShowRenderSettings(false);
     } catch (error) {
       console.error('Export failed:', error);
       alert(`Export failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -1869,11 +1569,7 @@ export default function Home() {
       throw new Error(error.error || 'Failed to edit animation');
     }
 
-    setStatus('Editing animation...');
-    const data = await readNDJSONStream(response, ({ pct, frames, total, elapsed }) => {
-      setStatus(`Rendering animation: ${pct}% (${frames}/${total} frames) [${elapsed}]`);
-    }) as { assetId: string; duration: number; sceneCount: number; editCount: number };
-    setStatus('');
+    const data = await response.json();
 
     console.log('[handleEditAnimation] ===== STEP 1: Server response =====');
     console.log('[handleEditAnimation] Server response:', {
@@ -1912,7 +1608,7 @@ export default function Home() {
       sceneCount: data.sceneCount,
       editCount: data.editCount,
     };
-  }, [session, assets, refreshAssets, updateTabAsset, setStatus]);
+  }, [session, assets, refreshAssets, updateTabAsset]);
 
   // Open an animation in a new timeline tab for isolated editing
   const handleOpenAnimationInTab = useCallback((assetId: string, animationName: string) => {
@@ -1952,13 +1648,6 @@ export default function Home() {
               HyperEdit
             </h1>
           </div>
-          <SessionManager
-            currentSession={session}
-            saveProjectImmediate={saveProjectImmediate}
-            setSession={setSession}
-            resetProjectState={resetProjectState}
-            resetLocalState={resetLocalState}
-          />
           {currentStatus && (
             <span className="text-xs text-zinc-400 bg-zinc-800 px-2 py-1 rounded">
               {currentStatus}
@@ -1978,15 +1667,7 @@ export default function Home() {
               </button>
               {clips.length > 0 && (
                 <button
-                  onClick={() => {
-                    setShowRenderSettings(true);
-                    fetch('http://localhost:3333/hwaccel-info')
-                      .then(r => r.json())
-                      .then(info => {
-                        if (info?.effective?.concurrency) setRecommendedConcurrency(info.effective.concurrency);
-                      })
-                      .catch(() => {});
-                  }}
+                  onClick={handleExport}
                   disabled={isProcessing}
                   className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
                 >
@@ -2048,8 +1729,9 @@ export default function Home() {
                   <button
                     key={i}
                     onClick={() => {
-                      videoPreviewRef.current?.seekTo(ch.start);
                       setCurrentTime(ch.start);
+                      setSeekVersion(v => v + 1);
+                      lastTimeRef.current = performance.now();
                     }}
                     className="w-full text-left px-3 py-2 rounded-lg bg-zinc-800/50 hover:bg-zinc-700/50 transition-colors flex items-center justify-between"
                   >
@@ -2090,22 +1772,6 @@ export default function Home() {
         </div>
       )}
 
-      {/* Render Settings Modal */}
-      {showRenderSettings && (
-        <RenderSettingsModal
-          renderOptions={renderOptions}
-          onClose={() => setShowRenderSettings(false)}
-          onExport={(opts) => handleExport(opts)}
-          onUpdateOptions={(opts) => {
-            setRenderOptions(opts);
-            saveProject();
-          }}
-          isExporting={loading}
-          recommendedConcurrency={recommendedConcurrency}
-          sessionId={session?.sessionId ?? ''}
-        />
-      )}
-
       <div className="flex flex-1 min-h-0">
         {/* Left Panel - Assets & Clip Properties */}
         <ResizablePanel
@@ -2130,7 +1796,7 @@ export default function Home() {
             </div>
 
             {/* Clip/Caption Properties Panel (shown when clip is selected) */}
-            {selectedClipId && !selectedTransitionId && (
+            {selectedClipId && (
               <div className="h-1/2 border-t border-zinc-800/50 bg-zinc-900/50 overflow-hidden">
                 {selectedCaptionData ? (
                   <CaptionPropertiesPanel
@@ -2146,44 +1812,6 @@ export default function Home() {
                     onClose={() => setSelectedClipId(null)}
                   />
                 )}
-              </div>
-            )}
-
-            {/* Transition Properties Panel (shown when transition is selected) */}
-            {selectedTransitionId && (() => {
-              const activeTransitions = activeTabId === 'main' ? timelineTransitions : (timelineTabs.find(t => t.id === activeTabId)?.timelineTransitions || []);
-              const selectedTransition = activeTransitions.find(t => t.id === selectedTransitionId);
-              if (!selectedTransition) return null;
-              return (
-                <div className="h-1/2 border-t border-zinc-800/50 bg-zinc-900/50 overflow-hidden overflow-y-auto">
-                  <TransitionPropertiesPanel
-                    transition={selectedTransition}
-                    clips={activeClips}
-                    onUpdate={(id, updates) => {
-                      updateTransition(id, updates);
-                      saveProject();
-                    }}
-                    onRemove={(id) => {
-                      removeTransition(id);
-                      setSelectedTransitionId(null);
-                      saveProject();
-                    }}
-                    onClose={() => setSelectedTransitionId(null)}
-                  />
-                </div>
-              );
-            })()}
-
-            {/* Track Properties Panel (shown when track label is clicked, no clip/transition selected) */}
-            {selectedTrackId && !selectedClipId && !selectedTransitionId && (
-              <div className="h-1/2 border-t border-zinc-800/50 bg-zinc-900/50 overflow-hidden">
-                <TrackPropertiesPanel
-                  trackId={selectedTrackId}
-                  trackName={tracks.find(t => t.id === selectedTrackId)?.name ?? selectedTrackId}
-                  autoSnap={trackAutoSnap[selectedTrackId] ?? false}
-                  onToggleAutoSnap={(enabled) => setTrackAutoSnap(prev => ({ ...prev, [selectedTrackId]: enabled }))}
-                  onClose={() => setSelectedTrackId(null)}
-                />
               </div>
             )}
           </div>
@@ -2202,8 +1830,12 @@ export default function Home() {
                 onLayerMove={handleLayerMove}
                 onLayerSelect={handleLayerSelect}
                 selectedLayerId={selectedClipId}
+<<<<<<< Updated upstream
+=======
                 activeTransitions={previewActiveTransitions}
                 currentTime={currentTime}
+                seekVersion={seekVersion}
+>>>>>>> Stashed changes
               />
             ) : clips.length > 0 ? (
               // Assets exist but playhead is not over any clip
@@ -2235,7 +1867,6 @@ export default function Home() {
               clips={activeClips}
               assets={assets}
               selectedClipId={selectedClipId}
-              selectedClipIds={selectedClipIds}
               currentTime={currentTime}
               duration={duration}
               isPlaying={isPlaying}
@@ -2250,41 +1881,11 @@ export default function Home() {
               onCutAtPlayhead={handleCutAtPlayhead}
               onAddText={handleAddText}
               onToggleAspectRatio={handleToggleAspectRatio}
-              onTrackLabelClick={(trackId: string) => {
-                setSelectedTrackId(trackId);
-                setSelectedClipId(null);
-                setSelectedTransitionId(null);
-              }}
+              autoSnap={autoSnap}
+              onToggleAutoSnap={() => setAutoSnap(prev => !prev)}
               onDropAsset={handleDropAsset}
               onSave={saveProject}
               getCaptionData={getCaptionData}
-              transitions={activeTabId === 'main' ? transitions : []}
-              onAddTransition={addLegacyTransition}
-              onUpdateTransition={(id, updates) => {
-                // Legacy v1 update - keep Timeline working until Phase 5
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                setTransitions((prev: any[]) => prev.map((t: any) => t.id === id ? { ...t, ...updates } : t));
-              }}
-              onRemoveTransition={(id) => {
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                setTransitions((prev: any[]) => prev.filter((t: any) => t.id !== id));
-              }}
-              timelineTransitions={activeTabId === 'main' ? timelineTransitions : (timelineTabs.find(t => t.id === activeTabId)?.timelineTransitions || [])}
-              selectedTransitionId={selectedTransitionId}
-              onSelectTransition={(id) => {
-                setSelectedTransitionId(id);
-                if (id) {
-                  setSelectedClipId(null);
-                  setSelectedClipIds([]);
-                }
-              }}
-              onUpdateTimelineTransition={(id, updates) => {
-                updateTransition(id, updates);
-              }}
-              onRemoveTimelineTransition={(id) => {
-                removeTransition(id);
-                if (selectedTransitionId === id) setSelectedTransitionId(null);
-              }}
             />
           </ResizableVerticalPanel>
         </div>
@@ -2301,30 +1902,33 @@ export default function Home() {
             <div className="flex items-center gap-1 px-2 border-b border-zinc-800/50">
               <button
                 onClick={() => setActiveAgent('director')}
-                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${activeAgent === 'director'
+                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${
+                  activeAgent === 'director'
                     ? 'text-orange-500 border-b-2 border-orange-500 bg-zinc-800/30'
                     : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/20'
-                  }`}
+                }`}
               >
                 <Sparkles className="w-3.5 h-3.5" />
                 Director
               </button>
               <button
                 onClick={() => setActiveAgent('picasso')}
-                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${activeAgent === 'picasso'
+                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${
+                  activeAgent === 'picasso'
                     ? 'text-orange-300 border-b-2 border-orange-300 bg-zinc-800/30'
                     : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/20'
-                  }`}
+                }`}
               >
                 <Palette className="w-3.5 h-3.5" />
                 Picasso
               </button>
               <button
                 onClick={() => setActiveAgent('dicaprio')}
-                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${activeAgent === 'dicaprio'
+                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${
+                  activeAgent === 'dicaprio'
                     ? 'text-zinc-300 border-b-2 border-zinc-300 bg-zinc-800/30'
                     : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/20'
-                  }`}
+                }`}
               >
                 <Film className="w-3.5 h-3.5" />
                 DiCaprio
@@ -2361,17 +1965,9 @@ export default function Home() {
                   assets={assets}
                   currentTime={currentTime}
                   selectedClipId={selectedClipId}
-                  selectedClipIds={selectedClipIds}
-                  onUploadTransition={handleUploadTransition}
-                  onDeleteTransition={handleDeleteTransition}
-                  onGenerateTransition={handleGenerateTransition}
-                  onApplyTransition={handleApplyTransition}
-                  availableTransitions={availableTransitions}
                   activeTabId={activeTabId}
                   editTabAssetId={activeTabId !== 'main' ? timelineTabs.find(t => t.id === activeTabId)?.assetId : undefined}
                   editTabClips={activeTabId !== 'main' ? timelineTabs.find(t => t.id === activeTabId)?.clips : undefined}
-                  onAudioSync={handleAudioSync}
-                  onApplyAudioSync={handleApplyAudioSync}
                 />
               </div>
               <div className={`absolute inset-0 ${activeAgent === 'picasso' ? '' : 'hidden'}`}>

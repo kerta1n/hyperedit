@@ -1,7 +1,6 @@
 import { Play, Image as ImageIcon, Layers, Move } from 'lucide-react';
 import { useRef, useEffect, forwardRef, useImperativeHandle, useMemo, useState, useCallback } from 'react';
 import CaptionRenderer from './CaptionRenderer';
-import TransitionPreview, { type ActiveTransition } from './TransitionPreview';
 import type { CaptionWord, CaptionStyle } from '@/react-app/hooks/useProject';
 
 interface ClipTransform {
@@ -35,8 +34,12 @@ interface VideoPreviewProps {
   onLayerMove?: (layerId: string, x: number, y: number) => void;
   onLayerSelect?: (layerId: string) => void;
   selectedLayerId?: string | null;
+<<<<<<< Updated upstream
+=======
   activeTransitions?: ActiveTransition[];
   currentTime?: number;
+  seekVersion?: number;
+>>>>>>> Stashed changes
 }
 
 export interface VideoPreviewHandle {
@@ -90,8 +93,12 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   onLayerMove,
   onLayerSelect,
   selectedLayerId,
+<<<<<<< Updated upstream
+=======
   activeTransitions = [],
   currentTime = 0,
+  seekVersion = 0,
+>>>>>>> Stashed changes
 }, ref) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const loadedSrcRef = useRef<string | null>(null);
@@ -99,6 +106,8 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   const containerRef = useRef<HTMLDivElement>(null);
   const [draggingLayer, setDraggingLayer] = useState<string | null>(null);
   const [dragStart, setDragStart] = useState<{ x: number; y: number; layerX: number; layerY: number } | null>(null);
+  const prevSeekVersionRef = useRef<number>(0);
+  const wasPlayingRef = useRef<boolean>(false);
 
   // Find the base video layer (V1) for audio/playback control
   const foundBaseLayer = layers.find(l => l.trackId === 'V1' && l.type === 'video');
@@ -159,12 +168,56 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     }
   }, [baseLayerClipTime, isPlaying]);
 
+  // Seek during playback when user explicitly drags playhead (seekVersion increments)
+  useEffect(() => {
+    if (!isPlaying) return;
+    if (seekVersion === prevSeekVersionRef.current) return;
+    prevSeekVersionRef.current = seekVersion;
+
+    const video = videoRef.current;
+    if (video && baseLayerClipTime !== undefined) {
+      video.currentTime = baseLayerClipTime;
+    }
+
+    const overlayMediaLayers = layers.filter(
+      l => (l.type === 'video' && l.trackId !== 'V1') || l.type === 'audio'
+    );
+    overlayMediaLayers.forEach((layer) => {
+      const mediaEl = overlayVideoRefs.current.get(layer.id);
+      if (mediaEl && layer.clipTime !== undefined) {
+        mediaEl.currentTime = layer.clipTime;
+      }
+    });
+  }, [seekVersion, isPlaying, baseLayerClipTime, layers]);
+
+  // Force-sync all elements on play→pause transition (bypasses 0.1s threshold)
+  useEffect(() => {
+    if (wasPlayingRef.current && !isPlaying) {
+      const video = videoRef.current;
+      if (video && baseLayerClipTime !== undefined) {
+        video.currentTime = baseLayerClipTime;
+      }
+
+      const overlayMediaLayers = layers.filter(
+        l => (l.type === 'video' && l.trackId !== 'V1') || l.type === 'audio'
+      );
+      overlayMediaLayers.forEach((layer) => {
+        const mediaEl = overlayVideoRefs.current.get(layer.id);
+        if (mediaEl && layer.clipTime !== undefined) {
+          mediaEl.currentTime = layer.clipTime;
+        }
+      });
+    }
+    wasPlayingRef.current = isPlaying;
+  }, [isPlaying, baseLayerClipTime, layers]);
+
   // Play/pause control for base video
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
 
     if (isPlaying) {
+      console.log('[VideoPreview] Playing base video:', { src: video.src?.slice(-60), muted: video.muted, volume: video.volume, readyState: video.readyState, networkState: video.networkState });
       video.play().catch((err) => {
         console.error('[VideoPreview] Play failed:', err.name, err.message);
       });
@@ -269,12 +322,6 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     ? 'h-[65vh] w-auto aspect-[9/16]'  // Vertical: fixed height, width from aspect ratio
     : 'w-full max-w-4xl aspect-video';  // Horizontal: constrain width, height follows
 
-  // Separate base video from overlay layers to prevent re-render issues
-  const overlayLayers = useMemo(() =>
-    sortedLayers.filter(l => !(l.trackId === 'V1' && l.type === 'video')),
-    [sortedLayers]
-  );
-
   if (layers.length === 0) {
     return (
       <div className={`relative ${containerClass} bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 flex items-center justify-center`}>
@@ -285,6 +332,12 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
       </div>
     );
   }
+
+  // Separate base video from overlay layers to prevent re-render issues
+  const overlayLayers = useMemo(() =>
+    sortedLayers.filter(l => !(l.trackId === 'V1' && l.type === 'video')),
+    [sortedLayers]
+  );
 
   return (
     <div
@@ -447,18 +500,6 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
 
         return null;
       })}
-
-      {/* Transition overlays via @remotion/player */}
-      {activeTransitions.map(t => (
-        <TransitionPreview
-          key={t.id}
-          transition={t}
-          currentTime={currentTime}
-          fps={30}
-          width={isVertical ? 1080 : 1920}
-          height={isVertical ? 1920 : 1080}
-        />
-      ))}
 
       {/* Layer count indicator */}
       {layers.length > 1 && (
