@@ -42,7 +42,7 @@ interface VideoPreviewProps {
 export interface VideoPreviewHandle {
   seekTo: (time: number) => void;
   getVideoElement: () => HTMLVideoElement | null;
-  seekAllOverlays: (timelineTime: number) => void;
+  seekAllOverlays: (timelineTime: number, oldTimelineTime: number) => void;
 }
 
 // Helper to build CSS styles from transform
@@ -100,8 +100,6 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   const containerRef = useRef<HTMLDivElement>(null);
   const layersRef = useRef<ClipLayer[]>(layers);
   useEffect(() => { layersRef.current = layers; }, [layers]);
-  const currentTimeRef = useRef(currentTime);
-  useEffect(() => { currentTimeRef.current = currentTime; }, [currentTime]);
   const [draggingLayer, setDraggingLayer] = useState<string | null>(null);
   const [dragStart, setDragStart] = useState<{ x: number; y: number; layerX: number; layerY: number } | null>(null);
 
@@ -134,8 +132,8 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
       if (videoRef.current) videoRef.current.currentTime = time;
     },
     getVideoElement: () => videoRef.current,
-    seekAllOverlays: (timelineTime: number) => {
-      const delta = timelineTime - currentTimeRef.current;
+    seekAllOverlays: (timelineTime: number, oldTimelineTime: number) => {
+      const delta = timelineTime - oldTimelineTime;
       overlayVideoRefs.current.forEach((mediaEl, layerId) => {
         const layer = layersRef.current.find(l => l.id === layerId);
         if (layer && layer.clipTime !== undefined) {
@@ -228,7 +226,8 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     const CORRECTION_INTERVAL = 2000;
 
     const intervalId = setInterval(() => {
-      const overlayMediaLayers = layers.filter(
+      const currentLayers = layersRef.current;
+      const overlayMediaLayers = currentLayers.filter(
         l => (l.type === 'video' && l.trackId !== 'V1') || l.type === 'audio'
       );
       overlayMediaLayers.forEach((layer) => {
@@ -242,7 +241,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     }, CORRECTION_INTERVAL);
 
     return () => clearInterval(intervalId);
-  }, [isPlaying, layers]);
+  }, [isPlaying]);
 
   // Seek on load
   const handleLoaded = () => {
@@ -377,11 +376,20 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
                 if (layer.clipTime !== undefined) {
                   video.currentTime = layer.clipTime;
                   if (isPlaying) {
-                    const onSeeked = () => {
-                      video.removeEventListener('seeked', onSeeked);
+                    if (video.readyState >= 2 && Math.abs(video.currentTime - layer.clipTime) < 0.05) {
                       video.play().catch(() => {});
-                    };
-                    video.addEventListener('seeked', onSeeked);
+                    } else {
+                      const onSeeked = () => {
+                        video.removeEventListener('seeked', onSeeked);
+                        clearTimeout(fallbackTimer);
+                        video.play().catch(() => {});
+                      };
+                      const fallbackTimer = setTimeout(() => {
+                        video.removeEventListener('seeked', onSeeked);
+                        video.play().catch(() => {});
+                      }, 500);
+                      video.addEventListener('seeked', onSeeked);
+                    }
                   }
                 } else if (isPlaying) {
                   video.play().catch(() => {});
@@ -481,11 +489,20 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
                 if (layer.clipTime !== undefined) {
                   audio.currentTime = layer.clipTime;
                   if (isPlaying) {
-                    const onSeeked = () => {
-                      audio.removeEventListener('seeked', onSeeked);
+                    if (audio.readyState >= 2 && Math.abs(audio.currentTime - layer.clipTime) < 0.05) {
                       audio.play().catch(() => {});
-                    };
-                    audio.addEventListener('seeked', onSeeked);
+                    } else {
+                      const onSeeked = () => {
+                        audio.removeEventListener('seeked', onSeeked);
+                        clearTimeout(fallbackTimer);
+                        audio.play().catch(() => {});
+                      };
+                      const fallbackTimer = setTimeout(() => {
+                        audio.removeEventListener('seeked', onSeeked);
+                        audio.play().catch(() => {});
+                      }, 500);
+                      audio.addEventListener('seeked', onSeeked);
+                    }
                   }
                 } else if (isPlaying) {
                   audio.play().catch(() => {});

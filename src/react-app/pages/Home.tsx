@@ -51,7 +51,10 @@ export default function Home() {
 
   const videoPreviewRef = useRef<VideoPreviewHandle>(null);
   const playbackRef = useRef<number | null>(null);
-  const v1ClipOffsetRef = useRef<{ start: number; inPoint: number } | null>(null);
+  const activeClipsRef = useRef<typeof clips>([]);
+  const lastFallbackTimeRef = useRef<number>(0);
+  const seekInProgressRef = useRef(false);
+  const previewAssetIdRef = useRef<string | null>(previewAssetId);
 
   // Use the new project hook for multi-asset management
   const {
@@ -132,6 +135,9 @@ export default function Home() {
     const activeTab = timelineTabs.find(tab => tab.id === activeTabId);
     return activeTab?.clips || [];
   }, [activeTabId, clips, timelineTabs]);
+
+  useEffect(() => { activeClipsRef.current = activeClips; }, [activeClips]);
+  useEffect(() => { previewAssetIdRef.current = previewAssetId; }, [previewAssetId]);
 
   // Use the legacy session hook for AI editing (single video operations)
   const {
@@ -315,40 +321,76 @@ export default function Home() {
     return Math.max(...activeClips.map(c => c.start + c.duration));
   }, [activeClips]);
 
-  // Keep v1ClipOffsetRef in sync with active V1 clip
-  useEffect(() => {
-    const v1Clip = activeClips.find(c =>
-      c.trackId === 'V1' &&
-      currentTime >= c.start &&
-      currentTime < c.start + c.duration
-    );
-    v1ClipOffsetRef.current = v1Clip
-      ? { start: v1Clip.start, inPoint: v1Clip.inPoint || 0 }
-      : null;
-  }, [activeClips, currentTime]);
-
   // Timeline playback — V1 video decoder is authoritative clock
+  // rAF reads video.currentTime directly (DOM read, not React state)
   useEffect(() => {
     if (!isPlaying || duration <= 0) return;
 
-    const animate = () => {
-      const video = videoPreviewRef.current?.getVideoElement();
-      const offset = v1ClipOffsetRef.current;
+    lastFallbackTimeRef.current = 0;
+    let lastTimelineTime = currentTime;
+    let cachedOffset: { start: number; inPoint: number } | null = null;
 
-      if (video && !video.paused && offset) {
-        const timelineTime = video.currentTime - offset.inPoint + offset.start;
+    const findV1Offset = (timelineTime: number) => {
+      const clips = activeClipsRef.current;
+      const v1Clip = clips.find(c =>
+        c.trackId === 'V1' && timelineTime >= c.start && timelineTime < c.start + c.duration
+      );
+      return v1Clip
+        ? { start: v1Clip.start, inPoint: v1Clip.inPoint || 0 }
+        : null;
+    };
+
+    cachedOffset = findV1Offset(currentTime);
+
+    const animate = () => {
+      if (previewAssetIdRef.current) {
+        playbackRef.current = requestAnimationFrame(animate);
+        return;
+      }
+
+      if (seekInProgressRef.current) {
+        playbackRef.current = requestAnimationFrame(animate);
+        return;
+      }
+
+      const video = videoPreviewRef.current?.getVideoElement();
+
+      if (video && !video.paused && video.readyState >= 2 && cachedOffset) {
+        const timelineTime = video.currentTime - cachedOffset.inPoint + cachedOffset.start;
+
+        // Re-resolve offset if timeline time drifts outside cached clip range
+        const clipEnd = cachedOffset.start + (video.duration || Infinity);
+        if (timelineTime >= clipEnd || timelineTime < cachedOffset.start) {
+          cachedOffset = findV1Offset(timelineTime);
+        }
+
         if (timelineTime >= duration) {
           setIsPlaying(false);
           setCurrentTime(duration);
           return;
         }
         setCurrentTime(timelineTime);
-      } else if (!video || !offset) {
-        setCurrentTime(prev => {
-          const newTime = prev + 1 / 60;
-          if (newTime >= duration) { setIsPlaying(false); return duration; }
-          return newTime;
-        });
+        lastTimelineTime = timelineTime;
+        lastFallbackTimeRef.current = 0;
+      } else {
+        // Wall-clock delta fallback (V1 remount, image-only, or play() pending)
+        const now = performance.now();
+        if (lastFallbackTimeRef.current > 0) {
+          const delta = (now - lastFallbackTimeRef.current) / 1000;
+          lastTimelineTime += delta;
+          if (lastTimelineTime >= duration) {
+            setIsPlaying(false);
+            setCurrentTime(duration);
+            lastFallbackTimeRef.current = now;
+            return;
+          }
+          setCurrentTime(lastTimelineTime);
+        }
+        lastFallbackTimeRef.current = now;
+        // Re-establish cached offset once fallback advances past a clip boundary
+        if (!cachedOffset) {
+          cachedOffset = findV1Offset(lastTimelineTime);
+        }
       }
       playbackRef.current = requestAnimationFrame(animate);
     };
@@ -357,6 +399,7 @@ export default function Home() {
     return () => {
       if (playbackRef.current) cancelAnimationFrame(playbackRef.current);
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPlaying, duration]);
 
   // Handle play/pause
@@ -376,9 +419,11 @@ export default function Home() {
 
   // Handle timeline seeking — also seek media elements during playback
   const handleTimelineSeek = useCallback((time: number) => {
+    const oldTime = currentTime;
     setCurrentTime(time);
 
     if (isPlaying) {
+      seekInProgressRef.current = true;
       const video = videoPreviewRef.current?.getVideoElement();
       const v1Clip = activeClips.find(c =>
         c.trackId === 'V1' &&
@@ -387,10 +432,18 @@ export default function Home() {
       );
       if (video && v1Clip) {
         video.currentTime = (time - v1Clip.start) + (v1Clip.inPoint || 0);
+        const onSeeked = () => {
+          video.removeEventListener('seeked', onSeeked);
+          seekInProgressRef.current = false;
+        };
+        video.addEventListener('seeked', onSeeked);
+        setTimeout(() => { seekInProgressRef.current = false; }, 300);
+      } else {
+        seekInProgressRef.current = false;
       }
-      videoPreviewRef.current?.seekAllOverlays(time);
+      videoPreviewRef.current?.seekAllOverlays(time, oldTime);
     }
-  }, [isPlaying, activeClips]);
+  }, [isPlaying, activeClips, currentTime]);
 
 
   // Handle asset upload
