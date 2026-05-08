@@ -53,7 +53,7 @@ export default function Home() {
   const playbackRef = useRef<number | null>(null);
   const activeClipsRef = useRef<typeof clips>([]);
   const lastFallbackTimeRef = useRef<number>(0);
-  const seekInProgressRef = useRef(false);
+  const seekTargetRef = useRef<number | null>(null);
   const previewAssetIdRef = useRef<string | null>(previewAssetId);
 
   // Use the new project hook for multi-asset management
@@ -348,7 +348,12 @@ export default function Home() {
         return;
       }
 
-      if (seekInProgressRef.current) {
+      const seekTarget = seekTargetRef.current;
+      if (seekTarget !== null) {
+        seekTargetRef.current = null;
+        lastTimelineTime = seekTarget;
+        cachedOffset = findV1Offset(seekTarget);
+        lastFallbackTimeRef.current = 0;
         playbackRef.current = requestAnimationFrame(animate);
         return;
       }
@@ -358,7 +363,6 @@ export default function Home() {
       if (video && !video.paused && video.readyState >= 2 && cachedOffset) {
         const timelineTime = video.currentTime - cachedOffset.inPoint + cachedOffset.start;
 
-        // Re-resolve offset if timeline time drifts outside cached clip range
         const clipEnd = cachedOffset.start + (video.duration || Infinity);
         if (timelineTime >= clipEnd || timelineTime < cachedOffset.start) {
           cachedOffset = findV1Offset(timelineTime);
@@ -373,7 +377,6 @@ export default function Home() {
         lastTimelineTime = timelineTime;
         lastFallbackTimeRef.current = 0;
       } else {
-        // Wall-clock delta fallback (V1 remount, image-only, or play() pending)
         const now = performance.now();
         if (lastFallbackTimeRef.current > 0) {
           const delta = (now - lastFallbackTimeRef.current) / 1000;
@@ -387,7 +390,6 @@ export default function Home() {
           setCurrentTime(lastTimelineTime);
         }
         lastFallbackTimeRef.current = now;
-        // Re-establish cached offset once fallback advances past a clip boundary
         if (!cachedOffset) {
           cachedOffset = findV1Offset(lastTimelineTime);
         }
@@ -423,7 +425,7 @@ export default function Home() {
     setCurrentTime(time);
 
     if (isPlaying) {
-      seekInProgressRef.current = true;
+      seekTargetRef.current = time;
       const video = videoPreviewRef.current?.getVideoElement();
       const v1Clip = activeClips.find(c =>
         c.trackId === 'V1' &&
@@ -432,14 +434,6 @@ export default function Home() {
       );
       if (video && v1Clip) {
         video.currentTime = (time - v1Clip.start) + (v1Clip.inPoint || 0);
-        const onSeeked = () => {
-          video.removeEventListener('seeked', onSeeked);
-          seekInProgressRef.current = false;
-        };
-        video.addEventListener('seeked', onSeeked);
-        setTimeout(() => { seekInProgressRef.current = false; }, 300);
-      } else {
-        seekInProgressRef.current = false;
       }
       videoPreviewRef.current?.seekAllOverlays(time, oldTime);
     }

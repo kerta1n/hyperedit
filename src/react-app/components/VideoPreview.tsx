@@ -223,7 +223,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     if (!isPlaying) return;
 
     const DRIFT_THRESHOLD = 0.15;
-    const CORRECTION_INTERVAL = 2000;
+    const CORRECTION_INTERVAL = 1000;
 
     const intervalId = setInterval(() => {
       const currentLayers = layersRef.current;
@@ -387,7 +387,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
                       const fallbackTimer = setTimeout(() => {
                         video.removeEventListener('seeked', onSeeked);
                         video.play().catch(() => {});
-                      }, 500);
+                      }, 250);
                       video.addEventListener('seeked', onSeeked);
                     }
                   }
@@ -500,7 +500,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
                       const fallbackTimer = setTimeout(() => {
                         audio.removeEventListener('seeked', onSeeked);
                         audio.play().catch(() => {});
-                      }, 500);
+                      }, 250);
                       audio.addEventListener('seeked', onSeeked);
                     }
                   }
