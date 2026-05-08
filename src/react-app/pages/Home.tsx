@@ -51,7 +51,7 @@ export default function Home() {
 
   const videoPreviewRef = useRef<VideoPreviewHandle>(null);
   const playbackRef = useRef<number | null>(null);
-  const lastTimeRef = useRef<number>(0);
+  const v1ClipOffsetRef = useRef<{ start: number; inPoint: number } | null>(null);
 
   // Use the new project hook for multi-asset management
   const {
@@ -315,35 +315,48 @@ export default function Home() {
     return Math.max(...activeClips.map(c => c.start + c.duration));
   }, [activeClips]);
 
-  // Timeline playback effect
+  // Keep v1ClipOffsetRef in sync with active V1 clip
   useEffect(() => {
-    if (isPlaying && duration > 0) {
-      lastTimeRef.current = performance.now();
+    const v1Clip = activeClips.find(c =>
+      c.trackId === 'V1' &&
+      currentTime >= c.start &&
+      currentTime < c.start + c.duration
+    );
+    v1ClipOffsetRef.current = v1Clip
+      ? { start: v1Clip.start, inPoint: v1Clip.inPoint || 0 }
+      : null;
+  }, [activeClips, currentTime]);
 
-      const animate = (now: number) => {
-        const delta = (now - lastTimeRef.current) / 1000; // Convert to seconds
-        lastTimeRef.current = now;
+  // Timeline playback — V1 video decoder is authoritative clock
+  useEffect(() => {
+    if (!isPlaying || duration <= 0) return;
 
+    const animate = () => {
+      const video = videoPreviewRef.current?.getVideoElement();
+      const offset = v1ClipOffsetRef.current;
+
+      if (video && !video.paused && offset) {
+        const timelineTime = video.currentTime - offset.inPoint + offset.start;
+        if (timelineTime >= duration) {
+          setIsPlaying(false);
+          setCurrentTime(duration);
+          return;
+        }
+        setCurrentTime(timelineTime);
+      } else if (!video || !offset) {
         setCurrentTime(prev => {
-          const newTime = prev + delta;
-          if (newTime >= duration) {
-            setIsPlaying(false);
-            return duration;
-          }
+          const newTime = prev + 1 / 60;
+          if (newTime >= duration) { setIsPlaying(false); return duration; }
           return newTime;
         });
-
-        playbackRef.current = requestAnimationFrame(animate);
-      };
-
+      }
       playbackRef.current = requestAnimationFrame(animate);
+    };
 
-      return () => {
-        if (playbackRef.current) {
-          cancelAnimationFrame(playbackRef.current);
-        }
-      };
-    }
+    playbackRef.current = requestAnimationFrame(animate);
+    return () => {
+      if (playbackRef.current) cancelAnimationFrame(playbackRef.current);
+    };
   }, [isPlaying, duration]);
 
   // Handle play/pause
@@ -361,11 +374,23 @@ export default function Home() {
     setCurrentTime(0);
   }, []);
 
-  // Handle timeline seeking
+  // Handle timeline seeking — also seek media elements during playback
   const handleTimelineSeek = useCallback((time: number) => {
     setCurrentTime(time);
-    // Don't seek the video directly - let the clipTime prop handle it
-  }, []);
+
+    if (isPlaying) {
+      const video = videoPreviewRef.current?.getVideoElement();
+      const v1Clip = activeClips.find(c =>
+        c.trackId === 'V1' &&
+        time >= c.start &&
+        time < c.start + c.duration
+      );
+      if (video && v1Clip) {
+        video.currentTime = (time - v1Clip.start) + (v1Clip.inPoint || 0);
+      }
+      videoPreviewRef.current?.seekAllOverlays(time);
+    }
+  }, [isPlaying, activeClips]);
 
 
   // Handle asset upload
@@ -2048,8 +2073,7 @@ export default function Home() {
                   <button
                     key={i}
                     onClick={() => {
-                      videoPreviewRef.current?.seekTo(ch.start);
-                      setCurrentTime(ch.start);
+                      handleTimelineSeek(ch.start);
                     }}
                     className="w-full text-left px-3 py-2 rounded-lg bg-zinc-800/50 hover:bg-zinc-700/50 transition-colors flex items-center justify-between"
                   >

@@ -42,6 +42,7 @@ interface VideoPreviewProps {
 export interface VideoPreviewHandle {
   seekTo: (time: number) => void;
   getVideoElement: () => HTMLVideoElement | null;
+  seekAllOverlays: (timelineTime: number) => void;
 }
 
 // Helper to build CSS styles from transform
@@ -97,6 +98,10 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   const loadedSrcRef = useRef<string | null>(null);
   const overlayVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
   const containerRef = useRef<HTMLDivElement>(null);
+  const layersRef = useRef<ClipLayer[]>(layers);
+  useEffect(() => { layersRef.current = layers; }, [layers]);
+  const currentTimeRef = useRef(currentTime);
+  useEffect(() => { currentTimeRef.current = currentTime; }, [currentTime]);
   const [draggingLayer, setDraggingLayer] = useState<string | null>(null);
   const [dragStart, setDragStart] = useState<{ x: number; y: number; layerX: number; layerY: number } | null>(null);
 
@@ -129,6 +134,18 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
       if (videoRef.current) videoRef.current.currentTime = time;
     },
     getVideoElement: () => videoRef.current,
+    seekAllOverlays: (timelineTime: number) => {
+      const delta = timelineTime - currentTimeRef.current;
+      overlayVideoRefs.current.forEach((mediaEl, layerId) => {
+        const layer = layersRef.current.find(l => l.id === layerId);
+        if (layer && layer.clipTime !== undefined) {
+          const newDecoderTime = layer.clipTime + delta;
+          if (newDecoderTime >= 0) {
+            mediaEl.currentTime = newDecoderTime;
+          }
+        }
+      });
+    },
   }));
 
   // Reload video when source URL changes (e.g., after dead air removal)
@@ -202,6 +219,30 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
       }
     });
   }, [layers, isPlaying]);
+
+  // Periodic overlay drift correction during playback
+  useEffect(() => {
+    if (!isPlaying) return;
+
+    const DRIFT_THRESHOLD = 0.15;
+    const CORRECTION_INTERVAL = 2000;
+
+    const intervalId = setInterval(() => {
+      const overlayMediaLayers = layers.filter(
+        l => (l.type === 'video' && l.trackId !== 'V1') || l.type === 'audio'
+      );
+      overlayMediaLayers.forEach((layer) => {
+        const mediaEl = overlayVideoRefs.current.get(layer.id);
+        if (!mediaEl || mediaEl.paused) return;
+        const drift = Math.abs(mediaEl.currentTime - layer.clipTime);
+        if (drift > DRIFT_THRESHOLD) {
+          mediaEl.currentTime = layer.clipTime;
+        }
+      });
+    }, CORRECTION_INTERVAL);
+
+    return () => clearInterval(intervalId);
+  }, [isPlaying, layers]);
 
   // Seek on load
   const handleLoaded = () => {
@@ -332,13 +373,17 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
               preload="auto"
               muted
               onLoadedData={(e) => {
-                // Seek to correct time when loaded
                 const video = e.currentTarget;
                 if (layer.clipTime !== undefined) {
                   video.currentTime = layer.clipTime;
-                }
-                // Auto-play if timeline is playing
-                if (isPlaying) {
+                  if (isPlaying) {
+                    const onSeeked = () => {
+                      video.removeEventListener('seeked', onSeeked);
+                      video.play().catch(() => {});
+                    };
+                    video.addEventListener('seeked', onSeeked);
+                  }
+                } else if (isPlaying) {
                   video.play().catch(() => {});
                 }
               }}
@@ -435,8 +480,14 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
                 const audio = e.currentTarget;
                 if (layer.clipTime !== undefined) {
                   audio.currentTime = layer.clipTime;
-                }
-                if (isPlaying) {
+                  if (isPlaying) {
+                    const onSeeked = () => {
+                      audio.removeEventListener('seeked', onSeeked);
+                      audio.play().catch(() => {});
+                    };
+                    audio.addEventListener('seeked', onSeeked);
+                  }
+                } else if (isPlaying) {
                   audio.play().catch(() => {});
                 }
               }}
