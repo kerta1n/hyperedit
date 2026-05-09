@@ -7,3 +7,4 @@ src/remotion/transitions/custom
 .dev.vars
 worker-configuration.d.ts
 .claude/settings.local.json
+.playwright-cli/

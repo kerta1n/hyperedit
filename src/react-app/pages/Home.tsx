@@ -56,6 +56,7 @@ export default function Home() {
   const seekTargetRef = useRef<number | null>(null);
   const seekVideoTargetRef = useRef<number | null>(null);
   const seekSkipCountRef = useRef<number>(0);
+  const currentTimeRef = useRef(currentTime);
   const previewAssetIdRef = useRef<string | null>(previewAssetId);
 
   // Use the new project hook for multi-asset management
@@ -140,6 +141,7 @@ export default function Home() {
 
   useEffect(() => { activeClipsRef.current = activeClips; }, [activeClips]);
   useEffect(() => { previewAssetIdRef.current = previewAssetId; }, [previewAssetId]);
+  useEffect(() => { currentTimeRef.current = currentTime; }, [currentTime]);
 
   // Use the legacy session hook for AI editing (single video operations)
   const {
@@ -329,7 +331,7 @@ export default function Home() {
     if (!isPlaying || duration <= 0) return;
 
     lastFallbackTimeRef.current = 0;
-    let lastTimelineTime = currentTime;
+    let lastTimelineTime = currentTimeRef.current;
     let cachedOffset: { start: number; inPoint: number } | null = null;
 
     const findV1Offset = (timelineTime: number) => {
@@ -342,7 +344,7 @@ export default function Home() {
         : null;
     };
 
-    cachedOffset = findV1Offset(currentTime);
+    cachedOffset = findV1Offset(currentTimeRef.current);
 
     const animate = () => {
       if (previewAssetIdRef.current) {
@@ -365,10 +367,11 @@ export default function Home() {
 
       if (video && !video.paused && video.readyState >= 2 && cachedOffset) {
         if (seekVideoTargetRef.current !== null) {
-          if (Math.abs(video.currentTime - seekVideoTargetRef.current) > 0.05) {
+          const delta = Math.abs(video.currentTime - seekVideoTargetRef.current);
+          if (video.seeking || delta > 0.05) {
             setCurrentTime(lastTimelineTime);
             seekSkipCountRef.current += 1;
-            if (seekSkipCountRef.current > 5) {
+            if (seekSkipCountRef.current > 120) {
               seekVideoTargetRef.current = null;
             }
             playbackRef.current = requestAnimationFrame(animate);
@@ -424,6 +427,8 @@ export default function Home() {
     playbackRef.current = requestAnimationFrame(animate);
     return () => {
       if (playbackRef.current) cancelAnimationFrame(playbackRef.current);
+      seekVideoTargetRef.current = null;
+      seekSkipCountRef.current = 0;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPlaying, duration]);
@@ -447,22 +452,25 @@ export default function Home() {
   const handleTimelineSeek = useCallback((time: number) => {
     const oldTime = currentTime;
     setCurrentTime(time);
+    currentTimeRef.current = time;
 
-    if (isPlaying) {
-      seekTargetRef.current = time;
-      const video = videoPreviewRef.current?.getVideoElement();
-      const v1Clip = activeClips.find(c =>
-        c.trackId === 'V1' &&
-        time >= c.start &&
-        time < c.start + c.duration
-      );
-      if (video && v1Clip) {
-        const rawVideoTime = (time - v1Clip.start) + (v1Clip.inPoint || 0);
-        video.currentTime = rawVideoTime;
+    const video = videoPreviewRef.current?.getVideoElement();
+    const v1Clip = activeClips.find(c =>
+      c.trackId === 'V1' &&
+      time >= c.start &&
+      time < c.start + c.duration
+    );
+
+    if (video && v1Clip) {
+      const rawVideoTime = (time - v1Clip.start) + (v1Clip.inPoint || 0);
+      video.currentTime = rawVideoTime;
+      if (isPlaying) {
         seekVideoTargetRef.current = rawVideoTime;
+        seekTargetRef.current = time;
       }
-      videoPreviewRef.current?.seekAllOverlays(time, oldTime);
     }
+
+    videoPreviewRef.current?.seekAllOverlays(time, oldTime);
   }, [isPlaying, activeClips, currentTime]);
 
 

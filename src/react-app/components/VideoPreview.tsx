@@ -102,6 +102,8 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   useEffect(() => { layersRef.current = layers; }, [layers]);
   const [draggingLayer, setDraggingLayer] = useState<string | null>(null);
   const [dragStart, setDragStart] = useState<{ x: number; y: number; layerX: number; layerY: number } | null>(null);
+  const wasPlayingRef = useRef(isPlaying);
+  const justPausedRef = useRef(false);
 
   // Find the base video layer (V1) for audio/playback control
   const foundBaseLayer = layers.find(l => l.trackId === 'V1' && l.type === 'video');
@@ -168,6 +170,8 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     const video = videoRef.current;
     if (!video || baseLayerClipTime === undefined) return;
     if (isPlaying) return;
+    if (justPausedRef.current) return;
+    if (video.seeking) return;
 
     if (Math.abs(video.currentTime - baseLayerClipTime) > 0.1) {
       video.currentTime = baseLayerClipTime;
@@ -199,9 +203,20 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     });
   }, [isPlaying]);
 
+  useEffect(() => {
+    if (wasPlayingRef.current && !isPlaying) {
+      justPausedRef.current = true;
+    }
+    wasPlayingRef.current = isPlaying;
+  }, [isPlaying]);
+
   // Sync overlay video and audio seeking when scrubbing
   useEffect(() => {
-    if (isPlaying) return; // Don't interfere during playback
+    if (isPlaying) return;
+    if (justPausedRef.current) {
+      justPausedRef.current = false;
+      return;
+    }
 
     // Find overlay video and audio layers and sync their time
     const overlayMediaLayers = layers.filter(
@@ -210,6 +225,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
 
     overlayMediaLayers.forEach((layer) => {
       const mediaEl = overlayVideoRefs.current.get(layer.id);
+      if (!mediaEl || mediaEl.seeking) return;
       if (mediaEl && layer.clipTime !== undefined) {
         if (Math.abs(mediaEl.currentTime - layer.clipTime) > 0.1) {
           mediaEl.currentTime = layer.clipTime;
