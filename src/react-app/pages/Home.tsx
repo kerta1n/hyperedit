@@ -54,6 +54,8 @@ export default function Home() {
   const activeClipsRef = useRef<typeof clips>([]);
   const lastFallbackTimeRef = useRef<number>(0);
   const seekTargetRef = useRef<number | null>(null);
+  const seekVideoTargetRef = useRef<number | null>(null);
+  const seekSkipCountRef = useRef<number>(0);
   const previewAssetIdRef = useRef<string | null>(previewAssetId);
 
   // Use the new project hook for multi-asset management
@@ -351,6 +353,7 @@ export default function Home() {
       const seekTarget = seekTargetRef.current;
       if (seekTarget !== null) {
         seekTargetRef.current = null;
+        seekSkipCountRef.current = 0;
         lastTimelineTime = seekTarget;
         cachedOffset = findV1Offset(seekTarget);
         lastFallbackTimeRef.current = 0;
@@ -361,6 +364,20 @@ export default function Home() {
       const video = videoPreviewRef.current?.getVideoElement();
 
       if (video && !video.paused && video.readyState >= 2 && cachedOffset) {
+        if (seekVideoTargetRef.current !== null) {
+          if (Math.abs(video.currentTime - seekVideoTargetRef.current) > 0.05) {
+            setCurrentTime(lastTimelineTime);
+            seekSkipCountRef.current += 1;
+            if (seekSkipCountRef.current > 5) {
+              seekVideoTargetRef.current = null;
+            }
+            playbackRef.current = requestAnimationFrame(animate);
+            return;
+          }
+          seekVideoTargetRef.current = null;
+          seekSkipCountRef.current = 0;
+        }
+
         const timelineTime = video.currentTime - cachedOffset.inPoint + cachedOffset.start;
 
         const clipEnd = cachedOffset.start + (video.duration || Infinity);
@@ -433,7 +450,9 @@ export default function Home() {
         time < c.start + c.duration
       );
       if (video && v1Clip) {
-        video.currentTime = (time - v1Clip.start) + (v1Clip.inPoint || 0);
+        const rawVideoTime = (time - v1Clip.start) + (v1Clip.inPoint || 0);
+        video.currentTime = rawVideoTime;
+        seekVideoTargetRef.current = rawVideoTime;
       }
       videoPreviewRef.current?.seekAllOverlays(time, oldTime);
     }
