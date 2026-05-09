@@ -394,6 +394,13 @@ export default function Home() {
         lastTimelineTime = timelineTime;
         lastFallbackTimeRef.current = 0;
       } else {
+        // If V1 is mid-seek, hold timeline at seek target — don't advance.
+        // Advancing causes overlay drift (clipTime races ahead of frozen overlays).
+        if (seekVideoTargetRef.current !== null) {
+          setCurrentTime(lastTimelineTime);
+          playbackRef.current = requestAnimationFrame(animate);
+          return;
+        }
         const now = performance.now();
         if (lastFallbackTimeRef.current > 0) {
           const delta = (now - lastFallbackTimeRef.current) / 1000;

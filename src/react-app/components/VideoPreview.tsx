@@ -232,7 +232,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
       );
       overlayMediaLayers.forEach((layer) => {
         const mediaEl = overlayVideoRefs.current.get(layer.id);
-        if (!mediaEl || mediaEl.paused) return;
+        if (!mediaEl || mediaEl.paused || mediaEl.seeking) return;
         const drift = Math.abs(mediaEl.currentTime - layer.clipTime);
         if (drift > DRIFT_THRESHOLD) {
           mediaEl.currentTime = layer.clipTime;
