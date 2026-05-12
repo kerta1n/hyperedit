@@ -84,6 +84,21 @@ function getTransformStyles(transform?: ClipTransform, zIndex: number = 0, isDra
   };
 }
 
+function waitForSeeked(el: HTMLMediaElement, timeoutMs: number): Promise<void> {
+  return new Promise(resolve => {
+    const onSeeked = () => {
+      el.removeEventListener('seeked', onSeeked);
+      clearTimeout(t);
+      resolve();
+    };
+    const t = setTimeout(() => {
+      el.removeEventListener('seeked', onSeeked);
+      resolve();
+    }, timeoutMs);
+    el.addEventListener('seeked', onSeeked);
+  });
+}
+
 const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   layers = [],
   isPlaying = false,
@@ -104,6 +119,8 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   const [dragStart, setDragStart] = useState<{ x: number; y: number; layerX: number; layerY: number } | null>(null);
   const wasPlayingRef = useRef(isPlaying);
   const justPausedRef = useRef(false);
+  const isPlayingRef = useRef(isPlaying);
+  useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
 
   // Find the base video layer (V1) for audio/playback control
   const foundBaseLayer = layers.find(l => l.trackId === 'V1' && l.type === 'video');
@@ -112,6 +129,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   const baseLayerClipTime = foundBaseLayer?.clipTime;
   const baseLayerClipTimeRef = useRef(baseLayerClipTime);
   useEffect(() => { baseLayerClipTimeRef.current = baseLayerClipTime; }, [baseLayerClipTime]);
+  const seekGenerationRef = useRef(0);
 
   // Memoize to prevent effect triggers when only caption layers change
   const baseVideoLayer = useMemo(() => {
@@ -137,7 +155,10 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     },
     getVideoElement: () => videoRef.current,
     seekAllOverlays: (timelineTime: number, oldTimelineTime: number) => {
+      const generation = ++seekGenerationRef.current;
       const delta = timelineTime - oldTimelineTime;
+      const promises: Promise<void>[] = [];
+
       overlayVideoRefs.current.forEach((mediaEl, layerId) => {
         const layer = layersRef.current.find(l => l.id === layerId);
         if (layer && layer.clipTime !== undefined) {
@@ -145,13 +166,21 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
           if (newDecoderTime >= 0) {
             mediaEl.pause();
             mediaEl.currentTime = newDecoderTime;
-            const onSeeked = () => {
-              mediaEl.removeEventListener('seeked', onSeeked);
-              mediaEl.play().catch(() => {});
-            };
-            mediaEl.addEventListener('seeked', onSeeked);
+            promises.push(waitForSeeked(mediaEl, 800));
           }
         }
+      });
+
+      const v1 = videoRef.current;
+      if (v1 && v1.seeking) {
+        promises.push(waitForSeeked(v1, 800));
+      }
+
+      Promise.allSettled(promises).then(() => {
+        if (seekGenerationRef.current !== generation) return;
+        overlayVideoRefs.current.forEach(mediaEl => {
+          if (isPlayingRef.current) mediaEl.play().catch(() => {});
+        });
       });
     },
   }));
@@ -210,7 +239,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     } else {
       video.pause();
     }
-  }, [isPlaying]);
+  }, [isPlaying, baseLayerId]);
 
   // Play/pause control for overlay videos (V2, V3, etc.)
   useEffect(() => {
@@ -284,6 +313,18 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     const clipTime = baseLayerClipTimeRef.current;
     if (!video || clipTime === undefined) return;
     video.currentTime = clipTime;
+    if (isPlayingRef.current) {
+      const onSeeked = () => {
+        video.removeEventListener('seeked', onSeeked);
+        clearTimeout(fallback);
+        video.play().catch(() => {});
+      };
+      const fallback = setTimeout(() => {
+        video.removeEventListener('seeked', onSeeked);
+        video.play().catch(() => {});
+      }, 250);
+      video.addEventListener('seeked', onSeeked);
+    }
   }, []);
 
   // Handle mouse down on draggable layer
