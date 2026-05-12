@@ -110,6 +110,8 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   const baseLayerId = foundBaseLayer?.id;
   const baseLayerUrl = foundBaseLayer?.url;
   const baseLayerClipTime = foundBaseLayer?.clipTime;
+  const baseLayerClipTimeRef = useRef(baseLayerClipTime);
+  useEffect(() => { baseLayerClipTimeRef.current = baseLayerClipTime; }, [baseLayerClipTime]);
 
   // Memoize to prevent effect triggers when only caption layers change
   const baseVideoLayer = useMemo(() => {
@@ -141,7 +143,13 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
         if (layer && layer.clipTime !== undefined) {
           const newDecoderTime = layer.clipTime + delta;
           if (newDecoderTime >= 0) {
+            mediaEl.pause();
             mediaEl.currentTime = newDecoderTime;
+            const onSeeked = () => {
+              mediaEl.removeEventListener('seeked', onSeeked);
+              mediaEl.play().catch(() => {});
+            };
+            mediaEl.addEventListener('seeked', onSeeked);
           }
         }
       });
@@ -171,11 +179,23 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     if (!video || baseLayerClipTime === undefined) return;
     if (isPlaying) return;
     if (justPausedRef.current) return;
-    if (video.seeking) return;
 
-    if (Math.abs(video.currentTime - baseLayerClipTime) > 0.1) {
-      video.currentTime = baseLayerClipTime;
+    const doSeek = () => {
+      if (Math.abs(video.currentTime - baseLayerClipTime) > 0.05) {
+        video.currentTime = baseLayerClipTime;
+      }
+    };
+
+    if (video.seeking) {
+      const onSeeked = () => {
+        video.removeEventListener('seeked', onSeeked);
+        doSeek();
+      };
+      video.addEventListener('seeked', onSeeked);
+      return () => video.removeEventListener('seeked', onSeeked);
     }
+
+    doSeek();
   }, [baseLayerClipTime, isPlaying]);
 
   // Play/pause control for base video
@@ -239,7 +259,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     if (!isPlaying) return;
 
     const DRIFT_THRESHOLD = 0.15;
-    const CORRECTION_INTERVAL = 1000;
+    const CORRECTION_INTERVAL = 250;
 
     const intervalId = setInterval(() => {
       const currentLayers = layersRef.current;
@@ -249,7 +269,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
       overlayMediaLayers.forEach((layer) => {
         const mediaEl = overlayVideoRefs.current.get(layer.id);
         if (!mediaEl || mediaEl.paused || mediaEl.seeking) return;
-        const drift = Math.abs(mediaEl.currentTime - layer.clipTime);
+        const drift = layer.clipTime - mediaEl.currentTime;
         if (drift > DRIFT_THRESHOLD) {
           mediaEl.currentTime = layer.clipTime;
         }
@@ -259,12 +279,12 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     return () => clearInterval(intervalId);
   }, [isPlaying]);
 
-  // Seek on load
-  const handleLoaded = () => {
-    if (videoRef.current && baseLayerClipTime !== undefined) {
-      videoRef.current.currentTime = baseLayerClipTime;
-    }
-  };
+  const handleLoaded = useCallback(() => {
+    const video = videoRef.current;
+    const clipTime = baseLayerClipTimeRef.current;
+    if (!video || clipTime === undefined) return;
+    video.currentTime = clipTime;
+  }, []);
 
   // Handle mouse down on draggable layer
   const handleLayerMouseDown = useCallback((e: React.MouseEvent, layer: ClipLayer) => {

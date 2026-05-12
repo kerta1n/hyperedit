@@ -365,10 +365,10 @@ export default function Home() {
 
       const video = videoPreviewRef.current?.getVideoElement();
 
-      if (video && !video.paused && video.readyState >= 2 && cachedOffset) {
+      if (video && !video.paused && !video.seeking && video.readyState >= 2 && cachedOffset) {
         if (seekVideoTargetRef.current !== null) {
-          const delta = Math.abs(video.currentTime - seekVideoTargetRef.current);
-          if (video.seeking || delta > 0.05) {
+          const arrived = video.currentTime >= seekVideoTargetRef.current - 0.01;
+          if (!arrived) {
             setCurrentTime(lastTimelineTime);
             seekSkipCountRef.current += 1;
             if (seekSkipCountRef.current > 120) {
@@ -379,6 +379,9 @@ export default function Home() {
           }
           seekVideoTargetRef.current = null;
           seekSkipCountRef.current = 0;
+          setCurrentTime(lastTimelineTime);
+          playbackRef.current = requestAnimationFrame(animate);
+          return;
         }
 
         const timelineTime = video.currentTime - cachedOffset.inPoint + cachedOffset.start;
@@ -450,7 +453,7 @@ export default function Home() {
 
   // Handle timeline seeking — also seek media elements during playback
   const handleTimelineSeek = useCallback((time: number) => {
-    const oldTime = currentTime;
+    const oldTime = currentTimeRef.current;
     setCurrentTime(time);
     currentTimeRef.current = time;
 
@@ -461,16 +464,15 @@ export default function Home() {
       time < c.start + c.duration
     );
 
-    if (video && v1Clip) {
-      const rawVideoTime = (time - v1Clip.start) + (v1Clip.inPoint || 0);
-      video.currentTime = rawVideoTime;
-      if (isPlaying) {
+    if (isPlaying) {
+      seekTargetRef.current = time;
+      if (video && v1Clip) {
+        const rawVideoTime = (time - v1Clip.start) + (v1Clip.inPoint || 0);
+        video.currentTime = rawVideoTime;
         seekVideoTargetRef.current = rawVideoTime;
-        seekTargetRef.current = time;
       }
+      videoPreviewRef.current?.seekAllOverlays(time, oldTime);
     }
-
-    videoPreviewRef.current?.seekAllOverlays(time, oldTime);
   }, [isPlaying, activeClips, currentTime]);
 
 
