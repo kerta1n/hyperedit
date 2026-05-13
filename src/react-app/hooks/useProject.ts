@@ -46,6 +46,7 @@ export interface Track {
   type: 'video' | 'audio' | 'text';
   name: string;
   order: number;
+  muted?: boolean;
 }
 
 // Caption word with timing
@@ -1038,8 +1039,14 @@ export function useProject() {
       const response = await fetch(`${LOCAL_FFMPEG_URL}/session/${session.sessionId}/project`);
       if (response.ok) {
         const data = await response.json();
-        // Don't load tracks from server - always use client's default tracks
-        // Server tracks may be outdated (e.g., missing T1, V3, A2)
+        // Don't load track structure from server — client defaults are authoritative.
+        // But merge per-track muted state so it survives page reloads.
+        if (data.tracks) {
+          setTracks(prev => prev.map(t => {
+            const serverTrack = (data.tracks as Track[]).find(st => st.id === t.id);
+            return { ...t, muted: serverTrack?.muted ?? false };
+          }));
+        }
         if (data.clips) setClips(data.clips);
         if (data.settings) setSettings(data.settings);
         if (data.captionData) setCaptionData(data.captionData);

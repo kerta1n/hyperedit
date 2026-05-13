@@ -23,7 +23,7 @@ interface ClipLayer {
   trackId: string;
   clipTime: number;
   transform?: ClipTransform;
-  // Caption-specific data
+  muted?: boolean;
   captionWords?: CaptionWord[];
   captionStyle?: CaptionStyle;
 }
@@ -121,6 +121,8 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   const justPausedRef = useRef(false);
   const isPlayingRef = useRef(isPlaying);
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
+  const muteResyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (muteResyncTimerRef.current) clearTimeout(muteResyncTimerRef.current); }, []);
 
   // Find the base video layer (V1) for audio/playback control
   const foundBaseLayer = layers.find(l => l.trackId === 'V1' && l.type === 'video');
@@ -283,29 +285,96 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     });
   }, [layers, isPlaying]);
 
-  // Periodic overlay drift correction during playback
+  // Resync overlays when mute state changes.
+  // Toggling the muted attribute doesn't shift V1 (single-element A/V stays locked),
+  // but overlays may have drifted while muted. Snap them to V1's position immediately.
+  const prevMuteMapRef = useRef<Map<string, boolean>>(new Map());
   useEffect(() => {
-    if (!isPlaying) return;
+    const prevMap = prevMuteMapRef.current;
+    const newMap = new Map<string, boolean>();
+    let anyChanged = false;
 
-    const DRIFT_THRESHOLD = 0.15;
-    const CORRECTION_INTERVAL = 250;
+    for (const layer of layers) {
+      if (layer.type !== 'video' && layer.type !== 'audio') continue;
+      const muted = layer.muted ?? false;
+      newMap.set(layer.id, muted);
+      if (prevMap.has(layer.id) && prevMap.get(layer.id) !== muted) {
+        anyChanged = true;
+      }
+    }
+    prevMuteMapRef.current = newMap;
 
-    const intervalId = setInterval(() => {
+    if (!anyChanged) return;
+
+    for (const layer of layers) {
+      if (layer.type !== 'video' && layer.type !== 'audio') continue;
+      if (layer.trackId === 'V1') continue;
+      const el = overlayVideoRefs.current.get(layer.id);
+      if (!el) continue;
+      el.volume = layer.muted ? 0 : 1;
+    }
+
+    // Debounce the corrective seek only
+    if (muteResyncTimerRef.current) clearTimeout(muteResyncTimerRef.current);
+    muteResyncTimerRef.current = setTimeout(() => {
+      muteResyncTimerRef.current = null;
+      const v1 = videoRef.current;
+      const currentLayers = layersRef.current;
+      currentLayers
+        .filter(l => (l.type === 'video' && l.trackId !== 'V1') || l.type === 'audio')
+        .forEach(layer => {
+          const el = overlayVideoRefs.current.get(layer.id);
+          if (!el || el.seeking || layer.clipTime === undefined) return;
+          const targetTime =
+            isPlayingRef.current && v1 && baseLayerClipTimeRef.current !== undefined
+              ? Math.max(0, v1.currentTime + (layer.clipTime - baseLayerClipTimeRef.current))
+              : layer.clipTime;
+          if (Math.abs(el.currentTime - targetTime) > 0.05) {
+            el.currentTime = targetTime;
+          }
+        });
+    }, 150);
+  }, [layers]);
+
+  // Per-frame overlay drift correction via requestVideoFrameCallback on V1
+  const rVFCHandleRef = useRef<number | null>(null);
+  useEffect(() => {
+    const v1 = videoRef.current;
+    if (!isPlaying || !v1 || !('requestVideoFrameCallback' in v1)) return;
+
+    const DRIFT_THRESHOLD = 0.08;
+
+    const onFrame = () => {
+      if (muteResyncTimerRef.current) {
+        rVFCHandleRef.current = v1.requestVideoFrameCallback(onFrame);
+        return;
+      }
       const currentLayers = layersRef.current;
       const overlayMediaLayers = currentLayers.filter(
         l => (l.type === 'video' && l.trackId !== 'V1') || l.type === 'audio'
       );
       overlayMediaLayers.forEach((layer) => {
         const mediaEl = overlayVideoRefs.current.get(layer.id);
-        if (!mediaEl || mediaEl.paused || mediaEl.seeking) return;
-        const drift = layer.clipTime - mediaEl.currentTime;
-        if (drift > DRIFT_THRESHOLD) {
-          mediaEl.currentTime = layer.clipTime;
+        if (!mediaEl || mediaEl.paused || mediaEl.seeking || layer.clipTime === undefined) return;
+        const targetTime =
+          baseLayerClipTimeRef.current !== undefined
+            ? Math.max(0, v1.currentTime + (layer.clipTime - baseLayerClipTimeRef.current))
+            : layer.clipTime;
+        const drift = targetTime - mediaEl.currentTime;
+        if (Math.abs(drift) > DRIFT_THRESHOLD) {
+          mediaEl.currentTime = targetTime;
         }
       });
-    }, CORRECTION_INTERVAL);
+      rVFCHandleRef.current = v1.requestVideoFrameCallback(onFrame);
+    };
 
-    return () => clearInterval(intervalId);
+    rVFCHandleRef.current = v1.requestVideoFrameCallback(onFrame);
+    return () => {
+      if (rVFCHandleRef.current !== null) {
+        v1.cancelVideoFrameCallback(rVFCHandleRef.current);
+        rVFCHandleRef.current = null;
+      }
+    };
   }, [isPlaying]);
 
   const handleLoaded = useCallback(() => {
@@ -418,6 +487,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
           style={{ zIndex: 1 }}
           playsInline
           preload="auto"
+          muted={foundBaseLayer.muted}
           onLoadedData={handleLoaded}
         />
       )}
@@ -436,6 +506,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
               ref={(el) => {
                 if (el) {
                   overlayVideoRefs.current.set(layer.id, el);
+                  el.volume = layer.muted ? 0 : 1;
                 } else {
                   overlayVideoRefs.current.delete(layer.id);
                 }
@@ -447,7 +518,6 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
               style={styles}
               playsInline
               preload="auto"
-              muted
               onLoadedData={(e) => {
                 const video = e.currentTarget;
                 if (layer.clipTime !== undefined) {
@@ -555,6 +625,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
               ref={(el) => {
                 if (el) {
                   overlayVideoRefs.current.set(layer.id, el as unknown as HTMLVideoElement);
+                  el.volume = layer.muted ? 0 : 1;
                 } else {
                   overlayVideoRefs.current.delete(layer.id);
                 }

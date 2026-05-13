@@ -140,7 +140,7 @@ export function timelineToRemotionSpec({
       outPointSec,
       playbackRate: 1,
       volume: 1,
-      muted: false,
+      muted: track?.muted === true,
       transform: clip.transform || {},
       transitionIn: clip.transitionIn || { type: 'fade', durationSec: 0.12 },
       transitionOut: clip.transitionOut || { type: 'fade', durationSec: 0.12 },

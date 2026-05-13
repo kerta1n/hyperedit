@@ -412,7 +412,9 @@ export default function Timeline({
               return (
                 <div
                   key={track.id}
-                  className="flex items-center justify-center gap-1 text-xs font-medium text-zinc-400 border-b border-zinc-800/50 px-1"
+                  className={`flex items-center justify-center gap-1 text-xs font-medium text-zinc-400 border-b border-zinc-800/50 px-1 ${
+                    track.muted ? 'bg-[#5C1010]' : ''
+                  }`}
                   style={{ height: TRACK_HEIGHTS[track.type] }}
                 >
                   <span
