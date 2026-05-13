@@ -122,7 +122,15 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   const isPlayingRef = useRef(isPlaying);
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
   const muteResyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => { if (muteResyncTimerRef.current) clearTimeout(muteResyncTimerRef.current); }, []);
+  const muteSettleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const rateCorrectingRef = useRef(false);
+  const pendingVolumeRef = useRef<Map<string, number>>(new Map());
+  const volumeRafRef = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (muteResyncTimerRef.current) clearTimeout(muteResyncTimerRef.current);
+    if (muteSettleTimerRef.current) clearTimeout(muteSettleTimerRef.current);
+    if (volumeRafRef.current !== null) cancelAnimationFrame(volumeRafRef.current);
+  }, []);
 
   // Find the base video layer (V1) for audio/playback control
   const foundBaseLayer = layers.find(l => l.trackId === 'V1' && l.type === 'video');
@@ -309,31 +317,57 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     for (const layer of layers) {
       if (layer.type !== 'video' && layer.type !== 'audio') continue;
       if (layer.trackId === 'V1') continue;
-      const el = overlayVideoRefs.current.get(layer.id);
-      if (!el) continue;
-      el.volume = layer.muted ? 0 : 1;
+      pendingVolumeRef.current.set(layer.id, layer.muted ? 0 : 1);
+    }
+    if (volumeRafRef.current === null) {
+      volumeRafRef.current = requestAnimationFrame(() => {
+        volumeRafRef.current = null;
+        pendingVolumeRef.current.forEach((vol, id) => {
+          const el = overlayVideoRefs.current.get(id);
+          if (el) el.volume = vol;
+        });
+        pendingVolumeRef.current.clear();
+      });
     }
 
-    // Debounce the corrective seek only
+    // Mark that mute spam is active so rVFC skips seek-based corrections
     if (muteResyncTimerRef.current) clearTimeout(muteResyncTimerRef.current);
     muteResyncTimerRef.current = setTimeout(() => {
       muteResyncTimerRef.current = null;
+    }, 150);
+
+    // After toggling settles, correct drift via playbackRate (no seeking, no decoder disruption)
+    if (muteSettleTimerRef.current) clearTimeout(muteSettleTimerRef.current);
+    muteSettleTimerRef.current = setTimeout(() => {
+      muteSettleTimerRef.current = null;
+      if (!isPlayingRef.current) return;
       const v1 = videoRef.current;
+      if (!v1) return;
       const currentLayers = layersRef.current;
+      rateCorrectingRef.current = true;
       currentLayers
         .filter(l => (l.type === 'video' && l.trackId !== 'V1') || l.type === 'audio')
         .forEach(layer => {
           const el = overlayVideoRefs.current.get(layer.id);
-          if (!el || el.seeking || layer.clipTime === undefined) return;
+          if (!el || el.paused || el.seeking || layer.clipTime === undefined) return;
           const targetTime =
-            isPlayingRef.current && v1 && baseLayerClipTimeRef.current !== undefined
+            baseLayerClipTimeRef.current !== undefined
               ? Math.max(0, v1.currentTime + (layer.clipTime - baseLayerClipTimeRef.current))
               : layer.clipTime;
-          if (Math.abs(el.currentTime - targetTime) > 0.05) {
+          const drift = targetTime - el.currentTime;
+          if (Math.abs(drift) < 0.005) return;
+          if (Math.abs(drift) > 0.15) {
             el.currentTime = targetTime;
+            return;
           }
+          const correctionDuration = 0.4;
+          el.playbackRate = 1 + drift / correctionDuration;
+          setTimeout(() => {
+            el.playbackRate = 1;
+            rateCorrectingRef.current = false;
+          }, correctionDuration * 1000);
         });
-    }, 150);
+    }, 250);
   }, [layers]);
 
   // Per-frame overlay drift correction via requestVideoFrameCallback on V1
@@ -342,10 +376,8 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     const v1 = videoRef.current;
     if (!isPlaying || !v1 || !('requestVideoFrameCallback' in v1)) return;
 
-    const DRIFT_THRESHOLD = 0.08;
-
     const onFrame = () => {
-      if (muteResyncTimerRef.current) {
+      if (muteResyncTimerRef.current || rateCorrectingRef.current) {
         rVFCHandleRef.current = v1.requestVideoFrameCallback(onFrame);
         return;
       }
@@ -361,7 +393,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
             ? Math.max(0, v1.currentTime + (layer.clipTime - baseLayerClipTimeRef.current))
             : layer.clipTime;
         const drift = targetTime - mediaEl.currentTime;
-        if (Math.abs(drift) > DRIFT_THRESHOLD) {
+        if (Math.abs(drift) > 0.08) {
           mediaEl.currentTime = targetTime;
         }
       });
