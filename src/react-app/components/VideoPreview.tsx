@@ -23,7 +23,7 @@ interface ClipLayer {
   trackId: string;
   clipTime: number;
   transform?: ClipTransform;
-  // Caption-specific data
+  muted?: boolean;
   captionWords?: CaptionWord[];
   captionStyle?: CaptionStyle;
 }
@@ -124,6 +124,13 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
 
   // Find the base video layer (V1) for audio/playback control
   const foundBaseLayer = layers.find(l => l.trackId === 'V1' && l.type === 'video');
+
+  const baseLayerMuted = foundBaseLayer?.muted ?? false;
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.volume = baseLayerMuted ? 0 : 1;
+  }, [baseLayerMuted]);
   const baseLayerId = foundBaseLayer?.id;
   const baseLayerUrl = foundBaseLayer?.url;
   const baseLayerClipTime = foundBaseLayer?.clipTime;
@@ -436,6 +443,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
               ref={(el) => {
                 if (el) {
                   overlayVideoRefs.current.set(layer.id, el);
+                  el.volume = layer.muted ? 0 : 1;
                 } else {
                   overlayVideoRefs.current.delete(layer.id);
                 }
@@ -447,7 +455,6 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
               style={styles}
               playsInline
               preload="auto"
-              muted
               onLoadedData={(e) => {
                 const video = e.currentTarget;
                 if (layer.clipTime !== undefined) {
@@ -555,6 +562,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
               ref={(el) => {
                 if (el) {
                   overlayVideoRefs.current.set(layer.id, el as unknown as HTMLVideoElement);
+                  el.volume = layer.muted ? 0 : 1;
                 } else {
                   overlayVideoRefs.current.delete(layer.id);
                 }

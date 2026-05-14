@@ -64,6 +64,7 @@ export default function Home() {
     session,
     assets,
     tracks,
+    setTracks,
     clips,
     loading,
     status,
@@ -195,6 +196,7 @@ export default function Home() {
       transform?: TimelineClip['transform'];
       captionWords?: Array<{ text: string; start: number; end: number }>;
       captionStyle?: CaptionStyle;
+      muted?: boolean;
     }> = [];
 
     // Check video tracks (V1, V2, V3...)
@@ -214,6 +216,7 @@ export default function Home() {
         if (asset && url) {
           // Calculate the time within the clip (accounting for in-point)
           const clipTime = (currentTime - clip.start) + (clip.inPoint || 0);
+          const trackObj = tracks.find(t => t.id === trackId);
           layers.push({
             id: clip.id,
             url,
@@ -222,6 +225,7 @@ export default function Home() {
             clipTime,
             clipStart: clip.start,
             transform: clip.transform,
+            muted: trackObj?.muted ?? false,
           });
         }
       }
@@ -231,6 +235,9 @@ export default function Home() {
     const audioTracks = ['A1', 'A2'];
 
     for (const trackId of audioTracks) {
+      const trackObj = tracks.find(t => t.id === trackId);
+      if (trackObj?.muted) continue;
+
       const clipsOnTrack = activeClips.filter(c =>
         c.trackId === trackId &&
         currentTime >= c.start &&
@@ -279,7 +286,7 @@ export default function Home() {
     }
 
     return layers;
-  }, [previewAssetId, assets, activeClips, currentTime, getAssetStreamUrl, getCaptionData]);
+  }, [previewAssetId, assets, activeClips, currentTime, getAssetStreamUrl, getCaptionData, tracks]);
 
   const previewLayers = getPreviewLayers();
   const hasPreviewContent = previewLayers.length > 0;
@@ -2287,6 +2294,10 @@ export default function Home() {
                 <TrackPropertiesPanel
                   trackId={selectedTrackId}
                   trackName={tracks.find(t => t.id === selectedTrackId)?.name ?? selectedTrackId}
+                  muted={tracks.find(t => t.id === selectedTrackId)?.muted ?? false}
+                  onToggleMute={(enabled) => setTracks(prev => prev.map(t =>
+                    t.id === selectedTrackId ? { ...t, muted: enabled } : t
+                  ))}
                   autoSnap={trackAutoSnap[selectedTrackId] ?? false}
                   onToggleAutoSnap={(enabled) => setTrackAutoSnap(prev => ({ ...prev, [selectedTrackId]: enabled }))}
                   onClose={() => setSelectedTrackId(null)}
