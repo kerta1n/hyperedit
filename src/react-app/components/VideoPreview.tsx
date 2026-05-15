@@ -4,6 +4,49 @@ import CaptionRenderer from './CaptionRenderer';
 import TransitionPreview, { type ActiveTransition } from './TransitionPreview';
 import type { CaptionWord, CaptionStyle } from '@/react-app/hooks/useProject';
 
+const CSS_TRANSITION_IDS = new Set([
+  'builtin-crossfade',
+  'builtin-dip-to-black',
+  'builtin-slide-left',
+  'builtin-slide-right',
+]);
+
+function getCssTransitionStyles(
+  transitionId: string,
+  progress: number,
+  target: 'from' | 'to' | 'overlay',
+): React.CSSProperties | null {
+  const p = Math.max(0, Math.min(1, progress));
+
+  switch (transitionId) {
+    case 'builtin-crossfade':
+      if (target === 'from') return { opacity: 1 - p };
+      if (target === 'to') return { opacity: p };
+      return null;
+
+    case 'builtin-dip-to-black': {
+      const overlayOpacity = p < 0.5 ? p * 2 : 2 - p * 2;
+      if (target === 'from') return { opacity: p < 0.5 ? 1 : 0 };
+      if (target === 'to') return { opacity: p >= 0.5 ? 1 : 0 };
+      if (target === 'overlay') return { opacity: overlayOpacity };
+      return null;
+    }
+
+    case 'builtin-slide-left':
+      if (target === 'from') return { transform: `translateX(${-p * 100}%)` };
+      if (target === 'to') return { transform: `translateX(${(1 - p) * 100}%)` };
+      return null;
+
+    case 'builtin-slide-right':
+      if (target === 'from') return { transform: `translateX(${p * 100}%)` };
+      if (target === 'to') return { transform: `translateX(${-(1 - p) * 100}%)` };
+      return null;
+
+    default:
+      return null;
+  }
+}
+
 interface ClipTransform {
   x?: number;
   y?: number;
@@ -130,6 +173,35 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   const baseLayerClipTimeRef = useRef(baseLayerClipTime);
   useEffect(() => { baseLayerClipTimeRef.current = baseLayerClipTime; }, [baseLayerClipTime]);
   const seekGenerationRef = useRef(0);
+  const hasActiveTransition = activeTransitions.length > 0;
+
+  // Split transitions: CSS-handled (builtin, no extra decoders) vs Remotion-handled (custom)
+  const cssTransitions = useMemo(() =>
+    activeTransitions.filter(t => CSS_TRANSITION_IDS.has(t.transitionFileId)),
+    [activeTransitions]
+  );
+  const remotionTransitions = useMemo(() =>
+    activeTransitions.filter(t => !CSS_TRANSITION_IDS.has(t.transitionFileId)),
+    [activeTransitions]
+  );
+  const hasCssTransition = cssTransitions.length > 0;
+  const hasRemotionTransition = remotionTransitions.length > 0;
+
+  // Compute CSS transition styles for V1 (from) and V2 (to) elements
+  const cssTransitionState = useMemo(() => {
+    if (!hasCssTransition) return null;
+    const t = cssTransitions[0];
+    const progress = Math.max(0, Math.min(1, (currentTime - t.startTime) / t.durationSec));
+    return {
+      transitionId: t.transitionFileId,
+      progress,
+      fromClipId: t.fromSrc ? 'v1' : null,
+      toClipId: t.toSrc ? 'v2' : null,
+      v1Style: getCssTransitionStyles(t.transitionFileId, progress, 'from'),
+      v2Style: getCssTransitionStyles(t.transitionFileId, progress, 'to'),
+      overlayStyle: getCssTransitionStyles(t.transitionFileId, progress, 'overlay'),
+    };
+  }, [hasCssTransition, cssTransitions, currentTime]);
 
   // Memoize to prevent effect triggers when only caption layers change
   const baseVideoLayer = useMemo(() => {
@@ -243,14 +315,18 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
 
   // Play/pause control for overlay videos (V2, V3, etc.)
   useEffect(() => {
-    overlayVideoRefs.current.forEach((video) => {
+    overlayVideoRefs.current.forEach((el, id) => {
       if (isPlaying) {
-        video.play().catch(() => {});
+        if (hasRemotionTransition) {
+          const layer = layersRef.current.find(l => l.id === id);
+          if (layer?.type === 'video' && layer.trackId !== 'V1') return;
+        }
+        el.play().catch(() => {});
       } else {
-        video.pause();
+        el.pause();
       }
     });
-  }, [isPlaying]);
+  }, [isPlaying, hasRemotionTransition]);
 
   useEffect(() => {
     if (wasPlayingRef.current && !isPlaying) {
@@ -283,6 +359,29 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     });
   }, [layers, isPlaying]);
 
+  // Gate overlay video decode during Remotion transitions only (CSS transitions use native elements)
+  useEffect(() => {
+    if (!hasRemotionTransition) return;
+
+    overlayVideoRefs.current.forEach((el, id) => {
+      const layer = layersRef.current.find(l => l.id === id);
+      if (layer?.type === 'video' && layer.trackId !== 'V1') {
+        el.pause();
+      }
+    });
+
+    return () => {
+      if (isPlayingRef.current) {
+        overlayVideoRefs.current.forEach((el, id) => {
+          const layer = layersRef.current.find(l => l.id === id);
+          if (layer?.type === 'video' && layer.trackId !== 'V1') {
+            el.play().catch(() => {});
+          }
+        });
+      }
+    };
+  }, [hasRemotionTransition]);
+
   // Periodic overlay drift correction during playback
   useEffect(() => {
     if (!isPlaying) return;
@@ -298,6 +397,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
       overlayMediaLayers.forEach((layer) => {
         const mediaEl = overlayVideoRefs.current.get(layer.id);
         if (!mediaEl || mediaEl.paused || mediaEl.seeking) return;
+        if (hasRemotionTransition && layer.type === 'video' && layer.trackId !== 'V1') return;
         const drift = layer.clipTime - mediaEl.currentTime;
         if (drift > DRIFT_THRESHOLD) {
           mediaEl.currentTime = layer.clipTime;
@@ -415,7 +515,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
           ref={videoRef}
           src={foundBaseLayer.url}
           className={`absolute inset-0 w-full h-full ${videoFitClass}`}
-          style={{ zIndex: 1 }}
+          style={{ zIndex: 1, ...cssTransitionState?.v1Style }}
           playsInline
           preload="auto"
           onLoadedData={handleLoaded}
@@ -444,7 +544,11 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
               className={`absolute inset-0 w-full h-full ${videoFitClass} cursor-grab active:cursor-grabbing ${
                 isSelected ? 'ring-2 ring-orange-500 ring-offset-2 ring-offset-black' : ''
               }`}
-              style={styles}
+              style={{
+                ...styles,
+                ...(hasCssTransition ? cssTransitionState?.v2Style : {}),
+                visibility: hasRemotionTransition ? 'hidden' : undefined,
+              }}
               playsInline
               preload="auto"
               muted
@@ -593,8 +697,22 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
         return null;
       })}
 
-      {/* Transition overlays via @remotion/player */}
-      {activeTransitions.map(t => (
+      {/* CSS transition overlay for dip-to-black */}
+      {cssTransitionState?.overlayStyle && (
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            backgroundColor: 'black',
+            zIndex: 40,
+            pointerEvents: 'none',
+            ...cssTransitionState.overlayStyle,
+          }}
+        />
+      )}
+
+      {/* Remotion Player only for custom (non-builtin) transitions */}
+      {remotionTransitions.map(t => (
         <TransitionPreview
           key={t.id}
           transition={t}
@@ -602,6 +720,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
           fps={30}
           width={isVertical ? 1080 : 1920}
           height={isVertical ? 1920 : 1080}
+          isPlaying={isPlaying}
         />
       ))}
 

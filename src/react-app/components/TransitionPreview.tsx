@@ -1,4 +1,4 @@
-import { useMemo, useRef, useEffect } from 'react';
+import { useMemo, useRef, useEffect, memo } from 'react';
 import { Player, type PlayerRef } from '@remotion/player';
 import { AbsoluteFill } from 'remotion';
 import { getTransitionEntry } from '@/remotion/transitions/registry';
@@ -23,6 +23,7 @@ interface TransitionPreviewProps {
   fps: number;
   width: number;
   height: number;
+  isPlaying?: boolean;
 }
 
 // Inner composition that renders the actual transition component
@@ -64,31 +65,75 @@ function TransitionComposition({
   );
 }
 
-/**
- * Renders a single active transition using @remotion/player.
- * Mounts once per transition window, drives frame position via seekTo — never re-mounts per tick.
- */
-export default function TransitionPreview({
+function TransitionPreview({
   transition,
   currentTime,
   fps,
   width,
   height,
+  isPlaying = false,
 }: TransitionPreviewProps) {
   const playerRef = useRef<PlayerRef>(null);
+  const playbackStartRef = useRef<{ wallTime: number; frame: number } | null>(null);
 
   const durationInFrames = Math.max(1, Math.round(transition.durationSec * fps));
 
-  // Calculate which frame within the transition we're at
   const progressTime = currentTime - transition.startTime;
   const targetFrame = Math.max(0, Math.min(durationInFrames - 1, Math.round(progressTime * fps)));
+  const targetFrameRef = useRef(targetFrame);
+  useEffect(() => { targetFrameRef.current = targetFrame; }, [targetFrame]);
 
-  // Drive frame position via seekTo — the Player stays mounted
+  // Play mode: let Player advance internally (efficient sequential decode)
+  // Pause mode: seekTo for scrubbing
   useEffect(() => {
-    if (playerRef.current) {
+    const player = playerRef.current;
+    if (!player) return;
+
+    if (isPlaying) {
+      player.seekTo(targetFrameRef.current);
+      player.play();
+      playbackStartRef.current = {
+        wallTime: performance.now(),
+        frame: targetFrameRef.current,
+      };
+    } else {
+      player.pause();
+      player.seekTo(targetFrameRef.current);
+      playbackStartRef.current = null;
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying]);
+
+  // Scrub seeking when paused — per-frame seekTo only when NOT playing
+  useEffect(() => {
+    if (!isPlaying && playerRef.current) {
       playerRef.current.seekTo(targetFrame);
     }
-  }, [targetFrame]);
+  }, [targetFrame, isPlaying]);
+
+  // Wall-clock drift corrector — independent of React props (memo-safe)
+  useEffect(() => {
+    if (!isPlaying) return;
+
+    const intervalId = setInterval(() => {
+      const player = playerRef.current;
+      const start = playbackStartRef.current;
+      if (!player || !start) return;
+
+      const elapsedSec = (performance.now() - start.wallTime) / 1000;
+      const expected = Math.min(
+        durationInFrames - 1,
+        start.frame + Math.round(elapsedSec * fps),
+      );
+      const actual = player.getCurrentFrame();
+      if (Math.abs(expected - actual) > 3) {
+        player.seekTo(expected);
+      }
+    }, 500);
+
+    return () => clearInterval(intervalId);
+  }, [isPlaying, fps, durationInFrames]);
+
 
   const inputProps = useMemo(() => ({
     transitionFileId: transition.transitionFileId,
@@ -119,6 +164,7 @@ export default function TransitionPreview({
       fps={fps}
       compositionWidth={width}
       compositionHeight={height}
+      initiallyMuted
       style={{
         position: 'absolute',
         inset: 0,
@@ -130,3 +176,26 @@ export default function TransitionPreview({
     />
   );
 }
+
+export default memo(TransitionPreview, (prev, next) => {
+  if (prev.isPlaying !== next.isPlaying) return false;
+  if (prev.fps !== next.fps || prev.width !== next.width || prev.height !== next.height) return false;
+
+  if ((!prev.isPlaying || !next.isPlaying) && prev.currentTime !== next.currentTime) {
+    return false;
+  }
+
+  return (
+    prev.transition.id === next.transition.id &&
+    prev.transition.transitionFileId === next.transition.transitionFileId &&
+    prev.transition.startTime === next.transition.startTime &&
+    prev.transition.durationSec === next.transition.durationSec &&
+    prev.transition.fromSrc === next.transition.fromSrc &&
+    prev.transition.toSrc === next.transition.toSrc &&
+    prev.transition.fromAssetType === next.transition.fromAssetType &&
+    prev.transition.toAssetType === next.transition.toAssetType &&
+    prev.transition.fromStartFrom === next.transition.fromStartFrom &&
+    prev.transition.toStartFrom === next.transition.toStartFrom &&
+    prev.transition.params === next.transition.params
+  );
+});
