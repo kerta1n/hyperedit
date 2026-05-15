@@ -173,19 +173,23 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   const baseLayerClipTimeRef = useRef(baseLayerClipTime);
   useEffect(() => { baseLayerClipTimeRef.current = baseLayerClipTime; }, [baseLayerClipTime]);
   const seekGenerationRef = useRef(0);
-  const hasActiveTransition = activeTransitions.length > 0;
+  const liveTransitions = useMemo(() =>
+    activeTransitions.filter(t => !t.premount),
+    [activeTransitions]
+  );
+  const hasActiveTransition = liveTransitions.length > 0;
 
   // Split transitions: CSS-handled (builtin, no extra decoders) vs Remotion-handled (custom)
   const cssTransitions = useMemo(() =>
-    activeTransitions.filter(t => CSS_TRANSITION_IDS.has(t.transitionFileId)),
-    [activeTransitions]
+    liveTransitions.filter(t => CSS_TRANSITION_IDS.has(t.transitionFileId)),
+    [liveTransitions]
   );
   const remotionTransitions = useMemo(() =>
     activeTransitions.filter(t => !CSS_TRANSITION_IDS.has(t.transitionFileId)),
     [activeTransitions]
   );
   const hasCssTransition = cssTransitions.length > 0;
-  const hasRemotionTransition = remotionTransitions.length > 0;
+  const hasRemotionTransition = remotionTransitions.filter(t => !t.premount).length > 0;
 
   // Compute CSS transition styles for V1 (from) and V2 (to) elements
   const cssTransitionState = useMemo(() => {

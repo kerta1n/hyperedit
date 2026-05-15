@@ -15,6 +15,7 @@ export interface ActiveTransition {
   fromStartFrom?: number;
   toStartFrom?: number;
   params: Record<string, number | string | boolean>;
+  premount?: boolean;
 }
 
 interface TransitionPreviewProps {
@@ -75,6 +76,8 @@ function TransitionPreview({
 }: TransitionPreviewProps) {
   const playerRef = useRef<PlayerRef>(null);
   const playbackStartRef = useRef<{ wallTime: number; frame: number } | null>(null);
+  const premount = transition.premount ?? false;
+  const isLive = isPlaying && !premount;
 
   const durationInFrames = Math.max(1, Math.round(transition.durationSec * fps));
 
@@ -83,13 +86,12 @@ function TransitionPreview({
   const targetFrameRef = useRef(targetFrame);
   useEffect(() => { targetFrameRef.current = targetFrame; }, [targetFrame]);
 
-  // Play mode: let Player advance internally (efficient sequential decode)
-  // Pause mode: seekTo for scrubbing
+  // Play/pause: start Player when live, keep paused during premount
   useEffect(() => {
     const player = playerRef.current;
     if (!player) return;
 
-    if (isPlaying) {
+    if (isLive) {
       player.seekTo(targetFrameRef.current);
       player.play();
       playbackStartRef.current = {
@@ -102,18 +104,18 @@ function TransitionPreview({
       playbackStartRef.current = null;
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPlaying]);
+  }, [isLive]);
 
   // Scrub seeking when paused — per-frame seekTo only when NOT playing
   useEffect(() => {
-    if (!isPlaying && playerRef.current) {
+    if (!isPlaying && !premount && playerRef.current) {
       playerRef.current.seekTo(targetFrame);
     }
-  }, [targetFrame, isPlaying]);
+  }, [targetFrame, isPlaying, premount]);
 
   // Wall-clock drift corrector — independent of React props (memo-safe)
   useEffect(() => {
-    if (!isPlaying) return;
+    if (!isLive) return;
 
     const intervalId = setInterval(() => {
       const player = playerRef.current;
@@ -126,13 +128,13 @@ function TransitionPreview({
         start.frame + Math.round(elapsedSec * fps),
       );
       const actual = player.getCurrentFrame();
-      if (Math.abs(expected - actual) > 3) {
+      if (Math.abs(expected - actual) > 1) {
         player.seekTo(expected);
       }
-    }, 500);
+    }, 250);
 
     return () => clearInterval(intervalId);
-  }, [isPlaying, fps, durationInFrames]);
+  }, [isLive, fps, durationInFrames]);
 
 
   const inputProps = useMemo(() => ({
@@ -172,6 +174,7 @@ function TransitionPreview({
         height: '100%',
         zIndex: 50,
         pointerEvents: 'none',
+        visibility: premount ? 'hidden' : undefined,
       }}
     />
   );
@@ -179,9 +182,12 @@ function TransitionPreview({
 
 export default memo(TransitionPreview, (prev, next) => {
   if (prev.isPlaying !== next.isPlaying) return false;
+  if (prev.transition.premount !== next.transition.premount) return false;
   if (prev.fps !== next.fps || prev.width !== next.width || prev.height !== next.height) return false;
 
-  if ((!prev.isPlaying || !next.isPlaying) && prev.currentTime !== next.currentTime) {
+  const prevLive = prev.isPlaying && !prev.transition.premount;
+  const nextLive = next.isPlaying && !next.transition.premount;
+  if ((!prevLive || !nextLive) && prev.currentTime !== next.currentTime) {
     return false;
   }
 
