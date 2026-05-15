@@ -15,7 +15,6 @@ export interface ActiveTransition {
   fromStartFrom?: number;
   toStartFrom?: number;
   params: Record<string, number | string | boolean>;
-  premount?: boolean;
 }
 
 interface TransitionPreviewProps {
@@ -27,7 +26,6 @@ interface TransitionPreviewProps {
   isPlaying?: boolean;
 }
 
-// Inner composition that renders the actual transition component
 function TransitionComposition({
   transitionFileId,
   fromSrc,
@@ -75,9 +73,6 @@ function TransitionPreview({
   isPlaying = false,
 }: TransitionPreviewProps) {
   const playerRef = useRef<PlayerRef>(null);
-  const playbackStartRef = useRef<{ wallTime: number; frame: number } | null>(null);
-  const premount = transition.premount ?? false;
-  const isLive = isPlaying && !premount;
 
   const durationInFrames = Math.max(1, Math.round(transition.durationSec * fps));
 
@@ -86,56 +81,28 @@ function TransitionPreview({
   const targetFrameRef = useRef(targetFrame);
   useEffect(() => { targetFrameRef.current = targetFrame; }, [targetFrame]);
 
-  // Play/pause: start Player when live, keep paused during premount
+  // Play mode: Player advances internally. Pause mode: seekTo for scrubbing.
+  // No drift corrector — seeks cause OffthreadVideo to flash frame 0.
   useEffect(() => {
     const player = playerRef.current;
     if (!player) return;
 
-    if (isLive) {
+    if (isPlaying) {
       player.seekTo(targetFrameRef.current);
       player.play();
-      playbackStartRef.current = {
-        wallTime: performance.now(),
-        frame: targetFrameRef.current,
-      };
     } else {
       player.pause();
       player.seekTo(targetFrameRef.current);
-      playbackStartRef.current = null;
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isLive]);
+  }, [isPlaying]);
 
-  // Scrub seeking when paused — per-frame seekTo only when NOT playing
+  // Scrub seeking when paused
   useEffect(() => {
-    if (!isPlaying && !premount && playerRef.current) {
+    if (!isPlaying && playerRef.current) {
       playerRef.current.seekTo(targetFrame);
     }
-  }, [targetFrame, isPlaying, premount]);
-
-  // Wall-clock drift corrector — independent of React props (memo-safe)
-  useEffect(() => {
-    if (!isLive) return;
-
-    const intervalId = setInterval(() => {
-      const player = playerRef.current;
-      const start = playbackStartRef.current;
-      if (!player || !start) return;
-
-      const elapsedSec = (performance.now() - start.wallTime) / 1000;
-      const expected = Math.min(
-        durationInFrames - 1,
-        start.frame + Math.round(elapsedSec * fps),
-      );
-      const actual = player.getCurrentFrame();
-      if (Math.abs(expected - actual) > 1) {
-        player.seekTo(expected);
-      }
-    }, 250);
-
-    return () => clearInterval(intervalId);
-  }, [isLive, fps, durationInFrames]);
-
+  }, [targetFrame, isPlaying]);
 
   const inputProps = useMemo(() => ({
     transitionFileId: transition.transitionFileId,
@@ -174,7 +141,6 @@ function TransitionPreview({
         height: '100%',
         zIndex: 50,
         pointerEvents: 'none',
-        visibility: premount ? 'hidden' : undefined,
       }}
     />
   );
@@ -182,14 +148,15 @@ function TransitionPreview({
 
 export default memo(TransitionPreview, (prev, next) => {
   if (prev.isPlaying !== next.isPlaying) return false;
-  if (prev.transition.premount !== next.transition.premount) return false;
   if (prev.fps !== next.fps || prev.width !== next.width || prev.height !== next.height) return false;
 
-  const prevLive = prev.isPlaying && !prev.transition.premount;
-  const nextLive = next.isPlaying && !next.transition.premount;
-  if ((!prevLive || !nextLive) && prev.currentTime !== next.currentTime) {
-    return false;
+  // During playback: block currentTime rerenders (Player advances internally)
+  if (prev.isPlaying && next.isPlaying && prev.currentTime !== next.currentTime) {
+    return true;
   }
+
+  // When paused: allow currentTime through for scrub accuracy
+  if (prev.currentTime !== next.currentTime) return false;
 
   return (
     prev.transition.id === next.transition.id &&

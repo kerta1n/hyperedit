@@ -291,9 +291,8 @@ export default function Home() {
       ? timelineTransitions
       : (timelineTabs.find(t => t.id === activeTabId)?.timelineTransitions || []);
 
-    const PREMOUNT_SEC = 3;
     return currentTransitions
-      .filter(t => currentTime >= t.startTime - PREMOUNT_SEC && currentTime < t.startTime + t.durationSec)
+      .filter(t => currentTime >= t.startTime && currentTime < t.startTime + t.durationSec)
       .map(t => {
         const fromClip = t.fromClipId ? activeClips.find(c => c.id === t.fromClipId) : null;
         const toClip = t.toClipId ? activeClips.find(c => c.id === t.toClipId) : null;
@@ -316,7 +315,6 @@ export default function Home() {
             ? Math.max(0, Math.round(((t.startTime - toClip.start) + (toClip.inPoint || 0)) * 30))
             : 0,
           params: t.params,
-          premount: currentTime < t.startTime,
         };
       });
   }, [previewAssetId, activeTabId, timelineTransitions, timelineTabs, currentTime, activeClips, assets, getAssetStreamUrl]);
