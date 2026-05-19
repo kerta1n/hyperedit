@@ -98,6 +98,7 @@ export default function Home() {
     updateTabClips,
     updateTabAsset,
     // Settings
+    settings,
     setSettings,
     setStatus,
     // Render options
@@ -268,8 +269,26 @@ export default function Home() {
       }
     }
 
+    // Suppress V1 video layers during active transitions — the transition's
+    // Remotion Player already renders those videos via OffthreadVideo
+    const currentTransitions = activeTabId === 'main'
+      ? timelineTransitions
+      : (timelineTabs.find(t => t.id === activeTabId)?.timelineTransitions || []);
+
+    const activeTransitionClipIds = new Set<string>();
+    for (const t of currentTransitions) {
+      if (currentTime >= t.startTime && currentTime < t.startTime + t.durationSec) {
+        if (t.fromClipId) activeTransitionClipIds.add(t.fromClipId);
+        if (t.toClipId) activeTransitionClipIds.add(t.toClipId);
+      }
+    }
+
+    if (activeTransitionClipIds.size > 0) {
+      return layers.filter(l => !(l.trackId === 'V1' && l.type === 'video' && activeTransitionClipIds.has(l.id)));
+    }
+
     return layers;
-  }, [previewAssetId, assets, activeClips, currentTime, getAssetStreamUrl, getCaptionData]);
+  }, [previewAssetId, assets, activeClips, currentTime, getAssetStreamUrl, getCaptionData, activeTabId, timelineTransitions, timelineTabs]);
 
   const previewLayers = getPreviewLayers();
   const hasPreviewContent = previewLayers.length > 0;
@@ -299,15 +318,15 @@ export default function Home() {
           fromAssetType: fromAsset?.type === 'video' ? 'video' as const : fromAsset ? 'image' as const : undefined,
           toAssetType: toAsset?.type === 'video' ? 'video' as const : toAsset ? 'image' as const : undefined,
           fromStartFrom: fromClip
-            ? Math.max(0, Math.round(((t.startTime - fromClip.start) + (fromClip.inPoint || 0)) * 30))
+            ? Math.max(0, Math.round(((t.startTime - fromClip.start) + (fromClip.inPoint || 0)) * settings.fps))
             : 0,
           toStartFrom: toClip
-            ? Math.max(0, Math.round(((t.startTime - toClip.start) + (toClip.inPoint || 0)) * 30))
+            ? Math.max(0, Math.round(((t.startTime - toClip.start) + (toClip.inPoint || 0)) * settings.fps))
             : 0,
           params: t.params,
         };
       });
-  }, [previewAssetId, activeTabId, timelineTransitions, timelineTabs, currentTime, activeClips, assets, getAssetStreamUrl]);
+  }, [previewAssetId, activeTabId, timelineTransitions, timelineTabs, currentTime, activeClips, assets, getAssetStreamUrl, settings.fps]);
 
   // Get duration based on active tab's clips
   const duration = useMemo(() => {
@@ -2204,6 +2223,7 @@ export default function Home() {
                 selectedLayerId={selectedClipId}
                 activeTransitions={previewActiveTransitions}
                 currentTime={currentTime}
+                fps={settings.fps}
               />
             ) : clips.length > 0 ? (
               // Assets exist but playhead is not over any clip

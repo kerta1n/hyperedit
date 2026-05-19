@@ -23,6 +23,7 @@ interface TransitionPreviewProps {
   fps: number;
   width: number;
   height: number;
+  isPlaying: boolean;
 }
 
 // Inner composition that renders the actual transition component
@@ -66,7 +67,8 @@ function TransitionComposition({
 
 /**
  * Renders a single active transition using @remotion/player.
- * Mounts once per transition window, drives frame position via seekTo — never re-mounts per tick.
+ * Mounts once per transition window. During playback, uses play() and drift correction
+ * via frameupdate event instead of seekTo() per frame (which caused pause/seek loop).
  */
 export default function TransitionPreview({
   transition,
@@ -74,8 +76,11 @@ export default function TransitionPreview({
   fps,
   width,
   height,
+  isPlaying,
 }: TransitionPreviewProps) {
   const playerRef = useRef<PlayerRef>(null);
+  const wasPlayingRef = useRef(false);
+  const lastSeekedFrameRef = useRef(-1);
 
   const durationInFrames = Math.max(1, Math.round(transition.durationSec * fps));
 
@@ -83,12 +88,54 @@ export default function TransitionPreview({
   const progressTime = currentTime - transition.startTime;
   const targetFrame = Math.max(0, Math.min(durationInFrames - 1, Math.round(progressTime * fps)));
 
-  // Drive frame position via seekTo — the Player stays mounted
+  // Play/pause control — seekTo once on play start, then let Player's internal loop run
   useEffect(() => {
-    if (playerRef.current) {
-      playerRef.current.seekTo(targetFrame);
+    const player = playerRef.current;
+    if (!player) return;
+
+    if (isPlaying && !wasPlayingRef.current) {
+      player.seekTo(targetFrame);
+      lastSeekedFrameRef.current = targetFrame;
+      requestAnimationFrame(() => {
+        playerRef.current?.play();
+      });
+    } else if (!isPlaying && wasPlayingRef.current) {
+      player.pause();
     }
-  }, [targetFrame]);
+
+    wasPlayingRef.current = isPlaying;
+  }, [isPlaying, targetFrame]);
+
+  // Scrub seeking — only fires when paused (infrequent, safe to seekTo)
+  useEffect(() => {
+    if (isPlaying) return;
+    if (playerRef.current && lastSeekedFrameRef.current !== targetFrame) {
+      playerRef.current.seekTo(targetFrame);
+      lastSeekedFrameRef.current = targetFrame;
+    }
+  }, [targetFrame, isPlaying]);
+
+  // Drift correction during playback via frameupdate event (rate-limited to Player's own RAF)
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player || !isPlaying) return;
+
+    const DRIFT_THRESHOLD = 3; // frames
+
+    const onFrame = (e: { detail: { frame: number } }) => {
+      const drift = Math.abs(e.detail.frame - targetFrame);
+      if (drift > DRIFT_THRESHOLD) {
+        player.seekTo(targetFrame);
+        lastSeekedFrameRef.current = targetFrame;
+        requestAnimationFrame(() => {
+          playerRef.current?.play();
+        });
+      }
+    };
+
+    player.addEventListener('frameupdate', onFrame);
+    return () => player.removeEventListener('frameupdate', onFrame);
+  }, [isPlaying, targetFrame]);
 
   const inputProps = useMemo(() => ({
     transitionFileId: transition.transitionFileId,
