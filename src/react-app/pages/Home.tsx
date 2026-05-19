@@ -269,26 +269,8 @@ export default function Home() {
       }
     }
 
-    // Suppress V1 video layers during active transitions — the transition's
-    // Remotion Player already renders those videos via OffthreadVideo
-    const currentTransitions = activeTabId === 'main'
-      ? timelineTransitions
-      : (timelineTabs.find(t => t.id === activeTabId)?.timelineTransitions || []);
-
-    const activeTransitionClipIds = new Set<string>();
-    for (const t of currentTransitions) {
-      if (currentTime >= t.startTime && currentTime < t.startTime + t.durationSec) {
-        if (t.fromClipId) activeTransitionClipIds.add(t.fromClipId);
-        if (t.toClipId) activeTransitionClipIds.add(t.toClipId);
-      }
-    }
-
-    if (activeTransitionClipIds.size > 0) {
-      return layers.filter(l => !(l.trackId === 'V1' && l.type === 'video' && activeTransitionClipIds.has(l.id)));
-    }
-
     return layers;
-  }, [previewAssetId, assets, activeClips, currentTime, getAssetStreamUrl, getCaptionData, activeTabId, timelineTransitions, timelineTabs]);
+  }, [previewAssetId, assets, activeClips, currentTime, getAssetStreamUrl, getCaptionData]);
 
   const previewLayers = getPreviewLayers();
   const hasPreviewContent = previewLayers.length > 0;

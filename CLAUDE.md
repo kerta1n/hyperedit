@@ -157,3 +157,5 @@ The segment-based approach (extract + concat) is required — single-pass filter
 - Vite config uses `@cloudflare/vite-plugin` and `@getmocha/vite-plugins`. `chunkSizeWarningLimit: 5000` due to Remotion's size.
 - `wrangler.json` app name is a UUID (Mocha app ID). SPA routing via `not_found_handling: "single-page-application"`.
 - No tests exist in the codebase and no testing framework is configured. Only test via `npm run lint` for validation.
+- NEVER add "bandaid" fixes. Every bugfix must be in a direct response (and correctly attack the bug) instead of guessing, assuming, or not being sure that it will truly fix the problem. (Spawn as many sonnet/haiku agents as is necessary until you know what the problem is).
+- Any script or result output (e.g. (...)xxxxxxx.output) should NEVER be written to the boot/C: drive, and should instead be written to the same directory as the user's `HYPEREDIT_TEMP_DIR` (R:/).
