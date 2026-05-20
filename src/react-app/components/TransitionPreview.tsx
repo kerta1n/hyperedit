@@ -23,7 +23,6 @@ interface TransitionPreviewProps {
   fps: number;
   width: number;
   height: number;
-  isPlaying: boolean;
 }
 
 // Inner composition that renders the actual transition component
@@ -71,43 +70,19 @@ export default function TransitionPreview({
   fps,
   width,
   height,
-  isPlaying,
 }: TransitionPreviewProps) {
   const playerRef = useRef<PlayerRef>(null);
-  const prevTargetFrameRef = useRef(-1);
 
   const durationInFrames = Math.max(1, Math.round(transition.durationSec * fps));
 
   const progressTime = currentTime - transition.startTime;
   const targetFrame = Math.max(0, Math.min(durationInFrames - 1, Math.round(progressTime * fps)));
 
-  // Play/pause — fires on mount and isPlaying toggles only
+  // Seek-driven: Player never plays, just renders the frame we tell it to.
+  // Single clock source (Home.tsx rAF) = zero drift between Player and native videos.
   useEffect(() => {
-    const player = playerRef.current;
-    if (!player) return;
-    if (isPlaying) {
-      player.seekTo(targetFrame);
-      player.play();
-    } else {
-      player.pause();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPlaying]);
-
-  // Scrub (paused) + user-seek detection (playing)
-  useEffect(() => {
-    const player = playerRef.current;
-    if (!player) return;
-
-    const delta = Math.abs(targetFrame - prevTargetFrameRef.current);
-    prevTargetFrameRef.current = targetFrame;
-
-    if (!isPlaying) {
-      player.seekTo(targetFrame);
-    } else if (delta > fps / 2) {
-      player.seekTo(targetFrame);
-    }
-  }, [targetFrame, isPlaying, fps]);
+    playerRef.current?.seekTo(targetFrame);
+  }, [targetFrame]);
 
   const inputProps = useMemo(() => ({
     transitionFileId: transition.transitionFileId,
@@ -138,6 +113,7 @@ export default function TransitionPreview({
       fps={fps}
       compositionWidth={width}
       compositionHeight={height}
+      initiallyMuted
       style={{
         position: 'absolute',
         inset: 0,
