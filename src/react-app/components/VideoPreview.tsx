@@ -102,6 +102,8 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   const [draggingLayer, setDraggingLayer] = useState<string | null>(null);
   const [dragStart, setDragStart] = useState<{ x: number; y: number; layerX: number; layerY: number } | null>(null);
 
+  const hasActiveTransition = activeTransitions.length > 0;
+
   // Find the base video layer (V1) for audio/playback control
   const foundBaseLayer = layers.find(l => l.trackId === 'V1' && l.type === 'video');
   const baseLayerId = foundBaseLayer?.id;
@@ -160,30 +162,43 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     }
   }, [baseLayerClipTime, isPlaying]);
 
-  // Play/pause control for base video
+  // Mute native videos during transitions (Player handles audio)
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.muted = hasActiveTransition;
+  }, [hasActiveTransition]);
+
+  useEffect(() => {
+    overlayVideoRefs.current.forEach((video) => {
+      video.muted = hasActiveTransition;
+    });
+  }, [hasActiveTransition]);
+
+  // Play/pause control for base video (pause during transitions)
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
 
-    if (isPlaying) {
+    if (isPlaying && !hasActiveTransition) {
       video.play().catch((err) => {
         console.error('[VideoPreview] Play failed:', err.name, err.message);
       });
     } else {
       video.pause();
     }
-  }, [isPlaying]);
+  }, [isPlaying, hasActiveTransition]);
 
-  // Play/pause control for overlay videos (V2, V3, etc.)
+  // Play/pause control for overlay videos (pause during transitions)
   useEffect(() => {
     overlayVideoRefs.current.forEach((video) => {
-      if (isPlaying) {
+      if (isPlaying && !hasActiveTransition) {
         video.play().catch(() => {});
       } else {
         video.pause();
       }
     });
-  }, [isPlaying]);
+  }, [isPlaying, hasActiveTransition]);
 
   // Sync overlay video and audio seeking
   useEffect(() => {
@@ -333,7 +348,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
                 if (layer.clipTime !== undefined) {
                   video.currentTime = layer.clipTime;
                 }
-                if (isPlaying) {
+                if (isPlaying && !hasActiveTransition) {
                   video.play().catch(() => {});
                 }
               }}

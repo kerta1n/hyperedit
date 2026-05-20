@@ -20,8 +20,11 @@ import { readNDJSONStream } from '@/react-app/utils/ndjson';
 import { useVideoSession } from '@/react-app/hooks/useVideoSession';
 import SessionManager from '@/react-app/components/SessionManager';
 import { Sparkles, ListOrdered, Copy, Check, X, Download, Play, Palette, Film } from 'lucide-react';
+import { prefetch } from 'remotion';
 import type { ActiveTransition } from '@/react-app/components/TransitionPreview';
 import type { TemplateId } from '@/remotion/templates';
+
+const PREFETCH_LOOKAHEAD_SEC = 5;
 
 interface ChapterData {
   chapters: Array<{ start: number; title: string }>;
@@ -309,6 +312,56 @@ export default function Home() {
         };
       });
   }, [previewAssetId, activeTabId, timelineTransitions, timelineTabs, currentTime, activeClips, assets, getAssetStreamUrl, settings.fps]);
+
+  const prefetchHandlesRef = useRef<Map<string, { free: () => void }>>(new Map());
+
+  useEffect(() => {
+    if (previewAssetId) return;
+    const handles = prefetchHandlesRef.current;
+    const currentTransitions = activeTabId === 'main'
+      ? timelineTransitions
+      : (timelineTabs.find(t => t.id === activeTabId)?.timelineTransitions || []);
+
+    const needed = new Set<string>();
+
+    for (const t of currentTransitions) {
+      const timeUntil = t.startTime - currentTime;
+      const isUpcoming = timeUntil > 0 && timeUntil <= PREFETCH_LOOKAHEAD_SEC;
+      const isActive = currentTime >= t.startTime && currentTime < t.startTime + t.durationSec;
+      if (!isUpcoming && !isActive) continue;
+
+      const fromClip = t.fromClipId ? activeClips.find(c => c.id === t.fromClipId) : null;
+      const toClip = t.toClipId ? activeClips.find(c => c.id === t.toClipId) : null;
+      const fromAsset = fromClip ? assets.find(a => a.id === fromClip.assetId) : null;
+      const toAsset = toClip ? assets.find(a => a.id === toClip.assetId) : null;
+      const fromSrc = fromAsset ? (fromAsset.streamUrl || getAssetStreamUrl(fromAsset.id)) : null;
+      const toSrc = toAsset ? (toAsset.streamUrl || getAssetStreamUrl(toAsset.id)) : null;
+
+      if (fromSrc) needed.add(fromSrc.split('#')[0]);
+      if (toSrc) needed.add(toSrc.split('#')[0]);
+    }
+
+    for (const src of needed) {
+      if (!handles.has(src)) {
+        handles.set(src, prefetch(src));
+      }
+    }
+
+    for (const [key, handle] of handles) {
+      if (!needed.has(key)) {
+        handle.free();
+        handles.delete(key);
+      }
+    }
+  }, [currentTime, previewAssetId, activeTabId, timelineTransitions, timelineTabs, activeClips, assets, getAssetStreamUrl]);
+
+  useEffect(() => {
+    const handles = prefetchHandlesRef.current;
+    return () => {
+      handles.forEach(h => h.free());
+      handles.clear();
+    };
+  }, []);
 
   // Get duration based on active tab's clips
   const duration = useMemo(() => {

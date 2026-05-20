@@ -138,7 +138,6 @@ export default function TransitionPreview({
       fps={fps}
       compositionWidth={width}
       compositionHeight={height}
-      initiallyMuted
       style={{
         position: 'absolute',
         inset: 0,
