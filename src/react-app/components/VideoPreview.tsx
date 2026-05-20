@@ -114,8 +114,6 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [baseLayerId, baseLayerUrl]);
 
-  const hasActiveTransition = activeTransitions.length > 0;
-
   // Get all layers sorted by track for rendering (V1 at bottom, then V2/V3, then T1 captions on top)
   const sortedLayers = useMemo(() => {
     const getTrackOrder = (trackId: string) => {
@@ -162,44 +160,30 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     }
   }, [baseLayerClipTime, isPlaying]);
 
-  // Mute base video during transitions (Player owns visuals, natives own audio outside transitions)
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    video.muted = hasActiveTransition;
-  }, [hasActiveTransition]);
-
-  // Mute overlay videos during transitions
-  useEffect(() => {
-    overlayVideoRefs.current.forEach((video) => {
-      video.muted = hasActiveTransition;
-    });
-  }, [hasActiveTransition]);
-
-  // Play/pause control for base video — pause during transitions to release decoders
+  // Play/pause control for base video
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
 
-    if (isPlaying && !hasActiveTransition) {
+    if (isPlaying) {
       video.play().catch((err) => {
         console.error('[VideoPreview] Play failed:', err.name, err.message);
       });
     } else {
       video.pause();
     }
-  }, [isPlaying, hasActiveTransition]);
+  }, [isPlaying]);
 
-  // Play/pause control for overlay videos (V2, V3, etc.) — pause during transitions
+  // Play/pause control for overlay videos (V2, V3, etc.)
   useEffect(() => {
     overlayVideoRefs.current.forEach((video) => {
-      if (isPlaying && !hasActiveTransition) {
+      if (isPlaying) {
         video.play().catch(() => {});
       } else {
         video.pause();
       }
     });
-  }, [isPlaying, hasActiveTransition]);
+  }, [isPlaying]);
 
   // Sync overlay video and audio seeking
   useEffect(() => {
@@ -349,7 +333,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
                 if (layer.clipTime !== undefined) {
                   video.currentTime = layer.clipTime;
                 }
-                if (isPlaying && !hasActiveTransition) {
+                if (isPlaying) {
                   video.play().catch(() => {});
                 }
               }}

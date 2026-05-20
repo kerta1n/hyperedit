@@ -87,7 +87,7 @@ export default function TransitionPreview({
     if (!player) return;
     if (isPlaying) {
       player.seekTo(targetFrame);
-      requestAnimationFrame(() => { playerRef.current?.play(); });
+      player.play();
     } else {
       player.pause();
     }
@@ -106,7 +106,6 @@ export default function TransitionPreview({
       player.seekTo(targetFrame);
     } else if (delta > fps / 2) {
       player.seekTo(targetFrame);
-      requestAnimationFrame(() => { playerRef.current?.play(); });
     }
   }, [targetFrame, isPlaying, fps]);
 
@@ -118,7 +117,7 @@ export default function TransitionPreview({
     toAssetType: transition.toAssetType,
     fromStartFrom: transition.fromStartFrom,
     toStartFrom: transition.toStartFrom,
-    params: transition.params,
+    params: { ...transition.params, __previewMode: true },
   }), [
     transition.transitionFileId,
     transition.fromSrc,
