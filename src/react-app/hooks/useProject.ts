@@ -280,7 +280,7 @@ export function useProject() {
   const [settings, setSettings] = useState<ProjectSettings>({
     width: 1920,
     height: 1080,
-    fps: 30,
+    fps: 60,
   });
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState('');
@@ -991,7 +991,7 @@ export function useProject() {
     setTimelineTabs([{ id: 'main', name: 'Main', type: 'main', clips: [], timelineTransitions: [] }]);
     setActiveTabId('main');
     setRenderOptions(defaultRenderOptions);
-    setSettings({ width: 1920, height: 1080, fps: 30 });
+    setSettings({ width: 1920, height: 1080, fps: 60 });
     setLoading(false);
     setStatus('');
   }, []);
@@ -1041,7 +1041,7 @@ export function useProject() {
         // Don't load tracks from server - always use client's default tracks
         // Server tracks may be outdated (e.g., missing T1, V3, A2)
         if (data.clips) setClips(data.clips);
-        if (data.settings) setSettings(data.settings);
+        if (data.settings) setSettings({ ...data.settings, fps: 60 });
         if (data.captionData) setCaptionData(data.captionData);
         if (data.transitions) setTransitions(data.transitions);
         if (data.timelineTransitions) setTimelineTransitions(data.timelineTransitions);

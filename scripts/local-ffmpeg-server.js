@@ -2086,6 +2086,75 @@ async function handleAssetThumbnail(req, res, sessionId, assetId) {
   createReadStream(asset.thumbPath).pipe(res);
 }
 
+// Extract full-resolution frame at specific timestamp
+async function handleAssetFrame(req, res, sessionId, assetId, query) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+
+  const asset = session.assets.get(assetId);
+  if (!asset) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Asset not found' }));
+    return;
+  }
+
+  const timestamp = parseFloat(query.get('t') || '0');
+  if (isNaN(timestamp) || timestamp < 0) {
+    res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Invalid timestamp' }));
+    return;
+  }
+
+  // Disk cache: {sessionAssetsDir}/frames/{assetId}-{timestamp}.jpg
+  const framesDir = join(session.assetsDir, 'frames');
+  const cacheKey = `${assetId}-${timestamp.toFixed(3)}`;
+  const cachePath = join(framesDir, `${cacheKey}.jpg`);
+
+  if (existsSync(cachePath)) {
+    const { stat } = await import('fs/promises');
+    const stats = await stat(cachePath);
+    res.writeHead(200, {
+      'Content-Type': 'image/jpeg',
+      'Content-Length': stats.size,
+      'Cache-Control': 'public, max-age=86400',
+      'Access-Control-Allow-Origin': '*',
+    });
+    createReadStream(cachePath).pipe(res);
+    return;
+  }
+
+  try {
+    if (!existsSync(framesDir)) mkdirSync(framesDir, { recursive: true });
+
+    const args = [
+      '-y', '-ss', timestamp.toString(),
+      '-i', asset.path,
+      '-frames:v', '1',
+      '-q:v', '2',
+      cachePath
+    ];
+    await runFFmpeg(args, 'frame-extract', { timeout: 10000 });
+
+    const { stat } = await import('fs/promises');
+    const stats = await stat(cachePath);
+    res.writeHead(200, {
+      'Content-Type': 'image/jpeg',
+      'Content-Length': stats.size,
+      'Cache-Control': 'public, max-age=86400',
+      'Access-Control-Allow-Origin': '*',
+    });
+    createReadStream(cachePath).pipe(res);
+  } catch (err) {
+    console.error(`[${sessionId}] Frame extraction failed:`, err.message);
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Frame extraction failed' }));
+  }
+}
+
 // Stream asset
 async function handleAssetStream(req, res, sessionId, assetId) {
   const session = getSession(sessionId);
@@ -8804,6 +8873,9 @@ const server = http.createServer(async (req, res) => {
         await handleAssetThumbnail(req, res, sessionId, assetId);
       } else if (req.method === 'GET' && subAction === 'stream') {
         await handleAssetStream(req, res, sessionId, assetId);
+      } else if (req.method === 'GET' && subAction === 'frame') {
+        const query = new URL(req.url, `http://${req.headers.host}`).searchParams;
+        await handleAssetFrame(req, res, sessionId, assetId, query);
       } else {
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Asset endpoint not found' }));

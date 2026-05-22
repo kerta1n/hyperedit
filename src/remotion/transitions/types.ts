@@ -17,6 +17,7 @@ export type TransitionParamSchema = Record<string, TransitionParamDef>;
 export interface TransitionMeta {
   name: string;
   description?: string;
+  livePreview?: boolean;
 }
 
 // --- Props passed to every custom transition .tsx component ---
