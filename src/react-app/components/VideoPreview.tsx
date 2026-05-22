@@ -452,6 +452,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
           fps={fps}
           width={isVertical ? 1080 : 1920}
           height={isVertical ? 1920 : 1080}
+          isPlaying={isPlaying}
         />
       ))}
 

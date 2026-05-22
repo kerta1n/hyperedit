@@ -313,11 +313,13 @@ export default function Home() {
             : fromIsVideo && sid
               ? `http://localhost:3333/session/${sid}/assets/${fromAsset.id}/frame?t=${fromTimestamp.toFixed(3)}`
               : fromAsset ? (fromAsset.streamUrl || getAssetStreamUrl(fromAsset.id) || undefined) : undefined,
-          toSrc: toIsVideo && sid
-            ? `http://localhost:3333/session/${sid}/assets/${toAsset.id}/frame?t=${toTimestamp.toFixed(3)}`
-            : toAsset ? (toAsset.streamUrl || getAssetStreamUrl(toAsset.id) || undefined) : undefined,
+          toSrc: needsLiveFrom && toIsVideo
+            ? (toAsset.streamUrl || getAssetStreamUrl(toAsset.id) || undefined)
+            : toIsVideo && sid
+              ? `http://localhost:3333/session/${sid}/assets/${toAsset.id}/frame?t=${toTimestamp.toFixed(3)}`
+              : toAsset ? (toAsset.streamUrl || getAssetStreamUrl(toAsset.id) || undefined) : undefined,
           fromAssetType: needsLiveFrom && fromIsVideo ? 'video' as const : fromAsset ? 'image' as const : undefined,
-          toAssetType: toAsset ? 'image' as const : undefined,
+          toAssetType: needsLiveFrom && toIsVideo ? 'video' as const : toAsset ? 'image' as const : undefined,
           fromStartFrom: fromClip
             ? Math.max(0, Math.round(((t.startTime - fromClip.start) + (fromClip.inPoint || 0)) * settings.fps))
             : 0,
@@ -325,6 +327,7 @@ export default function Home() {
             ? Math.max(0, Math.round(((t.startTime - toClip.start) + (toClip.inPoint || 0)) * settings.fps))
             : 0,
           params: t.params,
+          livePreview: needsLiveFrom,
         };
       });
   }, [previewAssetId, activeTabId, timelineTransitions, timelineTabs, currentTime, activeClips, assets, getAssetStreamUrl, settings.fps, session?.sessionId]);

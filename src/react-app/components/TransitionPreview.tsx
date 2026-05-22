@@ -15,6 +15,7 @@ export interface ActiveTransition {
   fromStartFrom?: number;
   toStartFrom?: number;
   params: Record<string, number | string | boolean>;
+  livePreview?: boolean;
 }
 
 interface TransitionPreviewProps {
@@ -23,6 +24,7 @@ interface TransitionPreviewProps {
   fps: number;
   width: number;
   height: number;
+  isPlaying?: boolean;
 }
 
 // Inner composition that renders the actual transition component
@@ -70,19 +72,46 @@ export default function TransitionPreview({
   fps,
   width,
   height,
+  isPlaying = false,
 }: TransitionPreviewProps) {
   const playerRef = useRef<PlayerRef>(null);
+  const livePlayingRef = useRef(false);
 
   const durationInFrames = Math.max(1, Math.round(transition.durationSec * fps));
+  const isLive = transition.livePreview === true;
 
   const progressTime = currentTime - transition.startTime;
   const targetFrame = Math.max(0, Math.min(durationInFrames - 1, Math.round(progressTime * fps)));
 
-  // Seek-driven: Player never plays, just renders the frame we tell it to.
-  // Single clock source (Home.tsx rAF) = zero drift between Player and native videos.
+  // Live mode: play() once and free-run. Drift-correct when Player falls out of sync.
   useEffect(() => {
-    playerRef.current?.seekTo(targetFrame);
-  }, [targetFrame]);
+    const player = playerRef.current;
+    if (!player || !isLive) return;
+
+    if (isPlaying) {
+      if (!livePlayingRef.current) {
+        player.seekTo(targetFrame);
+        player.play();
+        livePlayingRef.current = true;
+      } else {
+        const drift = Math.abs(targetFrame - player.getCurrentFrame());
+        if (drift > 3) {
+          player.seekTo(targetFrame);
+        }
+      }
+    } else {
+      player.pause();
+      player.seekTo(targetFrame);
+      livePlayingRef.current = false;
+    }
+  }, [isLive, isPlaying, targetFrame]);
+
+  // Non-live mode: seek-driven (image-only transitions, no decoders)
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player || isLive) return;
+    player.seekTo(targetFrame);
+  }, [isLive, targetFrame]);
 
   const inputProps = useMemo(() => ({
     transitionFileId: transition.transitionFileId,
