@@ -77,6 +77,7 @@ export default function TransitionPreview({
   const playerRef = useRef<PlayerRef>(null);
   const hasStartedRef = useRef(false);
   const bufferingRef = useRef(false);
+  const startupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const durationInFrames = Math.max(1, Math.round(transition.durationSec * fps));
   const progressTime = currentTime - transition.startTime;
@@ -112,29 +113,53 @@ export default function TransitionPreview({
     };
   }, [onBufferingChange]);
 
-  // Play-driven: seekTo + play ONCE on activation, seekTo while paused for scrubbing
+  // Play-driven with startup sync: pause native videos briefly, let Player start,
+  // then resume together. isPlaying is raw user state (not affected by transitionBuffering).
   useEffect(() => {
     const player = playerRef.current;
     if (!player) return;
 
     if (isPlaying) {
       if (!hasStartedRef.current) {
+        onBufferingChange?.(true);
         player.seekTo(targetFrame);
         player.play();
         hasStartedRef.current = true;
+
+        startupTimerRef.current = setTimeout(() => {
+          startupTimerRef.current = null;
+          if (!bufferingRef.current) {
+            onBufferingChange?.(false);
+          }
+        }, 100);
       }
     } else {
       if (hasStartedRef.current) {
         player.pause();
         hasStartedRef.current = false;
       }
+      if (startupTimerRef.current !== null) {
+        clearTimeout(startupTimerRef.current);
+        startupTimerRef.current = null;
+      }
       player.seekTo(targetFrame);
     }
-  }, [targetFrame, isPlaying]);
+  }, [targetFrame, isPlaying, onBufferingChange]);
 
   useEffect(() => {
     hasStartedRef.current = false;
   }, [transition.id]);
+
+  // Cleanup on unmount — prevent stuck transitionBuffering
+  useEffect(() => {
+    return () => {
+      if (startupTimerRef.current !== null) {
+        clearTimeout(startupTimerRef.current);
+        startupTimerRef.current = null;
+      }
+      onBufferingChange?.(false);
+    };
+  }, [onBufferingChange]);
 
   const inputProps = useMemo(() => ({
     transitionFileId: transition.transitionFileId,

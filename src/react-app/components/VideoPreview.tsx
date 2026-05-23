@@ -37,6 +37,7 @@ interface VideoPreviewProps {
   selectedLayerId?: string | null;
   activeTransitions?: ActiveTransition[];
   currentTime?: number;
+  isTimelinePlaying?: boolean;
   onTransitionBuffering?: (isBuffering: boolean) => void;
 }
 
@@ -93,6 +94,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   selectedLayerId,
   activeTransitions = [],
   currentTime = 0,
+  isTimelinePlaying = false,
   onTransitionBuffering,
 }, ref) => {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -155,10 +157,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     const video = videoRef.current;
     if (!video || baseLayerClipTime === undefined) return;
     if (isPlaying) return;
-
-    if (Math.abs(video.currentTime - baseLayerClipTime) > 0.1) {
-      video.currentTime = baseLayerClipTime;
-    }
+    video.currentTime = baseLayerClipTime;
   }, [baseLayerClipTime, isPlaying]);
 
   // Play/pause control for base video
@@ -198,9 +197,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     overlayMediaLayers.forEach((layer) => {
       const mediaEl = overlayVideoRefs.current.get(layer.id);
       if (mediaEl && layer.clipTime !== undefined) {
-        if (Math.abs(mediaEl.currentTime - layer.clipTime) > 0.1) {
-          mediaEl.currentTime = layer.clipTime;
-        }
+        mediaEl.currentTime = layer.clipTime;
       }
     });
   }, [layers, isPlaying]);
@@ -459,7 +456,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
           fps={30}
           width={isVertical ? 1080 : 1920}
           height={isVertical ? 1920 : 1080}
-          isPlaying={isPlaying}
+          isPlaying={isTimelinePlaying}
           onBufferingChange={onTransitionBuffering}
         />
       ))}

@@ -2251,6 +2251,7 @@ export default function Home() {
                 ref={videoPreviewRef}
                 layers={previewLayers}
                 isPlaying={effectiveIsPlaying && !previewAssetId}
+                isTimelinePlaying={isPlaying && !previewAssetId}
                 aspectRatio={aspectRatio}
                 onLayerMove={handleLayerMove}
                 onLayerSelect={handleLayerSelect}
