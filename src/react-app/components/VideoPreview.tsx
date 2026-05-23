@@ -37,6 +37,7 @@ interface VideoPreviewProps {
   selectedLayerId?: string | null;
   activeTransitions?: ActiveTransition[];
   currentTime?: number;
+  onTransitionBuffering?: (isBuffering: boolean) => void;
 }
 
 export interface VideoPreviewHandle {
@@ -92,6 +93,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   selectedLayerId,
   activeTransitions = [],
   currentTime = 0,
+  onTransitionBuffering,
 }, ref) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const loadedSrcRef = useRef<string | null>(null);
@@ -457,6 +459,8 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
           fps={30}
           width={isVertical ? 1080 : 1920}
           height={isVertical ? 1920 : 1080}
+          isPlaying={isPlaying}
+          onBufferingChange={onTransitionBuffering}
         />
       ))}
 

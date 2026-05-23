@@ -22,6 +22,7 @@ import SessionManager from '@/react-app/components/SessionManager';
 import { Sparkles, ListOrdered, Copy, Check, X, Download, Play, Palette, Film } from 'lucide-react';
 import type { ActiveTransition } from '@/react-app/components/TransitionPreview';
 import type { TemplateId } from '@/remotion/templates';
+import { prefetch } from 'remotion';
 
 interface ChapterData {
   chapters: Array<{ start: number; title: string }>;
@@ -48,10 +49,12 @@ export default function Home() {
   const [showGifSearch, setShowGifSearch] = useState(false);
   const [showRenderSettings, setShowRenderSettings] = useState(false);
   const [recommendedConcurrency, setRecommendedConcurrency] = useState(4);
+  const [transitionBuffering, setTransitionBuffering] = useState(false);
 
   const videoPreviewRef = useRef<VideoPreviewHandle>(null);
   const playbackRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(0);
+  const prefetchHandlesRef = useRef<Map<string, { free: () => void }>>(new Map());
 
   // Use the new project hook for multi-asset management
   const {
@@ -309,19 +312,69 @@ export default function Home() {
       });
   }, [previewAssetId, activeTabId, timelineTransitions, timelineTabs, currentTime, activeClips, assets, getAssetStreamUrl]);
 
+  // Prefetch upcoming transition video sources into browser cache
+  useEffect(() => {
+    const LOOKAHEAD_SEC = 5;
+    const currentTransitions = activeTabId === 'main'
+      ? timelineTransitions
+      : (timelineTabs.find(t => t.id === activeTabId)?.timelineTransitions || []);
+
+    const upcomingUrls = new Set<string>();
+
+    for (const t of currentTransitions) {
+      if (currentTime >= t.startTime - LOOKAHEAD_SEC && currentTime < t.startTime + t.durationSec) {
+        const fromClip = t.fromClipId ? activeClips.find(c => c.id === t.fromClipId) : null;
+        const toClip = t.toClipId ? activeClips.find(c => c.id === t.toClipId) : null;
+        const fromAsset = fromClip ? assets.find(a => a.id === fromClip.assetId) : null;
+        const toAsset = toClip ? assets.find(a => a.id === toClip.assetId) : null;
+
+        if (fromAsset?.type === 'video') {
+          const url = fromAsset.streamUrl || getAssetStreamUrl(fromAsset.id);
+          if (url) upcomingUrls.add(url);
+        }
+        if (toAsset?.type === 'video') {
+          const url = toAsset.streamUrl || getAssetStreamUrl(toAsset.id);
+          if (url) upcomingUrls.add(url);
+        }
+      }
+    }
+
+    for (const url of upcomingUrls) {
+      if (!prefetchHandlesRef.current.has(url)) {
+        prefetchHandlesRef.current.set(url, prefetch(url));
+      }
+    }
+
+    for (const [url, handle] of prefetchHandlesRef.current) {
+      if (!upcomingUrls.has(url)) {
+        handle.free();
+        prefetchHandlesRef.current.delete(url);
+      }
+    }
+  }, [currentTime, activeTabId, timelineTransitions, timelineTabs, activeClips, assets, getAssetStreamUrl]);
+
+  useEffect(() => {
+    return () => {
+      for (const handle of prefetchHandlesRef.current.values()) handle.free();
+      prefetchHandlesRef.current.clear();
+    };
+  }, []);
+
   // Get duration based on active tab's clips
   const duration = useMemo(() => {
     if (activeClips.length === 0) return 0;
     return Math.max(...activeClips.map(c => c.start + c.duration));
   }, [activeClips]);
 
+  const effectiveIsPlaying = isPlaying && !transitionBuffering;
+
   // Timeline playback effect
   useEffect(() => {
-    if (isPlaying && duration > 0) {
+    if (effectiveIsPlaying && duration > 0) {
       lastTimeRef.current = performance.now();
 
       const animate = (now: number) => {
-        const delta = (now - lastTimeRef.current) / 1000; // Convert to seconds
+        const delta = (now - lastTimeRef.current) / 1000;
         lastTimeRef.current = now;
 
         setCurrentTime(prev => {
@@ -344,7 +397,7 @@ export default function Home() {
         }
       };
     }
-  }, [isPlaying, duration]);
+  }, [effectiveIsPlaying, duration]);
 
   // Handle play/pause
   const handlePlayPause = useCallback(() => {
@@ -2197,13 +2250,14 @@ export default function Home() {
               <VideoPreview
                 ref={videoPreviewRef}
                 layers={previewLayers}
-                isPlaying={isPlaying && !previewAssetId}
+                isPlaying={effectiveIsPlaying && !previewAssetId}
                 aspectRatio={aspectRatio}
                 onLayerMove={handleLayerMove}
                 onLayerSelect={handleLayerSelect}
                 selectedLayerId={selectedClipId}
                 activeTransitions={previewActiveTransitions}
                 currentTime={currentTime}
+                onTransitionBuffering={setTransitionBuffering}
               />
             ) : clips.length > 0 ? (
               // Assets exist but playhead is not over any clip

@@ -23,9 +23,10 @@ interface TransitionPreviewProps {
   fps: number;
   width: number;
   height: number;
+  isPlaying?: boolean;
+  onBufferingChange?: (isBuffering: boolean) => void;
 }
 
-// Inner composition that renders the actual transition component
 function TransitionComposition({
   transitionFileId,
   fromSrc,
@@ -64,31 +65,76 @@ function TransitionComposition({
   );
 }
 
-/**
- * Renders a single active transition using @remotion/player.
- * Mounts once per transition window, drives frame position via seekTo — never re-mounts per tick.
- */
 export default function TransitionPreview({
   transition,
   currentTime,
   fps,
   width,
   height,
+  isPlaying,
+  onBufferingChange,
 }: TransitionPreviewProps) {
   const playerRef = useRef<PlayerRef>(null);
+  const hasStartedRef = useRef(false);
+  const bufferingRef = useRef(false);
 
   const durationInFrames = Math.max(1, Math.round(transition.durationSec * fps));
-
-  // Calculate which frame within the transition we're at
   const progressTime = currentTime - transition.startTime;
   const targetFrame = Math.max(0, Math.min(durationInFrames - 1, Math.round(progressTime * fps)));
 
-  // Drive frame position via seekTo — the Player stays mounted
+  // Relay Player buffering events to coordinate with main timeline
   useEffect(() => {
-    if (playerRef.current) {
-      playerRef.current.seekTo(targetFrame);
+    const player = playerRef.current;
+    if (!player) return;
+
+    const handleWaiting = () => {
+      bufferingRef.current = true;
+      onBufferingChange?.(true);
+    };
+
+    const handleResume = () => {
+      if (bufferingRef.current) {
+        bufferingRef.current = false;
+        onBufferingChange?.(false);
+      }
+    };
+
+    player.addEventListener('waiting', handleWaiting);
+    player.addEventListener('resume', handleResume);
+
+    return () => {
+      player.removeEventListener('waiting', handleWaiting);
+      player.removeEventListener('resume', handleResume);
+      if (bufferingRef.current) {
+        bufferingRef.current = false;
+        onBufferingChange?.(false);
+      }
+    };
+  }, [onBufferingChange]);
+
+  // Play-driven: seekTo + play ONCE on activation, seekTo while paused for scrubbing
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player) return;
+
+    if (isPlaying) {
+      if (!hasStartedRef.current) {
+        player.seekTo(targetFrame);
+        player.play();
+        hasStartedRef.current = true;
+      }
+    } else {
+      if (hasStartedRef.current) {
+        player.pause();
+        hasStartedRef.current = false;
+      }
+      player.seekTo(targetFrame);
     }
-  }, [targetFrame]);
+  }, [targetFrame, isPlaying]);
+
+  useEffect(() => {
+    hasStartedRef.current = false;
+  }, [transition.id]);
 
   const inputProps = useMemo(() => ({
     transitionFileId: transition.transitionFileId,
@@ -119,6 +165,7 @@ export default function TransitionPreview({
       fps={fps}
       compositionWidth={width}
       compositionHeight={height}
+      initiallyMuted
       style={{
         position: 'absolute',
         inset: 0,
