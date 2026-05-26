@@ -23,6 +23,7 @@ interface TransitionPreviewProps {
   fps: number;
   width: number;
   height: number;
+  isPlaying?: boolean;
 }
 
 // Inner composition that renders the actual transition component
@@ -74,8 +75,11 @@ export default function TransitionPreview({
   fps,
   width,
   height,
+  isPlaying,
 }: TransitionPreviewProps) {
   const playerRef = useRef<PlayerRef>(null);
+  const livePlayingRef = useRef(false);
+  const prevTargetFrameRef = useRef(0);
 
   const durationInFrames = Math.max(1, Math.round(transition.durationSec * fps));
 
@@ -83,12 +87,30 @@ export default function TransitionPreview({
   const progressTime = currentTime - transition.startTime;
   const targetFrame = Math.max(0, Math.min(durationInFrames - 1, Math.round(progressTime * fps)));
 
-  // Drive frame position via seekTo — the Player stays mounted
+  useEffect(() => { livePlayingRef.current = false; }, [transition.id]);
+
   useEffect(() => {
-    if (playerRef.current) {
-      playerRef.current.seekTo(targetFrame);
+    const player = playerRef.current;
+    if (!player) return;
+    const frameDelta = Math.abs(targetFrame - prevTargetFrameRef.current);
+    prevTargetFrameRef.current = targetFrame;
+
+    if (isPlaying) {
+      if (!livePlayingRef.current) {
+        player.seekTo(targetFrame);
+        player.play();
+        player.unmute();
+        livePlayingRef.current = true;
+      } else if (frameDelta > fps) {
+        player.seekTo(targetFrame);
+        player.play();
+      }
+    } else {
+      player.pause();
+      player.seekTo(targetFrame);
+      livePlayingRef.current = false;
     }
-  }, [targetFrame]);
+  }, [isPlaying, targetFrame, fps]);
 
   const inputProps = useMemo(() => ({
     transitionFileId: transition.transitionFileId,
@@ -119,6 +141,7 @@ export default function TransitionPreview({
       fps={fps}
       compositionWidth={width}
       compositionHeight={height}
+      initiallyMuted
       style={{
         position: 'absolute',
         inset: 0,
@@ -126,6 +149,7 @@ export default function TransitionPreview({
         height: '100%',
         zIndex: 50,
         pointerEvents: 'none',
+        backgroundColor: '#000',
       }}
     />
   );

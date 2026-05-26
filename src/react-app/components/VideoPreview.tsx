@@ -97,6 +97,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   const loadedSrcRef = useRef<string | null>(null);
   const overlayVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
   const containerRef = useRef<HTMLDivElement>(null);
+  const hasActiveTransition = (activeTransitions?.length ?? 0) > 0;
   const [draggingLayer, setDraggingLayer] = useState<string | null>(null);
   const [dragStart, setDragStart] = useState<{ x: number; y: number; layerX: number; layerY: number } | null>(null);
 
@@ -148,11 +149,16 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     }
   }, [baseLayerUrl]);
 
-  // Seek control for base video (only when paused/scrubbing)
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.muted = hasActiveTransition;
+  }, [hasActiveTransition]);
+
+  // Seek control for base video
   useEffect(() => {
     const video = videoRef.current;
     if (!video || baseLayerClipTime === undefined) return;
-    if (isPlaying) return;
 
     if (Math.abs(video.currentTime - baseLayerClipTime) > 0.1) {
       video.currentTime = baseLayerClipTime;
@@ -184,10 +190,8 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     });
   }, [isPlaying]);
 
-  // Sync overlay video and audio seeking when scrubbing
+  // Sync overlay video and audio seeking
   useEffect(() => {
-    if (isPlaying) return; // Don't interfere during playback
-
     // Find overlay video and audio layers and sync their time
     const overlayMediaLayers = layers.filter(
       l => (l.type === 'video' && l.trackId !== 'V1') || l.type === 'audio'
@@ -330,7 +334,6 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
               style={styles}
               playsInline
               preload="auto"
-              muted
               onLoadedData={(e) => {
                 // Seek to correct time when loaded
                 const video = e.currentTarget;
@@ -457,6 +460,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
           fps={30}
           width={isVertical ? 1080 : 1920}
           height={isVertical ? 1920 : 1080}
+          isPlaying={isPlaying}
         />
       ))}
 
