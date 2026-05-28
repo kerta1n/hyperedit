@@ -120,6 +120,9 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   currentTimeRef.current = currentTime;
   const activeTransitionsRef = useRef(activeTransitions);
   activeTransitionsRef.current = activeTransitions;
+  const baseLayerClipTimeRef = useRef<number | undefined>(undefined);
+  const layerClipTimesRef = useRef<Map<string, number>>(new Map());
+  const wasPlayingRef = useRef(false);
   const [draggingLayer, setDraggingLayer] = useState<string | null>(null);
   const hasActiveTransition = activeTransitions.length > 0;
   const [dragStart, setDragStart] = useState<{ x: number; y: number; layerX: number; layerY: number } | null>(null);
@@ -129,6 +132,16 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   const baseLayerId = foundBaseLayer?.id;
   const baseLayerUrl = foundBaseLayer?.url;
   const baseLayerClipTime = foundBaseLayer?.clipTime;
+  baseLayerClipTimeRef.current = baseLayerClipTime;
+
+  // Update overlay clip times ref synchronously each render
+  const newClipTimes = new Map<string, number>();
+  for (const l of layers) {
+    if (((l.type === 'video' && l.trackId !== 'V1') || l.type === 'audio') && l.clipTime !== undefined) {
+      newClipTimes.set(l.id, l.clipTime);
+    }
+  }
+  layerClipTimesRef.current = newClipTimes;
 
   // Memoize to prevent effect triggers when only caption layers change
   const baseVideoLayer = useMemo(() => {
@@ -172,29 +185,102 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     }
   }, [baseLayerUrl]);
 
-  // Seek control for base video
+  // Play/pause controller — force-syncs all videos on pause→play, pauses all on play→pause
   useEffect(() => {
-    const video = videoRef.current;
-    if (!video || baseLayerClipTime === undefined) return;
-
-    if (Math.abs(video.currentTime - baseLayerClipTime) > 0.1) {
-      video.currentTime = baseLayerClipTime;
-    }
-  }, [baseLayerClipTime, isPlaying]);
-
-  // Play/pause control for base video
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
+    const baseVideo = videoRef.current;
 
     if (isPlaying) {
-      video.play().catch((err) => {
-        console.error('[VideoPreview] Play failed:', err.name, err.message);
-      });
+      if (!wasPlayingRef.current) {
+        const baseCT = baseLayerClipTimeRef.current;
+        if (baseVideo && baseCT !== undefined) {
+          baseVideo.currentTime = baseCT;
+        }
+        overlayVideoRefs.current.forEach((el, id) => {
+          const ct = layerClipTimesRef.current.get(id);
+          if (ct !== undefined) el.currentTime = ct;
+        });
+
+        baseVideo?.play().catch((err) => {
+          console.error('[VideoPreview] Play failed:', err.name, err.message);
+        });
+        overlayVideoRefs.current.forEach(v => v.play().catch(() => {}));
+      }
     } else {
-      video.pause();
+      baseVideo?.pause();
+      if (baseVideo) baseVideo.playbackRate = 1.0;
+      overlayVideoRefs.current.forEach(v => { v.pause(); v.playbackRate = 1.0; });
     }
+
+    wasPlayingRef.current = isPlaying;
   }, [isPlaying]);
+
+  // rAF drift correction — adjusts playbackRate to converge on target (no seeks = no audio stutter)
+  useEffect(() => {
+    if (!isPlaying) return;
+    let animId: number;
+
+    const correctDrift = () => {
+      const base = videoRef.current;
+      const baseTarget = baseLayerClipTimeRef.current;
+      if (base && baseTarget !== undefined) {
+        const drift = base.currentTime - baseTarget;
+        if (Math.abs(drift) > 0.3) {
+          base.currentTime = baseTarget;
+          base.playbackRate = 1.0;
+        } else if (Math.abs(drift) > 0.01) {
+          base.playbackRate = Math.max(0.95, Math.min(1.05, 1.0 - drift * 3));
+        } else {
+          base.playbackRate = 1.0;
+        }
+      }
+
+      overlayVideoRefs.current.forEach((el, id) => {
+        const target = layerClipTimesRef.current.get(id);
+        if (target !== undefined) {
+          if (el.paused) {
+            el.currentTime = target;
+            el.play().catch(() => {});
+          } else {
+            const drift = el.currentTime - target;
+            if (Math.abs(drift) > 0.3) {
+              el.currentTime = target;
+              el.playbackRate = 1.0;
+            } else if (Math.abs(drift) > 0.01) {
+              el.playbackRate = Math.max(0.95, Math.min(1.05, 1.0 - drift * 3));
+            } else {
+              el.playbackRate = 1.0;
+            }
+          }
+        }
+      });
+
+      animId = requestAnimationFrame(correctDrift);
+    };
+
+    animId = requestAnimationFrame(correctDrift);
+    return () => cancelAnimationFrame(animId);
+  }, [isPlaying]);
+
+  // Scrub sync (paused only) — tight tolerance for precise preview
+  useEffect(() => {
+    if (isPlaying) return;
+
+    const base = videoRef.current;
+    if (base && baseLayerClipTime !== undefined) {
+      if (Math.abs(base.currentTime - baseLayerClipTime) > 0.01) {
+        base.currentTime = baseLayerClipTime;
+      }
+    }
+
+    overlayVideoRefs.current.forEach((el, id) => {
+      const ct = layerClipTimesRef.current.get(id);
+      if (ct !== undefined) {
+        if (Math.abs(el.currentTime - ct) > 0.01) {
+          el.currentTime = ct;
+        }
+      }
+    });
+  }, [isPlaying, baseLayerClipTime, layers]);
 
   // --- Canvas transition compositing ---
 
@@ -331,7 +417,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
             }
           } else {
             hidden.pause();
-            if (Math.abs(hidden.currentTime - targetTime) > 0.05) {
+            if (Math.abs(hidden.currentTime - targetTime) > 0.03) {
               hidden.currentTime = targetTime;
             }
           }
@@ -348,7 +434,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
             }
           } else {
             hidden.pause();
-            if (Math.abs(hidden.currentTime - targetTime) > 0.05) {
+            if (Math.abs(hidden.currentTime - targetTime) > 0.03) {
               hidden.currentTime = targetTime;
             }
           }
@@ -373,33 +459,6 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     };
   }, []);
 
-  // Play/pause control for overlay videos (V2, V3, etc.)
-  useEffect(() => {
-    overlayVideoRefs.current.forEach((video) => {
-      if (isPlaying) {
-        video.play().catch(() => {});
-      } else {
-        video.pause();
-      }
-    });
-  }, [isPlaying]);
-
-  // Sync overlay video and audio seeking
-  useEffect(() => {
-    // Find overlay video and audio layers and sync their time
-    const overlayMediaLayers = layers.filter(
-      l => (l.type === 'video' && l.trackId !== 'V1') || l.type === 'audio'
-    );
-
-    overlayMediaLayers.forEach((layer) => {
-      const mediaEl = overlayVideoRefs.current.get(layer.id);
-      if (mediaEl && layer.clipTime !== undefined) {
-        if (Math.abs(mediaEl.currentTime - layer.clipTime) > 0.1) {
-          mediaEl.currentTime = layer.clipTime;
-        }
-      }
-    });
-  }, [layers, isPlaying]);
 
   // Seek on load
   const handleLoaded = () => {
