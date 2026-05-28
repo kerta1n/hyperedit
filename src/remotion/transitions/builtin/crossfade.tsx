@@ -12,7 +12,7 @@ const Crossfade: React.FC<CustomTransitionProps> = ({ fromSrc, toSrc, fromAssetT
       {fromSrc && (
         <AbsoluteFill style={{ opacity: 1 - progress }}>
           {fromAssetType === 'video' ? (
-            <OffthreadVideo src={fromSrc} startFrom={fromStartFrom} style={{ width: '100%', height: '100%', objectFit: 'cover' }} pauseWhenBuffering={false} />
+            <OffthreadVideo src={fromSrc} startFrom={fromStartFrom} acceptableTimeShiftInSeconds={0.05} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
           ) : (
             <Img src={fromSrc} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
           )}
@@ -21,7 +21,7 @@ const Crossfade: React.FC<CustomTransitionProps> = ({ fromSrc, toSrc, fromAssetT
       {toSrc && (
         <AbsoluteFill style={{ opacity: progress }}>
           {toAssetType === 'video' ? (
-            <OffthreadVideo src={toSrc} startFrom={toStartFrom} style={{ width: '100%', height: '100%', objectFit: 'cover' }} pauseWhenBuffering={false} />
+            <OffthreadVideo src={toSrc} startFrom={toStartFrom} acceptableTimeShiftInSeconds={0.05} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
           ) : (
             <Img src={toSrc} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
           )}

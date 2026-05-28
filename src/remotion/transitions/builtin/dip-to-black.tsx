@@ -20,7 +20,7 @@ const DipToBlack: React.FC<CustomTransitionProps> = ({ fromSrc, toSrc, fromAsset
       {isFirstHalf && fromSrc && (
         <AbsoluteFill>
           {fromAssetType === 'video' ? (
-            <OffthreadVideo src={fromSrc} startFrom={fromStartFrom} style={{ width: '100%', height: '100%', objectFit: 'cover' }} pauseWhenBuffering={false} />
+            <OffthreadVideo src={fromSrc} startFrom={fromStartFrom} acceptableTimeShiftInSeconds={0.05} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
           ) : (
             <Img src={fromSrc} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
           )}
@@ -29,7 +29,7 @@ const DipToBlack: React.FC<CustomTransitionProps> = ({ fromSrc, toSrc, fromAsset
       {!isFirstHalf && toSrc && (
         <AbsoluteFill>
           {toAssetType === 'video' ? (
-            <OffthreadVideo src={toSrc} startFrom={toStartFrom} style={{ width: '100%', height: '100%', objectFit: 'cover' }} pauseWhenBuffering={false} />
+            <OffthreadVideo src={toSrc} startFrom={toStartFrom} acceptableTimeShiftInSeconds={0.05} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
           ) : (
             <Img src={toSrc} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
           )}

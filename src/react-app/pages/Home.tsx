@@ -20,7 +20,7 @@ import { readNDJSONStream } from '@/react-app/utils/ndjson';
 import { useVideoSession } from '@/react-app/hooks/useVideoSession';
 import SessionManager from '@/react-app/components/SessionManager';
 import { Sparkles, ListOrdered, Copy, Check, X, Download, Play, Palette, Film } from 'lucide-react';
-import type { ActiveTransition } from '@/react-app/components/TransitionPreview';
+import type { ActiveTransition } from '@/react-app/components/VideoPreview';
 import type { TemplateId } from '@/remotion/templates';
 
 interface ChapterData {
@@ -274,40 +274,47 @@ export default function Home() {
   const previewLayers = getPreviewLayers();
   const hasPreviewContent = previewLayers.length > 0;
 
-  // Detect active transitions at current playhead for preview overlay
-  const previewActiveTransitions = useMemo((): ActiveTransition[] => {
-    if (previewAssetId) return []; // No transitions in single-asset preview mode
+  // Stable object construction — only recomputes when transitions/clips/assets change, NOT per frame
+  const allTransitionPreviews = useMemo((): ActiveTransition[] => {
+    if (previewAssetId) return [];
     const currentTransitions = activeTabId === 'main'
       ? timelineTransitions
       : (timelineTabs.find(t => t.id === activeTabId)?.timelineTransitions || []);
 
-    return currentTransitions
-      .filter(t => currentTime >= t.startTime && currentTime < t.startTime + t.durationSec)
-      .map(t => {
-        const fromClip = t.fromClipId ? activeClips.find(c => c.id === t.fromClipId) : null;
-        const toClip = t.toClipId ? activeClips.find(c => c.id === t.toClipId) : null;
-        const fromAsset = fromClip ? assets.find(a => a.id === fromClip.assetId) : null;
-        const toAsset = toClip ? assets.find(a => a.id === toClip.assetId) : null;
+    return currentTransitions.map(t => {
+      const fromClip = t.fromClipId ? activeClips.find(c => c.id === t.fromClipId) : null;
+      const toClip = t.toClipId ? activeClips.find(c => c.id === t.toClipId) : null;
+      const fromAsset = fromClip ? assets.find(a => a.id === fromClip.assetId) : null;
+      const toAsset = toClip ? assets.find(a => a.id === toClip.assetId) : null;
 
-        return {
-          id: t.id,
-          transitionFileId: t.transitionFileId,
-          startTime: t.startTime,
-          durationSec: t.durationSec,
-          fromSrc: fromAsset ? (fromAsset.streamUrl || getAssetStreamUrl(fromAsset.id) || undefined) : undefined,
-          toSrc: toAsset ? (toAsset.streamUrl || getAssetStreamUrl(toAsset.id) || undefined) : undefined,
-          fromAssetType: fromAsset?.type === 'video' ? 'video' as const : fromAsset ? 'image' as const : undefined,
-          toAssetType: toAsset?.type === 'video' ? 'video' as const : toAsset ? 'image' as const : undefined,
-          fromStartFrom: fromClip
-            ? Math.max(0, Math.round(((t.startTime - fromClip.start) + (fromClip.inPoint || 0)) * 30))
-            : 0,
-          toStartFrom: toClip
-            ? Math.max(0, Math.round(((t.startTime - toClip.start) + (toClip.inPoint || 0)) * 30))
-            : 0,
-          params: t.params,
-        };
-      });
-  }, [previewAssetId, activeTabId, timelineTransitions, timelineTabs, currentTime, activeClips, assets, getAssetStreamUrl]);
+      return {
+        id: t.id,
+        transitionFileId: t.transitionFileId,
+        startTime: t.startTime,
+        durationSec: t.durationSec,
+        fromClipId: t.fromClipId ?? undefined,
+        toClipId: t.toClipId ?? undefined,
+        fromSrc: fromAsset ? (fromAsset.streamUrl || getAssetStreamUrl(fromAsset.id) || undefined) : undefined,
+        toSrc: toAsset ? (toAsset.streamUrl || getAssetStreamUrl(toAsset.id) || undefined) : undefined,
+        fromAssetType: fromAsset?.type === 'video' ? 'video' as const : fromAsset ? 'image' as const : undefined,
+        toAssetType: toAsset?.type === 'video' ? 'video' as const : toAsset ? 'image' as const : undefined,
+        fromStartSec: fromClip
+          ? Math.max(0, (t.startTime - fromClip.start) + (fromClip.inPoint || 0))
+          : 0,
+        toStartSec: toClip
+          ? Math.max(0, (t.startTime - toClip.start) + (toClip.inPoint || 0))
+          : 0,
+        params: t.params,
+      };
+    });
+  }, [previewAssetId, activeTabId, timelineTransitions, timelineTabs, activeClips, assets, getAssetStreamUrl]);
+
+  // Lightweight per-frame filter — returns SAME object references from allTransitionPreviews
+  const previewActiveTransitions = useMemo((): ActiveTransition[] => {
+    return allTransitionPreviews.filter(t =>
+      currentTime >= t.startTime && currentTime < t.startTime + t.durationSec
+    );
+  }, [allTransitionPreviews, currentTime]);
 
   // Get duration based on active tab's clips
   const duration = useMemo(() => {

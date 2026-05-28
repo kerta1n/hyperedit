@@ -1,8 +1,24 @@
 import { Play, Image as ImageIcon, Layers, Move } from 'lucide-react';
 import { useRef, useEffect, forwardRef, useImperativeHandle, useMemo, useState, useCallback } from 'react';
 import CaptionRenderer from './CaptionRenderer';
-import TransitionPreview, { type ActiveTransition } from './TransitionPreview';
+import { getCanvasDraw, getTransitionVolumes } from '@/remotion/transitions/canvas-draw';
 import type { CaptionWord, CaptionStyle } from '@/react-app/hooks/useProject';
+
+export interface ActiveTransition {
+  id: string;
+  transitionFileId: string;
+  startTime: number;
+  durationSec: number;
+  fromClipId?: string;
+  toClipId?: string;
+  fromSrc?: string;
+  toSrc?: string;
+  fromAssetType?: 'video' | 'image';
+  toAssetType?: 'video' | 'image';
+  fromStartSec: number;
+  toStartSec: number;
+  params: Record<string, number | string | boolean>;
+}
 
 interface ClipTransform {
   x?: number;
@@ -97,8 +113,15 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   const loadedSrcRef = useRef<string | null>(null);
   const overlayVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
   const containerRef = useRef<HTMLDivElement>(null);
-  const hasActiveTransition = (activeTransitions?.length ?? 0) > 0;
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const hiddenVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
+  const hiddenImageRefs = useRef<Map<string, HTMLImageElement>>(new Map());
+  const currentTimeRef = useRef(currentTime);
+  currentTimeRef.current = currentTime;
+  const activeTransitionsRef = useRef(activeTransitions);
+  activeTransitionsRef.current = activeTransitions;
   const [draggingLayer, setDraggingLayer] = useState<string | null>(null);
+  const hasActiveTransition = activeTransitions.length > 0;
   const [dragStart, setDragStart] = useState<{ x: number; y: number; layerX: number; layerY: number } | null>(null);
 
   // Find the base video layer (V1) for audio/playback control
@@ -149,12 +172,6 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     }
   }, [baseLayerUrl]);
 
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    video.muted = hasActiveTransition;
-  }, [hasActiveTransition]);
-
   // Seek control for base video
   useEffect(() => {
     const video = videoRef.current;
@@ -178,6 +195,183 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
       video.pause();
     }
   }, [isPlaying]);
+
+  // --- Canvas transition compositing ---
+
+  const getVideoSource = useCallback((clipId: string | undefined, src: string | undefined, assetType: string | undefined): CanvasImageSource | null => {
+    if (!clipId && !src) return null;
+
+    // Try native elements first
+    if (clipId) {
+      if (clipId === baseLayerId && videoRef.current) return videoRef.current;
+      const overlay = overlayVideoRefs.current.get(clipId);
+      if (overlay) return overlay;
+    }
+
+    // Hidden video/image fallback
+    if (src) {
+      if (assetType === 'image') {
+        let img = hiddenImageRefs.current.get(src);
+        if (!img) {
+          img = new Image();
+          img.crossOrigin = 'anonymous';
+          img.src = src;
+          hiddenImageRefs.current.set(src, img);
+        }
+        return img.complete ? img : null;
+      }
+      const hidden = hiddenVideoRefs.current.get(src);
+      if (hidden && hidden.readyState >= 2) return hidden;
+    }
+    return null;
+  }, [baseLayerId]);
+
+  const drawFrame = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const ct = currentTimeRef.current;
+    const transitions = activeTransitionsRef.current;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    for (const t of transitions) {
+      const progress = Math.max(0, Math.min(1, (ct - t.startTime) / t.durationSec));
+      const drawFn = getCanvasDraw(t.transitionFileId);
+      const fromEl = getVideoSource(t.fromClipId, t.fromSrc, t.fromAssetType);
+      const toEl = getVideoSource(t.toClipId, t.toSrc, t.toAssetType);
+      drawFn(ctx, fromEl, toEl, progress, canvas.width, canvas.height, t.params);
+
+      // Volume crossfade
+      const { fromVolume, toVolume } = getTransitionVolumes(t.transitionFileId, progress);
+      if (t.fromClipId) {
+        const fromVideo = t.fromClipId === baseLayerId ? videoRef.current : overlayVideoRefs.current.get(t.fromClipId);
+        if (fromVideo) fromVideo.volume = fromVolume;
+      }
+      if (t.toClipId) {
+        const toVideo = t.toClipId === baseLayerId ? videoRef.current : overlayVideoRefs.current.get(t.toClipId);
+        if (toVideo) toVideo.volume = toVolume;
+      }
+    }
+  }, [getVideoSource, baseLayerId]);
+
+  // rAF loop when playing with active transitions
+  useEffect(() => {
+    if (!hasActiveTransition || !isPlaying) return;
+    let animId: number;
+    const loop = () => {
+      drawFrame();
+      animId = requestAnimationFrame(loop);
+    };
+    animId = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(animId);
+  }, [hasActiveTransition, isPlaying, drawFrame]);
+
+  // Single draw on scrub (paused)
+  useEffect(() => {
+    if (!hasActiveTransition || isPlaying) return;
+    drawFrame();
+  }, [currentTime, hasActiveTransition, isPlaying, drawFrame]);
+
+  // Manage hidden videos for same-track transitions
+  useEffect(() => {
+    const neededSrcs = new Set<string>();
+    for (const t of activeTransitions) {
+      if (t.fromSrc && t.fromAssetType === 'video') {
+        const hasNative = (t.fromClipId === baseLayerId && videoRef.current) ||
+          (t.fromClipId && overlayVideoRefs.current.has(t.fromClipId));
+        if (!hasNative) neededSrcs.add(t.fromSrc);
+      }
+      if (t.toSrc && t.toAssetType === 'video') {
+        const hasNative = (t.toClipId === baseLayerId && videoRef.current) ||
+          (t.toClipId && overlayVideoRefs.current.has(t.toClipId));
+        if (!hasNative) neededSrcs.add(t.toSrc);
+      }
+    }
+
+    // Create missing hidden videos
+    for (const src of neededSrcs) {
+      if (!hiddenVideoRefs.current.has(src)) {
+        const v = document.createElement('video');
+        v.preload = 'auto';
+        v.playsInline = true;
+        v.muted = true;
+        v.src = src;
+        v.style.display = 'none';
+        document.body.appendChild(v);
+        hiddenVideoRefs.current.set(src, v);
+      }
+    }
+
+    // Remove stale hidden videos
+    for (const [src, v] of hiddenVideoRefs.current) {
+      if (!neededSrcs.has(src)) {
+        v.pause();
+        v.src = '';
+        v.load();
+        v.remove();
+        hiddenVideoRefs.current.delete(src);
+      }
+    }
+  }, [activeTransitions, baseLayerId]);
+
+  // Sync hidden video currentTime
+  useEffect(() => {
+    for (const t of activeTransitions) {
+      const elapsed = currentTime - t.startTime;
+      if (t.fromSrc && t.fromAssetType === 'video') {
+        const hidden = hiddenVideoRefs.current.get(t.fromSrc);
+        if (hidden) {
+          const targetTime = t.fromStartSec + elapsed;
+          if (isPlaying) {
+            if (hidden.paused) {
+              hidden.currentTime = targetTime;
+              hidden.play().catch(() => {});
+            }
+          } else {
+            hidden.pause();
+            if (Math.abs(hidden.currentTime - targetTime) > 0.05) {
+              hidden.currentTime = targetTime;
+            }
+          }
+        }
+      }
+      if (t.toSrc && t.toAssetType === 'video') {
+        const hidden = hiddenVideoRefs.current.get(t.toSrc);
+        if (hidden) {
+          const targetTime = t.toStartSec + elapsed;
+          if (isPlaying) {
+            if (hidden.paused) {
+              hidden.currentTime = targetTime;
+              hidden.play().catch(() => {});
+            }
+          } else {
+            hidden.pause();
+            if (Math.abs(hidden.currentTime - targetTime) > 0.05) {
+              hidden.currentTime = targetTime;
+            }
+          }
+        }
+      }
+    }
+  }, [activeTransitions, currentTime, isPlaying]);
+
+  // Reset volumes when transitions end + cleanup on unmount
+  useEffect(() => {
+    if (!hasActiveTransition) {
+      if (videoRef.current) videoRef.current.volume = 1;
+      overlayVideoRefs.current.forEach(v => { v.volume = 1; });
+    }
+  }, [hasActiveTransition]);
+
+  useEffect(() => {
+    const refs = hiddenVideoRefs.current;
+    return () => {
+      refs.forEach(v => { v.pause(); v.src = ''; v.load(); v.remove(); });
+      refs.clear();
+    };
+  }, []);
 
   // Play/pause control for overlay videos (V2, V3, etc.)
   useEffect(() => {
@@ -451,18 +645,21 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
         return null;
       })}
 
-      {/* Transition overlays via @remotion/player */}
-      {activeTransitions.map(t => (
-        <TransitionPreview
-          key={t.id}
-          transition={t}
-          currentTime={currentTime}
-          fps={30}
-          width={isVertical ? 1080 : 1920}
-          height={isVertical ? 1920 : 1080}
-          isPlaying={isPlaying}
-        />
-      ))}
+      {/* Canvas transition compositor */}
+      <canvas
+        ref={canvasRef}
+        width={isVertical ? 1080 : 1920}
+        height={isVertical ? 1920 : 1080}
+        style={{
+          position: 'absolute',
+          inset: 0,
+          width: '100%',
+          height: '100%',
+          zIndex: 50,
+          pointerEvents: 'none',
+          display: hasActiveTransition ? 'block' : 'none',
+        }}
+      />
 
       {/* Layer count indicator */}
       {layers.length > 1 && (

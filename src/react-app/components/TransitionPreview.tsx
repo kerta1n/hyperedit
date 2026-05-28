@@ -20,10 +20,10 @@ export interface ActiveTransition {
 interface TransitionPreviewProps {
   transition: ActiveTransition;
   currentTime: number;
+  isPlaying: boolean;
   fps: number;
   width: number;
   height: number;
-  isPlaying?: boolean;
 }
 
 // Inner composition that renders the actual transition component
@@ -65,29 +65,29 @@ function TransitionComposition({
   );
 }
 
-/**
- * Renders a single active transition using @remotion/player.
- * Mounts once per transition window, drives frame position via seekTo — never re-mounts per tick.
- */
 export default function TransitionPreview({
   transition,
   currentTime,
+  isPlaying,
   fps,
   width,
   height,
-  isPlaying,
 }: TransitionPreviewProps) {
   const playerRef = useRef<PlayerRef>(null);
   const livePlayingRef = useRef(false);
   const prevTargetFrameRef = useRef(0);
+  const unmuteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const durationInFrames = Math.max(1, Math.round(transition.durationSec * fps));
 
-  // Calculate which frame within the transition we're at
   const progressTime = currentTime - transition.startTime;
   const targetFrame = Math.max(0, Math.min(durationInFrames - 1, Math.round(progressTime * fps)));
 
-  useEffect(() => { livePlayingRef.current = false; }, [transition.id]);
+  // Reset play state when transition changes
+  useEffect(() => {
+    livePlayingRef.current = false;
+    prevTargetFrameRef.current = 0;
+  }, [transition.id]);
 
   useEffect(() => {
     const player = playerRef.current;
@@ -99,18 +99,34 @@ export default function TransitionPreview({
       if (!livePlayingRef.current) {
         player.seekTo(targetFrame);
         player.play();
-        player.unmute();
+        // Delay unmute so the rAF playback loop starts with muted=true,
+        // skipping the AudioContext resume block in use-playback.js
+        unmuteTimerRef.current = setTimeout(() => {
+          playerRef.current?.unmute();
+        }, 100);
         livePlayingRef.current = true;
       } else if (frameDelta > fps) {
         player.seekTo(targetFrame);
         player.play();
       }
     } else {
+      if (unmuteTimerRef.current) {
+        clearTimeout(unmuteTimerRef.current);
+        unmuteTimerRef.current = null;
+      }
       player.pause();
       player.seekTo(targetFrame);
       livePlayingRef.current = false;
     }
   }, [isPlaying, targetFrame, fps]);
+
+  useEffect(() => {
+    return () => {
+      if (unmuteTimerRef.current) {
+        clearTimeout(unmuteTimerRef.current);
+      }
+    };
+  }, []);
 
   const inputProps = useMemo(() => ({
     transitionFileId: transition.transitionFileId,
@@ -150,6 +166,7 @@ export default function TransitionPreview({
         zIndex: 50,
         pointerEvents: 'none',
         backgroundColor: '#000',
+        opacity: 1,
       }}
     />
   );
