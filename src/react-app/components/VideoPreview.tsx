@@ -123,6 +123,8 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   const baseLayerClipTimeRef = useRef<number | undefined>(undefined);
   const layerClipTimesRef = useRef<Map<string, number>>(new Map());
   const wasPlayingRef = useRef(false);
+  const prevCurrentTimeRef = useRef(currentTime);
+
   const [draggingLayer, setDraggingLayer] = useState<string | null>(null);
   const hasActiveTransition = activeTransitions.length > 0;
   const [dragStart, setDragStart] = useState<{ x: number; y: number; layerX: number; layerY: number } | null>(null);
@@ -185,25 +187,47 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     }
   }, [baseLayerUrl]);
 
-  // Play/pause controller — force-syncs all videos on pause→play, pauses all on play→pause
   useEffect(() => {
     const baseVideo = videoRef.current;
 
     if (isPlaying) {
       if (!wasPlayingRef.current) {
-        const baseCT = baseLayerClipTimeRef.current;
-        if (baseVideo && baseCT !== undefined) {
-          baseVideo.currentTime = baseCT;
+        const seekPromises: Promise<void>[] = [];
+
+        if (baseVideo && baseLayerClipTime !== undefined) {
+          if (Math.abs(baseVideo.currentTime - baseLayerClipTime) > 0.02) {
+            baseVideo.currentTime = baseLayerClipTime;
+            seekPromises.push(new Promise<void>(resolve => {
+              const onSeeked = () => { baseVideo.removeEventListener('seeked', onSeeked); clearTimeout(t); resolve(); };
+              const t = setTimeout(() => { baseVideo.removeEventListener('seeked', onSeeked); resolve(); }, 400);
+              baseVideo.addEventListener('seeked', onSeeked);
+            }));
+          }
         }
+
         overlayVideoRefs.current.forEach((el, id) => {
-          const ct = layerClipTimesRef.current.get(id);
-          if (ct !== undefined) el.currentTime = ct;
+          const target = layerClipTimesRef.current.get(id);
+          if (target === undefined) return;
+          if (Math.abs(el.currentTime - target) > 0.001) {
+            el.currentTime = target;
+            seekPromises.push(new Promise<void>(resolve => {
+              const onSeeked = () => { el.removeEventListener('seeked', onSeeked); clearTimeout(t); resolve(); };
+              const t = setTimeout(() => { el.removeEventListener('seeked', onSeeked); resolve(); }, 400);
+              el.addEventListener('seeked', onSeeked);
+            }));
+          }
         });
 
-        baseVideo?.play().catch((err) => {
-          console.error('[VideoPreview] Play failed:', err.name, err.message);
-        });
-        overlayVideoRefs.current.forEach(v => v.play().catch(() => {}));
+        const startAll = () => {
+          baseVideo?.play().catch(() => {});
+          overlayVideoRefs.current.forEach(v => v.play().catch(() => {}));
+        };
+
+        if (seekPromises.length > 0) {
+          Promise.allSettled(seekPromises).then(startAll);
+        } else {
+          startAll();
+        }
       }
     } else {
       baseVideo?.pause();
@@ -212,53 +236,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     }
 
     wasPlayingRef.current = isPlaying;
-  }, [isPlaying]);
-
-  // rAF drift correction — adjusts playbackRate to converge on target (no seeks = no audio stutter)
-  useEffect(() => {
-    if (!isPlaying) return;
-    let animId: number;
-
-    const correctDrift = () => {
-      const base = videoRef.current;
-      const baseTarget = baseLayerClipTimeRef.current;
-      if (base && baseTarget !== undefined) {
-        const drift = base.currentTime - baseTarget;
-        if (Math.abs(drift) > 0.3) {
-          base.currentTime = baseTarget;
-          base.playbackRate = 1.0;
-        } else if (Math.abs(drift) > 0.01) {
-          base.playbackRate = Math.max(0.95, Math.min(1.05, 1.0 - drift * 3));
-        } else {
-          base.playbackRate = 1.0;
-        }
-      }
-
-      overlayVideoRefs.current.forEach((el, id) => {
-        const target = layerClipTimesRef.current.get(id);
-        if (target !== undefined) {
-          if (el.paused) {
-            el.currentTime = target;
-            el.play().catch(() => {});
-          } else {
-            const drift = el.currentTime - target;
-            if (Math.abs(drift) > 0.3) {
-              el.currentTime = target;
-              el.playbackRate = 1.0;
-            } else if (Math.abs(drift) > 0.01) {
-              el.playbackRate = Math.max(0.95, Math.min(1.05, 1.0 - drift * 3));
-            } else {
-              el.playbackRate = 1.0;
-            }
-          }
-        }
-      });
-
-      animId = requestAnimationFrame(correctDrift);
-    };
-
-    animId = requestAnimationFrame(correctDrift);
-    return () => cancelAnimationFrame(animId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPlaying]);
 
   // Scrub sync (paused only) — tight tolerance for precise preview
@@ -281,6 +259,41 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
       }
     });
   }, [isPlaying, baseLayerClipTime, layers]);
+
+  useEffect(() => {
+    const delta = Math.abs(currentTime - prevCurrentTimeRef.current);
+    prevCurrentTimeRef.current = currentTime;
+
+    if (!isPlaying || delta < 0.2) return;
+
+    const base = videoRef.current;
+    const allElements: HTMLMediaElement[] = [];
+    if (base) allElements.push(base);
+    overlayVideoRefs.current.forEach(el => allElements.push(el));
+    allElements.forEach(el => el.pause());
+
+    if (base && baseLayerClipTime !== undefined) base.currentTime = baseLayerClipTime;
+    overlayVideoRefs.current.forEach((el, id) => {
+      const ct = layerClipTimesRef.current.get(id);
+      if (ct !== undefined) el.currentTime = ct;
+    });
+
+    const seekPromises = allElements
+      .filter(el => el.seeking)
+      .map(el => new Promise<void>(resolve => {
+        const onSeeked = () => { el.removeEventListener('seeked', onSeeked); clearTimeout(t); resolve(); };
+        const t = setTimeout(() => { el.removeEventListener('seeked', onSeeked); resolve(); }, 400);
+        el.addEventListener('seeked', onSeeked);
+      }));
+
+    if (seekPromises.length > 0) {
+      Promise.allSettled(seekPromises).then(() => {
+        allElements.forEach(el => el.play().catch(() => {}));
+      });
+    } else {
+      allElements.forEach(el => el.play().catch(() => {}));
+    }
+  }, [isPlaying, currentTime, baseLayerClipTime, layers]);
 
   // --- Canvas transition compositing ---
 
@@ -460,12 +473,24 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   }, []);
 
 
-  // Seek on load
-  const handleLoaded = () => {
-    if (videoRef.current && baseLayerClipTime !== undefined) {
-      videoRef.current.currentTime = baseLayerClipTime;
+  const handleLoaded = useCallback(() => {
+    const video = videoRef.current;
+    const clipTime = baseLayerClipTimeRef.current;
+    if (!video || clipTime === undefined) return;
+    video.currentTime = clipTime;
+    if (isPlaying) {
+      const onSeeked = () => {
+        video.removeEventListener('seeked', onSeeked);
+        clearTimeout(fallback);
+        video.play().catch(() => {});
+      };
+      const fallback = setTimeout(() => {
+        video.removeEventListener('seeked', onSeeked);
+        video.play().catch(() => {});
+      }, 250);
+      video.addEventListener('seeked', onSeeked);
     }
-  };
+  }, [isPlaying]);
 
   // Handle mouse down on draggable layer
   const handleLayerMouseDown = useCallback((e: React.MouseEvent, layer: ClipLayer) => {
@@ -588,13 +613,22 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
               playsInline
               preload="auto"
               onLoadedData={(e) => {
-                // Seek to correct time when loaded
                 const video = e.currentTarget;
                 if (layer.clipTime !== undefined) {
                   video.currentTime = layer.clipTime;
-                }
-                // Auto-play if timeline is playing
-                if (isPlaying) {
+                  if (isPlaying) {
+                    const onSeeked = () => {
+                      video.removeEventListener('seeked', onSeeked);
+                      clearTimeout(fallback);
+                      video.play().catch(() => {});
+                    };
+                    const fallback = setTimeout(() => {
+                      video.removeEventListener('seeked', onSeeked);
+                      video.play().catch(() => {});
+                    }, 250);
+                    video.addEventListener('seeked', onSeeked);
+                  }
+                } else if (isPlaying) {
                   video.play().catch(() => {});
                 }
               }}
