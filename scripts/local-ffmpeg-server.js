@@ -8067,30 +8067,44 @@ async function handleAudioSync(req, res, sessionId) {
     const floatsA = new Float32Array(bufA.buffer, bufA.byteOffset, bufA.byteLength / 4);
     const floatsB = new Float32Array(bufB.buffer, bufB.byteOffset, bufB.byteLength / 4);
 
-    // synaudio requires base.samplesDecoded >= comparison.samplesDecoded
-    let swapped = false;
-    let base = { channelData: [floatsA], samplesDecoded: floatsA.length };
-    let comparison = { channelData: [floatsB], samplesDecoded: floatsB.length };
-    if (floatsA.length < floatsB.length) {
+    // Bidirectional correlation: SynAudio's WASM returns sampleOffset as Uint32
+    // (can only find comparison starting AFTER base). Run both directions and pick
+    // the one with higher correlation to handle either offset sign.
+    const synAudio = new SynAudio({ correlationSampleSize, initialGranularity });
+    const audioA = { channelData: [floatsA], samplesDecoded: floatsA.length };
+    const audioB = { channelData: [floatsB], samplesDecoded: floatsB.length };
+
+    console.log(`[${jobId}] Cross-correlating bidirectional (A=${floatsA.length} samples, B=${floatsB.length} samples)...`);
+
+    const [resultAB, resultBA] = await Promise.all([
+      floatsA.length >= floatsB.length
+        ? synAudio.sync(audioA, audioB)
+        : Promise.resolve({ correlation: -1, sampleOffset: 0 }),
+      floatsB.length >= floatsA.length
+        ? synAudio.sync(audioB, audioA)
+        : Promise.resolve({ correlation: -1, sampleOffset: 0 }),
+    ]);
+
+    console.log(`[${jobId}] A→B: offset=${resultAB.sampleOffset} corr=${resultAB.correlation.toFixed(4)} | B→A: offset=${resultBA.sampleOffset} corr=${resultBA.correlation.toFixed(4)}`);
+
+    let rawOffset, swapped;
+    if (resultAB.correlation >= resultBA.correlation) {
+      rawOffset = resultAB.sampleOffset / sampleRate;
+      swapped = false;
+    } else {
+      rawOffset = resultBA.sampleOffset / sampleRate;
       swapped = true;
-      [base, comparison] = [comparison, base];
     }
 
-    console.log(`[${jobId}] Cross-correlating (base=${base.samplesDecoded} samples, comparison=${comparison.samplesDecoded}, swapped=${swapped})...`);
-    const synAudio = new SynAudio({ correlationSampleSize, initialGranularity });
-    const result = await synAudio.sync(base, comparison);
-
-    // Convert segment-relative offset to absolute clip time.
     // Convention: assetB[0] aligns with assetA[offsetSeconds].
-    const rawOffset = result.sampleOffset / sampleRate;
     const seekA = sliceA.ss || 0;
     const seekB = sliceB.ss || 0;
     const offsetSeconds = seekA + (swapped ? -rawOffset : rawOffset) - seekB;
 
-    const correlation = result.correlation;
+    const correlation = swapped ? resultBA.correlation : resultAB.correlation;
     const confidence = correlation > 0.7 ? 'high' : correlation >= 0.4 ? 'medium' : 'low';
 
-    console.log(`[${jobId}] Result: offset=${offsetSeconds.toFixed(4)}s, correlation=${correlation.toFixed(4)}, confidence=${confidence}`);
+    console.log(`[${jobId}] Result: offset=${offsetSeconds.toFixed(4)}s, correlation=${correlation.toFixed(4)}, confidence=${confidence}, direction=${swapped ? 'B→A' : 'A→B'}`);
 
     const response = { offsetSeconds, correlation, confidence };
     if (note) response.note = note;
