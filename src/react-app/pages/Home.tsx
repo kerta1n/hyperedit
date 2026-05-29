@@ -328,8 +328,9 @@ export default function Home() {
       lastTimeRef.current = performance.now();
 
       const animate = (now: number) => {
-        const delta = (now - lastTimeRef.current) / 1000; // Convert to seconds
+        const rawDelta = (now - lastTimeRef.current) / 1000;
         lastTimeRef.current = now;
+        const delta = rawDelta > 0.1 ? 1 / 30 : rawDelta;
 
         setCurrentTime(prev => {
           const newTime = prev + delta;
