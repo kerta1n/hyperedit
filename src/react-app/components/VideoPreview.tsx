@@ -529,15 +529,34 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
               playsInline
               preload="auto"
               onLoadedData={(e) => {
-                // Seek to correct time when loaded
                 const video = e.currentTarget;
-                if (layer.clipTime !== undefined) {
+                if (layer.clipTime === undefined) return;
+                const baseVideo = videoRef.current;
+
+                if (!isPlaying || !baseVideo || baseLayerClipTime === undefined) {
                   video.currentTime = layer.clipTime;
+                  return;
                 }
-                // Auto-play if timeline is playing
-                if (isPlaying) {
+
+                // Sync to base video's ACTUAL media position, not stale rAF clock
+                const delta = layer.clipTime - baseLayerClipTime;
+                video.currentTime = baseVideo.currentTime + delta;
+
+                const startPlay = () => {
+                  video.currentTime = baseVideo.currentTime + delta;
                   video.play().catch(() => {});
-                }
+                };
+
+                const onSeeked = () => {
+                  video.removeEventListener('seeked', onSeeked);
+                  clearTimeout(fallback);
+                  startPlay();
+                };
+                const fallback = setTimeout(() => {
+                  video.removeEventListener('seeked', onSeeked);
+                  startPlay();
+                }, 300);
+                video.addEventListener('seeked', onSeeked);
               }}
               onMouseDown={(e) => handleLayerMouseDown(e, layer)}
             />
