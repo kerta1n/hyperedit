@@ -208,7 +208,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
         overlayVideoRefs.current.forEach((el, id) => {
           const target = layerClipTimesRef.current.get(id);
           if (target === undefined) return;
-          if (Math.abs(el.currentTime - target) > 0.001) {
+          if (Math.abs(el.currentTime - target) > 0.02) {
             el.currentTime = target;
             seekPromises.push(new Promise<void>(resolve => {
               const onSeeked = () => { el.removeEventListener('seeked', onSeeked); clearTimeout(t); resolve(); };
@@ -371,7 +371,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   useEffect(() => {
     if (!hasActiveTransition || isPlaying) return;
     drawFrame();
-  }, [currentTime, hasActiveTransition, isPlaying, drawFrame]);
+  }, [currentTime, hasActiveTransition, isPlaying, drawFrame, activeTransitions]);
 
   // Manage hidden videos for same-track transitions
   useEffect(() => {

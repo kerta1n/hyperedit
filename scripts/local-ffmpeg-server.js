@@ -8079,10 +8079,10 @@ async function handleAudioSync(req, res, sessionId) {
     const [resultAB, resultBA] = await Promise.all([
       floatsA.length >= floatsB.length
         ? synAudio.sync(audioA, audioB)
-        : Promise.resolve({ correlation: -1, sampleOffset: 0 }),
+        : synAudio.sync(audioA, { channelData: [floatsB.subarray(0, floatsA.length)], samplesDecoded: floatsA.length }),
       floatsB.length >= floatsA.length
         ? synAudio.sync(audioB, audioA)
-        : Promise.resolve({ correlation: -1, sampleOffset: 0 }),
+        : synAudio.sync(audioB, { channelData: [floatsA.subarray(0, floatsB.length)], samplesDecoded: floatsB.length }),
     ]);
 
     console.log(`[${jobId}] A→B: offset=${resultAB.sampleOffset} corr=${resultAB.correlation.toFixed(4)} | B→A: offset=${resultBA.sampleOffset} corr=${resultBA.correlation.toFixed(4)}`);
