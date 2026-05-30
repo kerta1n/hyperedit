@@ -302,7 +302,7 @@ export default function AIPromptPanel({
   const [audioSyncResult, setAudioSyncResult] = useState<AudioSyncState | null>(null);
   const [isAnalyzingAudio, setIsAnalyzingAudio] = useState(false);
   const [audioSyncSampleRate, setAudioSyncSampleRate] = useState(8000);
-  const [audioSyncAccuracy, setAudioSyncAccuracy] = useState(11025);
+  const [audioSyncAccuracy, setAudioSyncAccuracy] = useState(44100);
   const [audioSyncSpeed, setAudioSyncSpeed] = useState(1);
   const [showAudioAdvanced, setShowAudioAdvanced] = useState(false);
   const [audioSyncAnchor, setAudioSyncAnchor] = useState<0 | 1>(0);
@@ -3214,12 +3214,12 @@ export default function AIPromptPanel({
                     <div className="flex items-center gap-2">
                       <span className="text-xs text-zinc-400 w-14 shrink-0">Accuracy</span>
                       <input
-                        type="range" min={800} max={11025} step={100}
+                        type="range" min={800} max={88200} step={100}
                         value={audioSyncAccuracy}
                         onChange={e => setAudioSyncAccuracy(Number(e.target.value))}
                         className="flex-1 accent-teal-400"
                       />
-                      <span className="text-xs text-zinc-500 w-12 text-right">{audioSyncAccuracy < 2000 ? 'Fast' : 'Precise'}</span>
+                      <span className="text-xs text-zinc-500 w-12 text-right">{audioSyncAccuracy < 11025 ? 'Fast' : audioSyncAccuracy < 44100 ? 'Good' : 'Precise'}</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <span className="text-xs text-zinc-400 w-14 shrink-0">Speed</span>

@@ -123,6 +123,8 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   const baseLayerClipTimeRef = useRef<number | undefined>(undefined);
   const layerClipTimesRef = useRef<Map<string, number>>(new Map());
   const wasPlayingRef = useRef(false);
+  const isPlayingRef = useRef(isPlaying);
+  isPlayingRef.current = isPlaying;
   const prevCurrentTimeRef = useRef(currentTime);
 
   const [draggingLayer, setDraggingLayer] = useState<string | null>(null);
@@ -237,6 +239,29 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
 
     wasPlayingRef.current = isPlaying;
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying]);
+
+  // Playing drift correction — periodically check all video positions against expected
+  useEffect(() => {
+    if (!isPlaying) return;
+    const id = setInterval(() => {
+      const base = videoRef.current;
+      const baseCt = baseLayerClipTimeRef.current;
+      if (base && baseCt !== undefined && !base.paused && base.readyState >= 2) {
+        if (Math.abs(base.currentTime - baseCt) > 0.08) {
+          base.currentTime = baseCt;
+        }
+      }
+      overlayVideoRefs.current.forEach((el, layerId) => {
+        if (el.paused || el.readyState < 2) return;
+        const target = layerClipTimesRef.current.get(layerId);
+        if (target === undefined) return;
+        if (Math.abs(el.currentTime - target) > 0.08) {
+          el.currentTime = target;
+        }
+      });
+    }, 250);
+    return () => clearInterval(id);
   }, [isPlaying]);
 
   // Scrub sync (paused only) — tight tolerance for precise preview
@@ -478,7 +503,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     const clipTime = baseLayerClipTimeRef.current;
     if (!video || clipTime === undefined) return;
     video.currentTime = clipTime;
-    if (isPlaying) {
+    if (isPlayingRef.current) {
       const onSeeked = () => {
         video.removeEventListener('seeked', onSeeked);
         clearTimeout(fallback);
@@ -614,21 +639,38 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
               preload="auto"
               onLoadedData={(e) => {
                 const video = e.currentTarget;
-                if (layer.clipTime !== undefined) {
-                  video.currentTime = layer.clipTime;
-                  if (isPlaying) {
+                const ct = layerClipTimesRef.current.get(layer.id) ?? layer.clipTime;
+                if (ct !== undefined) {
+                  video.currentTime = ct;
+                  if (isPlayingRef.current) {
+                    const startPlay = () => {
+                      video.play().catch(() => {});
+                      // Drift correction: re-sync after play starts producing frames
+                      let attempts = 0;
+                      const correct = () => {
+                        if (++attempts > 10 || !isPlayingRef.current) return;
+                        const target = layerClipTimesRef.current.get(layer.id);
+                        if (target !== undefined && Math.abs(video.currentTime - target) > 0.04) {
+                          video.currentTime = target;
+                        } else if (target !== undefined && Math.abs(video.currentTime - target) <= 0.04) {
+                          return; // synced, stop correcting
+                        }
+                        requestAnimationFrame(correct);
+                      };
+                      requestAnimationFrame(correct);
+                    };
                     const onSeeked = () => {
                       video.removeEventListener('seeked', onSeeked);
                       clearTimeout(fallback);
-                      video.play().catch(() => {});
+                      startPlay();
                     };
                     const fallback = setTimeout(() => {
                       video.removeEventListener('seeked', onSeeked);
-                      video.play().catch(() => {});
+                      startPlay();
                     }, 250);
                     video.addEventListener('seeked', onSeeked);
                   }
-                } else if (isPlaying) {
+                } else if (isPlayingRef.current) {
                   video.play().catch(() => {});
                 }
               }}

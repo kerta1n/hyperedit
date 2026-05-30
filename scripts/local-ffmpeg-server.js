@@ -7970,7 +7970,7 @@ async function handleAudioSync(req, res, sessionId) {
 
   try {
     const body = await parseBody(req);
-    const { assetA, assetB, sampleRate = 16000, correlationSampleSize = 3200, initialGranularity = 16 } = body;
+    const { assetA, assetB, sampleRate = 8000, correlationSampleSize = 44100, initialGranularity = 1 } = body;
 
     if (!assetA || !assetB) {
       res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
@@ -8041,8 +8041,8 @@ async function handleAudioSync(req, res, sessionId) {
       console.log(`[${jobId}] Safety cap: ${safetyLimit}s (A=${durA.toFixed(1)}s, B=${durB.toFixed(1)}s)`);
     }
 
-    // Bandpass 2-8kHz isolates transient energy (claps/clicks) shared between mic types.
-    // Compressor + dynaudnorm normalize gain differences between USB condenser and DSLR onboard mics.
+    // Bandpass 2-8kHz isolates transient energy shared between mic types.
+    // Light compressor (ratio=2, 5ms attack) preserves transient timing while leveling gain.
     // -ac 1 handles both mono and stereo input (pan=mono crashes on mono).
     const extractArgs = (inputPath, outputPath, slice) => {
       const args = ['-y'];
@@ -8050,7 +8050,7 @@ async function handleAudioSync(req, res, sessionId) {
       args.push('-i', inputPath);
       if (slice.t !== null) args.push('-t', String(slice.t));
       args.push('-map', '0:a:0', '-vn',
-        '-af', 'highpass=f=2000,lowpass=f=8000,acompressor=threshold=-20dB:ratio=8:attack=0.5:release=50,dynaudnorm=p=0.95:m=5',
+        '-af', 'highpass=f=2000,lowpass=f=8000,acompressor=threshold=-20dB:ratio=2:attack=0.01:release=50',
         '-ac', '1', '-ar', String(sampleRate),
         '-c:a', 'pcm_f32le', '-f', 'f32le', outputPath);
       return args;
@@ -8070,19 +8070,16 @@ async function handleAudioSync(req, res, sessionId) {
     // Bidirectional correlation: SynAudio's WASM returns sampleOffset as Uint32
     // (can only find comparison starting AFTER base). Run both directions and pick
     // the one with higher correlation to handle either offset sign.
+    // Search range is (base - correlationSampleSize), works with equal-length clips.
     const synAudio = new SynAudio({ correlationSampleSize, initialGranularity });
     const audioA = { channelData: [floatsA], samplesDecoded: floatsA.length };
     const audioB = { channelData: [floatsB], samplesDecoded: floatsB.length };
 
-    console.log(`[${jobId}] Cross-correlating bidirectional (A=${floatsA.length} samples, B=${floatsB.length} samples)...`);
+    console.log(`[${jobId}] Cross-correlating bidirectional (A=${floatsA.length}, B=${floatsB.length}, window=${correlationSampleSize})...`);
 
     const [resultAB, resultBA] = await Promise.all([
-      floatsA.length >= floatsB.length
-        ? synAudio.sync(audioA, audioB)
-        : synAudio.sync(audioA, { channelData: [floatsB.subarray(0, floatsA.length)], samplesDecoded: floatsA.length }),
-      floatsB.length >= floatsA.length
-        ? synAudio.sync(audioB, audioA)
-        : synAudio.sync(audioB, { channelData: [floatsA.subarray(0, floatsB.length)], samplesDecoded: floatsB.length }),
+      synAudio.sync(audioA, audioB),
+      synAudio.sync(audioB, audioA),
     ]);
 
     console.log(`[${jobId}] A→B: offset=${resultAB.sampleOffset} corr=${resultAB.correlation.toFixed(4)} | B→A: offset=${resultBA.sampleOffset} corr=${resultBA.correlation.toFixed(4)}`);
