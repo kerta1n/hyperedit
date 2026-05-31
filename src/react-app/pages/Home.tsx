@@ -52,6 +52,10 @@ export default function Home() {
   const videoPreviewRef = useRef<VideoPreviewHandle>(null);
   const playbackRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(0);
+  // Debounce timer for resuming playback after scrubbing (pause-before-seek pattern)
+  const resumeAfterSeekRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Track whether we paused due to a seek scrub (so we can resume afterward)
+  const wasPlayingBeforeSeekRef = useRef(false);
 
   // Use the new project hook for multi-asset management
   const {
@@ -174,7 +178,7 @@ export default function Home() {
       return [];
     }
 
-    // Find ALL clips at the current playhead position
+    // Find clips for the preview — V1 time-filtered, V2/V3/A1/A2 always rendered
     const layers: Array<{
       id: string;
       url: string;
@@ -185,60 +189,62 @@ export default function Home() {
       transform?: TimelineClip['transform'];
       captionWords?: Array<{ text: string; start: number; end: number }>;
       captionStyle?: CaptionStyle;
+      visible?: boolean;
     }> = [];
 
-    // Check video tracks (V1, V2, V3...)
-    const videoTracks = ['V1', 'V2', 'V3'];
+    // V1: time-filtered (only one base video at a time)
+    const v1Clips = activeClips.filter(c =>
+      c.trackId === 'V1' &&
+      currentTime >= c.start &&
+      currentTime < c.start + c.duration
+    );
+    for (const clip of v1Clips) {
+      const asset = assets.find(a => a.id === clip.assetId);
+      const url = asset?.streamUrl || (asset ? getAssetStreamUrl(asset.id) : null);
+      if (asset && url) {
+        const clipTime = (currentTime - clip.start) + (clip.inPoint || 0);
+        layers.push({
+          id: clip.id, url, type: asset.type, trackId: clip.trackId,
+          clipTime, clipStart: clip.start, transform: clip.transform,
+        });
+      }
+    }
 
-    for (const trackId of videoTracks) {
+    // V2/V3: time-filtered (only visible clips)
+    for (const trackId of ['V2', 'V3']) {
       const clipsOnTrack = activeClips.filter(c =>
         c.trackId === trackId &&
         currentTime >= c.start &&
         currentTime < c.start + c.duration
       );
-
       for (const clip of clipsOnTrack) {
         const asset = assets.find(a => a.id === clip.assetId);
-        // Use asset.streamUrl which has cache-busting timestamp from refreshAssets
         const url = asset?.streamUrl || (asset ? getAssetStreamUrl(asset.id) : null);
         if (asset && url) {
-          // Calculate the time within the clip (accounting for in-point)
           const clipTime = (currentTime - clip.start) + (clip.inPoint || 0);
           layers.push({
-            id: clip.id,
-            url,
-            type: asset.type,
-            trackId: clip.trackId,
-            clipTime,
-            clipStart: clip.start,
-            transform: clip.transform,
+            id: clip.id, url, type: asset.type, trackId: clip.trackId,
+            clipTime, clipStart: clip.start, transform: clip.transform,
           });
         }
       }
     }
 
-    // Check audio tracks (A1, A2)
-    const audioTracks = ['A1', 'A2'];
-
-    for (const trackId of audioTracks) {
+    // A1/A2: time-filtered (only visible clips)
+    for (const trackId of ['A1', 'A2']) {
       const clipsOnTrack = activeClips.filter(c =>
         c.trackId === trackId &&
         currentTime >= c.start &&
         currentTime < c.start + c.duration
       );
-
       for (const clip of clipsOnTrack) {
         const asset = assets.find(a => a.id === clip.assetId);
         const url = asset?.streamUrl || (asset ? getAssetStreamUrl(asset.id) : null);
         if (asset && url && asset.type === 'audio') {
           const clipTime = (currentTime - clip.start) + (clip.inPoint || 0);
           layers.push({
-            id: clip.id,
-            url,
-            type: 'audio',
-            trackId: clip.trackId,
-            clipTime,
-            clipStart: clip.start,
+            id: clip.id, url, type: 'audio', trackId: clip.trackId,
+            clipTime, clipStart: clip.start,
           });
         }
       }
@@ -273,6 +279,24 @@ export default function Home() {
 
   const previewLayers = getPreviewLayers();
   const hasPreviewContent = previewLayers.length > 0;
+
+  // Synchronized restart: when a new overlay enters range during playback,
+  // briefly toggle isPlaying so V1 and V2 both start from paused state together
+  const prevOverlayIdsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const currentOverlayIds = new Set(
+      previewLayers
+        .filter(l => (l.type === 'video' && l.trackId !== 'V1') || l.type === 'audio')
+        .map(l => l.id)
+    );
+    const hasNewOverlay = [...currentOverlayIds].some(id => !prevOverlayIdsRef.current.has(id));
+    prevOverlayIdsRef.current = currentOverlayIds;
+
+    if (hasNewOverlay && isPlaying) {
+      setIsPlaying(false);
+      requestAnimationFrame(() => setIsPlaying(true));
+    }
+  }, [previewLayers, isPlaying]);
 
   // Stable object construction — only recomputes when transitions/clips/assets change, NOT per frame
   const allTransitionPreviews = useMemo((): ActiveTransition[] => {
@@ -368,11 +392,33 @@ export default function Home() {
     setCurrentTime(0);
   }, []);
 
-  // Handle timeline seeking
+  // Handle timeline seeking — pause-before-seek pattern
+  // Seeking a playing video has 50-400ms nondeterministic completion time per element,
+  // causing V1/V2 offset. Seeking a PAUSED video is fast (5-30ms) and reliable.
+  // So: pause all elements, seek while paused, debounce resume 150ms after last seek event.
   const handleTimelineSeek = useCallback((time: number) => {
+    // If currently playing, pause the RAF loop + all video elements before seeking
+    if (isPlaying) {
+      wasPlayingBeforeSeekRef.current = true;
+      setIsPlaying(false);
+    }
+
     setCurrentTime(time);
-    // Don't seek the video directly - let the clipTime prop handle it
-  }, []);
+
+    // Clear any pending resume timer
+    if (resumeAfterSeekRef.current !== null) {
+      clearTimeout(resumeAfterSeekRef.current);
+    }
+
+    // Resume 150ms after the last seek event (debounced, covers rapid scrubbing)
+    resumeAfterSeekRef.current = setTimeout(() => {
+      resumeAfterSeekRef.current = null;
+      if (wasPlayingBeforeSeekRef.current) {
+        wasPlayingBeforeSeekRef.current = false;
+        setIsPlaying(true);
+      }
+    }, 150);
+  }, [isPlaying]);
 
 
   // Handle asset upload
