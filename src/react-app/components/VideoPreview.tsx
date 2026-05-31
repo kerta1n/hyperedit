@@ -58,10 +58,6 @@ interface VideoPreviewProps {
 export interface VideoPreviewHandle {
   seekTo: (time: number) => void;
   getVideoElement: () => HTMLVideoElement | null;
-  /** Pause all media, seek to given times (paused seek is fast/reliable), then call resumeAll. */
-  pauseAndSeekAll: (baseTime: number, overlayTimes: Map<string, number>) => void;
-  /** Resume all previously paused media together in one microtask for minimal startup skew. */
-  resumeAll: () => void;
 }
 
 // Helper to build CSS styles from transform
@@ -157,23 +153,6 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
       if (videoRef.current) videoRef.current.currentTime = time;
     },
     getVideoElement: () => videoRef.current,
-    pauseAndSeekAll: (baseTime: number, overlayTimes: Map<string, number>) => {
-      // Pause first: seeking a paused video is fast (5-30ms) vs seeking a playing video (50-400ms)
-      if (videoRef.current) {
-        videoRef.current.pause();
-        videoRef.current.currentTime = baseTime;
-      }
-      overlayVideoRefs.current.forEach((el, id) => {
-        el.pause();
-        const t = overlayTimes.get(id);
-        if (t !== undefined) el.currentTime = t;
-      });
-    },
-    resumeAll: () => {
-      // Call play() on all elements together in the same microtask for minimal startup latency skew
-      if (videoRef.current) videoRef.current.play().catch(() => {});
-      overlayVideoRefs.current.forEach(el => el.play().catch(() => {}));
-    },
   }));
 
   // Reload video when source URL changes (e.g., after dead air removal)
@@ -193,19 +172,7 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     }
   }, [baseLayerUrl]);
 
-  // Play/pause control for base video
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
 
-    if (isPlaying) {
-      video.play().catch((err) => {
-        console.error('[VideoPreview] Play failed:', err.name, err.message);
-      });
-    } else {
-      video.pause();
-    }
-  }, [isPlaying]);
 
   // --- Canvas transition compositing ---
 
@@ -384,42 +351,89 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     };
   }, []);
 
-  // Unified media sync: V1 + overlay seeks in one callback for atomic positioning
+  // Coordinated media sync: V1 + overlays play/pause/seek in ONE effect.
+  // V1 never starts until all overlays are ready (canplay).
   useEffect(() => {
     const video = videoRef.current;
-    if (video && baseLayerClipTime !== undefined) {
-      // Only correct large drifts during live playback. Frequent seeks on a playing video
-      // produce nondeterministic latency (50-400ms) that offsets V1 vs V2. Tolerate <0.5s.
-      if (Math.abs(video.currentTime - baseLayerClipTime) > 0.5) {
-        video.currentTime = baseLayerClipTime;
-      }
-    }
+    if (!video) return;
 
     const overlayMedia = layers.filter(
       l => (l.type === 'video' && l.trackId !== 'V1') || l.type === 'audio'
     );
 
-    for (const layer of overlayMedia) {
-      const el = overlayVideoRefs.current.get(layer.id);
-      if (!el || layer.clipTime === undefined) continue;
-
-      if (!isPlaying) {
+    if (!isPlaying) {
+      video.pause();
+      if (baseLayerClipTime !== undefined && Math.abs(video.currentTime - baseLayerClipTime) > 0.05) {
+        video.currentTime = baseLayerClipTime;
+      }
+      for (const layer of overlayMedia) {
+        const el = overlayVideoRefs.current.get(layer.id);
+        if (!el || layer.clipTime === undefined) continue;
         if (!el.paused) el.pause();
         if (Math.abs(el.currentTime - layer.clipTime) > 0.05) {
           el.currentTime = layer.clipTime;
         }
-        continue;
       }
+      return;
+    }
 
+    // PLAYING: collect paused overlays that need to start
+    const toStart: HTMLMediaElement[] = [];
+    for (const layer of overlayMedia) {
+      const el = overlayVideoRefs.current.get(layer.id);
+      if (!el || layer.clipTime === undefined) continue;
       if (el.paused) {
-        el.currentTime = layer.clipTime;
-        el.play().catch(() => {});
+        if (Math.abs(el.currentTime - layer.clipTime) > 0.05) {
+          el.currentTime = layer.clipTime;
+        }
+        toStart.push(el);
       } else if (Math.abs(el.currentTime - layer.clipTime) > 0.5) {
-        // Same large-threshold approach as V1: tolerate small drift, avoid frequent playing seeks
         el.currentTime = layer.clipTime;
       }
     }
-  }, [baseLayerClipTime, layers, isPlaying]);
+
+    if (toStart.length === 0) {
+      if (video.paused) video.play().catch(() => {});
+      return;
+    }
+
+    // Wait for ALL overlays to be ready, then play V1 + overlays TOGETHER
+    let cancelled = false;
+    const playAll = () => {
+      if (cancelled) return;
+      cancelled = true;
+      if (video.paused) video.play().catch(() => {});
+      for (const el of toStart) {
+        if (el.paused) el.play().catch(() => {});
+      }
+    };
+
+    const notReady = toStart.filter(el => el.readyState < 3);
+    if (notReady.length === 0) {
+      playAll();
+    } else {
+      let remaining = notReady.length;
+      const handlers: [HTMLMediaElement, () => void][] = [];
+      for (const el of notReady) {
+        const handler = () => {
+          remaining--;
+          if (remaining === 0) playAll();
+        };
+        handlers.push([el, handler]);
+        el.addEventListener('canplay', handler, { once: true });
+      }
+      const timer = setTimeout(playAll, 300);
+      return () => {
+        cancelled = true;
+        clearTimeout(timer);
+        for (const [el, handler] of handlers) {
+          el.removeEventListener('canplay', handler);
+        }
+      };
+    }
+
+    return () => { cancelled = true; };
+  }, [isPlaying, baseLayerClipTime, layers]);
 
   // Seek on load
   const handleLoaded = () => {
