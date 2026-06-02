@@ -45,6 +45,10 @@ export interface RemotionClipTransform {
   scale?: number;
   rotation?: number;
   opacity?: number;
+  cropTop?: number;
+  cropBottom?: number;
+  cropLeft?: number;
+  cropRight?: number;
 }
 
 export interface RemotionTrack {
@@ -52,6 +56,7 @@ export interface RemotionTrack {
   type: RemotionTrackType;
   name: string;
   order: number;
+  muted?: boolean;
 }
 
 export interface RemotionClip {

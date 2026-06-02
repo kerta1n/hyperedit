@@ -99,12 +99,21 @@ const getTrackOrder = (trackId: string, tracks: RemotionTrack[]): number => {
 };
 
 const clipTransformValues = (clip: RemotionClip) => {
+  const cropTop = clip.transform?.cropTop || 0;
+  const cropBottom = clip.transform?.cropBottom || 0;
+  const cropLeft = clip.transform?.cropLeft || 0;
+  const cropRight = clip.transform?.cropRight || 0;
+  const hasCrop = cropTop || cropBottom || cropLeft || cropRight;
+
   return {
     scale: clip.transform?.scale ?? 1,
     rotation: clip.transform?.rotation ?? 0,
     x: clip.transform?.x ?? 0,
     y: clip.transform?.y ?? 0,
     opacity: clip.transform?.opacity ?? 1,
+    clipPath: hasCrop
+      ? `inset(${cropTop}% ${cropRight}% ${cropBottom}% ${cropLeft}%)`
+      : undefined,
   };
 };
 
@@ -130,7 +139,7 @@ const migrateLegacyTransitions = (
     if (!fromClip || !toClip) continue;
 
     const transitionFileId = t.type === 'custom'
-      ? ((t as Record<string, unknown>).customTransitionId as string || 'builtin-crossfade')
+      ? (t.customTransitionId || 'builtin-crossfade')
       : (typeToFileId[t.type] || 'builtin-crossfade');
 
     // Compute startTime from clip overlap
@@ -367,6 +376,7 @@ const VideoVisualClip: React.FC<{
         endAt={toFrames(clip.outPointSec, fps)}
         playbackRate={clip.playbackRate ?? 1}
         volume={clip.muted ? 0 : (clip.volume ?? 1)}
+        acceptableTimeShiftInSeconds={0.05}
         style={{ width: '100%', height: '100%', objectFit: 'cover' }}
       />
     )
@@ -384,6 +394,7 @@ const VideoVisualClip: React.FC<{
         opacity: transformValues.opacity,
         overflow: 'hidden',
         transform: `translate3d(${transformValues.x}px, ${transformValues.y}px, 0) scale(${transformValues.scale}) rotate(${transformValues.rotation}deg)`,
+        clipPath: transformValues.clipPath,
       }}
     >
       {media}
@@ -406,6 +417,7 @@ const AudioClip: React.FC<{
       endAt={toFrames(clip.outPointSec, fps)}
       volume={clip.muted ? 0 : (clip.volume ?? 1)}
       playbackRate={clip.playbackRate ?? 1}
+      acceptableTimeShiftInSeconds={0.05}
     />
   );
 };

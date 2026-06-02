@@ -1,5 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import VideoPreview, { VideoPreviewHandle } from '@/react-app/components/VideoPreview';
+import VideoPreview, { VideoPreviewHandle, OverlayClipInfo } from '@/react-app/components/VideoPreview';
+import { buildRemotionSpec } from '@/shared/build-remotion-spec';
+import { preloadVideo, preloadAudio } from '@remotion/preload';
 import Timeline from '@/react-app/components/Timeline';
 import AssetLibrary from '@/react-app/components/AssetLibrary';
 import ClipPropertiesPanel from '@/react-app/components/ClipPropertiesPanel';
@@ -20,7 +22,6 @@ import { readNDJSONStream } from '@/react-app/utils/ndjson';
 import { useVideoSession } from '@/react-app/hooks/useVideoSession';
 import SessionManager from '@/react-app/components/SessionManager';
 import { Sparkles, ListOrdered, Copy, Check, X, Download, Play, Palette, Film } from 'lucide-react';
-import type { ActiveTransition } from '@/react-app/components/VideoPreview';
 import type { TemplateId } from '@/remotion/templates';
 
 interface ChapterData {
@@ -50,11 +51,7 @@ export default function Home() {
   const [recommendedConcurrency, setRecommendedConcurrency] = useState(4);
 
   const videoPreviewRef = useRef<VideoPreviewHandle>(null);
-  const playbackRef = useRef<number | null>(null);
-  const lastTimeRef = useRef<number>(0);
-  // Debounce timer for resuming playback after scrubbing (pause-before-seek pattern)
   const resumeAfterSeekRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Track whether we paused due to a seek scrub (so we can resume afterward)
   const wasPlayingBeforeSeekRef = useRef(false);
 
   // Use the new project hook for multi-asset management
@@ -80,6 +77,7 @@ export default function Home() {
     renderProject,
     getDuration,
     // Captions
+    captionData,
     addCaptionClip,
     addCaptionClipsBatch,
     updateCaptionStyle,
@@ -102,6 +100,7 @@ export default function Home() {
     updateTabClips,
     updateTabAsset,
     // Settings
+    settings,
     setSettings,
     setStatus,
     // Render options
@@ -159,186 +158,67 @@ export default function Home() {
   }, [session, loadProject]);
 
   // Get all clips at the current playhead position as layers
-  const getPreviewLayers = useCallback(() => {
-    // If a specific asset is selected for preview (from library), show only that
-    if (previewAssetId) {
-      const asset = assets.find(a => a.id === previewAssetId);
-      // Use asset.streamUrl which has cache-busting timestamp
-      const url = asset?.streamUrl || (asset ? getAssetStreamUrl(previewAssetId) : null);
-      if (asset && url) {
-        return [{
-          id: 'preview-' + previewAssetId,
-          url,
-          type: asset.type,
-          trackId: 'V1',
-          clipTime: 0,
-          clipStart: 0,
-        }];
-      }
-      return [];
-    }
+  // Single-asset library preview
+  const previewAsset = useMemo(() => {
+    if (!previewAssetId) return null;
+    const asset = assets.find(a => a.id === previewAssetId);
+    if (!asset) return null;
+    const url = asset.streamUrl || getAssetStreamUrl(previewAssetId);
+    if (!url) return null;
+    return { url, type: asset.type };
+  }, [previewAssetId, assets, getAssetStreamUrl]);
 
-    // Find clips for the preview — V1 time-filtered, V2/V3/A1/A2 always rendered
-    const layers: Array<{
-      id: string;
-      url: string;
-      type: 'video' | 'image' | 'audio' | 'caption';
-      trackId: string;
-      clipTime: number;
-      clipStart: number;
-      transform?: TimelineClip['transform'];
-      captionWords?: Array<{ text: string; start: number; end: number }>;
-      captionStyle?: CaptionStyle;
-      visible?: boolean;
-    }> = [];
-
-    // V1: time-filtered (only one base video at a time)
-    const v1Clips = activeClips.filter(c =>
-      c.trackId === 'V1' &&
-      currentTime >= c.start &&
-      currentTime < c.start + c.duration
-    );
-    for (const clip of v1Clips) {
-      const asset = assets.find(a => a.id === clip.assetId);
-      const url = asset?.streamUrl || (asset ? getAssetStreamUrl(asset.id) : null);
-      if (asset && url) {
-        const clipTime = (currentTime - clip.start) + (clip.inPoint || 0);
-        layers.push({
-          id: clip.id, url, type: asset.type, trackId: clip.trackId,
-          clipTime, clipStart: clip.start, transform: clip.transform,
-        });
-      }
-    }
-
-    // V2/V3: time-filtered (only visible clips)
-    for (const trackId of ['V2', 'V3']) {
-      const clipsOnTrack = activeClips.filter(c =>
-        c.trackId === trackId &&
-        currentTime >= c.start &&
-        currentTime < c.start + c.duration
-      );
-      for (const clip of clipsOnTrack) {
-        const asset = assets.find(a => a.id === clip.assetId);
-        const url = asset?.streamUrl || (asset ? getAssetStreamUrl(asset.id) : null);
-        if (asset && url) {
-          const clipTime = (currentTime - clip.start) + (clip.inPoint || 0);
-          layers.push({
-            id: clip.id, url, type: asset.type, trackId: clip.trackId,
-            clipTime, clipStart: clip.start, transform: clip.transform,
-          });
-        }
-      }
-    }
-
-    // A1/A2: time-filtered (only visible clips)
-    for (const trackId of ['A1', 'A2']) {
-      const clipsOnTrack = activeClips.filter(c =>
-        c.trackId === trackId &&
-        currentTime >= c.start &&
-        currentTime < c.start + c.duration
-      );
-      for (const clip of clipsOnTrack) {
-        const asset = assets.find(a => a.id === clip.assetId);
-        const url = asset?.streamUrl || (asset ? getAssetStreamUrl(asset.id) : null);
-        if (asset && url && asset.type === 'audio') {
-          const clipTime = (currentTime - clip.start) + (clip.inPoint || 0);
-          layers.push({
-            id: clip.id, url, type: 'audio', trackId: clip.trackId,
-            clipTime, clipStart: clip.start,
-          });
-        }
-      }
-    }
-
-    // Check caption track (T1)
-    const captionClips = activeClips.filter(c =>
-      c.trackId === 'T1' &&
-      currentTime >= c.start &&
-      currentTime < c.start + c.duration
-    );
-
-    for (const clip of captionClips) {
-      const caption = getCaptionData(clip.id);
-      if (caption) {
-        // Words have relative timestamps (0 to chunk duration), so pass clip-relative time
-        layers.push({
-          id: clip.id,
-          url: '',
-          type: 'caption',
-          trackId: clip.trackId,
-          clipTime: currentTime - clip.start, // Convert to clip-relative time
-          clipStart: clip.start,
-          captionWords: caption.words,
-          captionStyle: caption.style,
-        });
-      }
-    }
-
-    return layers;
-  }, [previewAssetId, assets, activeClips, currentTime, getAssetStreamUrl, getCaptionData]);
-
-  const previewLayers = getPreviewLayers();
-  const hasPreviewContent = previewLayers.length > 0;
-
-  // Synchronized restart: when a new overlay enters range during playback,
-  // briefly toggle isPlaying so V1 and V2 both start from paused state together
-  const prevOverlayIdsRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    const currentOverlayIds = new Set(
-      previewLayers
-        .filter(l => (l.type === 'video' && l.trackId !== 'V1') || l.type === 'audio')
-        .map(l => l.id)
-    );
-    const hasNewOverlay = [...currentOverlayIds].some(id => !prevOverlayIdsRef.current.has(id));
-    prevOverlayIdsRef.current = currentOverlayIds;
-
-    if (hasNewOverlay && isPlaying) {
-      setIsPlaying(false);
-      requestAnimationFrame(() => setIsPlaying(true));
-    }
-  }, [previewLayers, isPlaying]);
-
-  // Stable object construction — only recomputes when transitions/clips/assets change, NOT per frame
-  const allTransitionPreviews = useMemo((): ActiveTransition[] => {
+  // Build Remotion spec from timeline state
+  const activeTransitions = useMemo(() => {
     if (previewAssetId) return [];
-    const currentTransitions = activeTabId === 'main'
+    return activeTabId === 'main'
       ? timelineTransitions
       : (timelineTabs.find(t => t.id === activeTabId)?.timelineTransitions || []);
+  }, [previewAssetId, activeTabId, timelineTransitions, timelineTabs]);
 
-    return currentTransitions.map(t => {
-      const fromClip = t.fromClipId ? activeClips.find(c => c.id === t.fromClipId) : null;
-      const toClip = t.toClipId ? activeClips.find(c => c.id === t.toClipId) : null;
-      const fromAsset = fromClip ? assets.find(a => a.id === fromClip.assetId) : null;
-      const toAsset = toClip ? assets.find(a => a.id === toClip.assetId) : null;
-
-      return {
-        id: t.id,
-        transitionFileId: t.transitionFileId,
-        startTime: t.startTime,
-        durationSec: t.durationSec,
-        fromClipId: t.fromClipId ?? undefined,
-        toClipId: t.toClipId ?? undefined,
-        fromSrc: fromAsset ? (fromAsset.streamUrl || getAssetStreamUrl(fromAsset.id) || undefined) : undefined,
-        toSrc: toAsset ? (toAsset.streamUrl || getAssetStreamUrl(toAsset.id) || undefined) : undefined,
-        fromAssetType: fromAsset?.type === 'video' ? 'video' as const : fromAsset ? 'image' as const : undefined,
-        toAssetType: toAsset?.type === 'video' ? 'video' as const : toAsset ? 'image' as const : undefined,
-        fromStartSec: fromClip
-          ? Math.max(0, (t.startTime - fromClip.start) + (fromClip.inPoint || 0))
-          : 0,
-        toStartSec: toClip
-          ? Math.max(0, (t.startTime - toClip.start) + (toClip.inPoint || 0))
-          : 0,
-        params: t.params,
-      };
-    });
-  }, [previewAssetId, activeTabId, timelineTransitions, timelineTabs, activeClips, assets, getAssetStreamUrl]);
-
-  // Lightweight per-frame filter — returns SAME object references from allTransitionPreviews
-  const previewActiveTransitions = useMemo((): ActiveTransition[] => {
-    return allTransitionPreviews.filter(t =>
-      currentTime >= t.startTime && currentTime < t.startTime + t.durationSec
+  const spec = useMemo(() => {
+    if (previewAssetId || activeClips.length === 0) return null;
+    return buildRemotionSpec(
+      { clips: activeClips, tracks, assets, captionData, timelineTransitions: activeTransitions, settings },
+      { resolveSrc: (assetId) => {
+        const asset = assets.find(a => a.id === assetId);
+        return asset?.streamUrl || getAssetStreamUrl(assetId) || '';
+      }},
     );
-  }, [allTransitionPreviews, currentTime]);
+  }, [previewAssetId, activeClips, tracks, assets, captionData, activeTransitions, settings, getAssetStreamUrl]);
+
+  useEffect(() => {
+    if (!spec) return;
+    const cleanups: (() => void)[] = [];
+    for (const clip of spec.clips) {
+      if (!clip.src) continue;
+      if (clip.assetType === 'video') cleanups.push(preloadVideo(clip.src));
+      else if (clip.assetType === 'audio') cleanups.push(preloadAudio(clip.src));
+    }
+    return () => cleanups.forEach(fn => fn());
+  }, [spec]);
+
+  const compositionWidth = settings.width || 1920;
+  const compositionHeight = settings.height || 1080;
+  const previewFps = settings.fps || 30;
+
+  // Overlay clips for V2/V3 drag interaction
+  const overlayClips = useMemo((): OverlayClipInfo[] => {
+    if (previewAssetId) return [];
+    return activeClips
+      .filter(c => c.trackId === 'V2' || c.trackId === 'V3')
+      .map(c => {
+        const asset = assets.find(a => a.id === c.assetId);
+        return {
+          id: c.id,
+          trackId: c.trackId,
+          transform: c.transform,
+          assetType: (asset?.type === 'image' ? 'image' : 'video') as 'video' | 'image',
+        };
+      });
+  }, [previewAssetId, activeClips, assets]);
+
+  const hasPreviewContent = previewAsset !== null || (spec !== null && (spec.clips.length > 0 || spec.captions.length > 0));
 
   // Get duration based on active tab's clips
   const duration = useMemo(() => {
@@ -346,79 +226,47 @@ export default function Home() {
     return Math.max(...activeClips.map(c => c.start + c.duration));
   }, [activeClips]);
 
-  // Timeline playback effect
-  useEffect(() => {
-    if (isPlaying && duration > 0) {
-      lastTimeRef.current = performance.now();
+  const durationInFrames = Math.max(1, Math.round(duration * previewFps));
 
-      const animate = (now: number) => {
-        const delta = (now - lastTimeRef.current) / 1000; // Convert to seconds
-        lastTimeRef.current = now;
+  // Player event handlers — Player is the clock, currentTime follows it
+  const handleFrameUpdate = useCallback((frame: number) => {
+    setCurrentTime(frame / previewFps);
+  }, [previewFps]);
 
-        setCurrentTime(prev => {
-          const newTime = prev + delta;
-          if (newTime >= duration) {
-            setIsPlaying(false);
-            return duration;
-          }
-          return newTime;
-        });
-
-        playbackRef.current = requestAnimationFrame(animate);
-      };
-
-      playbackRef.current = requestAnimationFrame(animate);
-
-      return () => {
-        if (playbackRef.current) {
-          cancelAnimationFrame(playbackRef.current);
-        }
-      };
-    }
-  }, [isPlaying, duration]);
-
-  // Handle play/pause
-  const handlePlayPause = useCallback(() => {
-    if (currentTime >= duration && duration > 0) {
-      // If at end, restart from beginning
-      setCurrentTime(0);
-    }
-    setIsPlaying(prev => !prev);
-  }, [currentTime, duration]);
-
-  // Handle stop (go to beginning)
-  const handleStop = useCallback(() => {
-    setIsPlaying(false);
-    setCurrentTime(0);
+  const handlePlaybackChange = useCallback((playing: boolean) => {
+    setIsPlaying(playing);
   }, []);
 
-  // Handle timeline seeking — pause-before-seek pattern
-  // Seeking a playing video has 50-400ms nondeterministic completion time per element,
-  // causing V1/V2 offset. Seeking a PAUSED video is fast (5-30ms) and reliable.
-  // So: pause all elements, seek while paused, debounce resume 150ms after last seek event.
-  const handleTimelineSeek = useCallback((time: number) => {
-    // If currently playing, pause the RAF loop + all video elements before seeking
-    if (isPlaying) {
-      wasPlayingBeforeSeekRef.current = true;
-      setIsPlaying(false);
+  const handlePlayPause = useCallback(() => {
+    if (currentTime >= duration && duration > 0) {
+      videoPreviewRef.current?.seekTo(0);
     }
+    videoPreviewRef.current?.toggle();
+  }, [currentTime, duration]);
 
+  const handleStop = useCallback(() => {
+    videoPreviewRef.current?.pause();
+    videoPreviewRef.current?.seekTo(0);
+  }, []);
+
+  const handleTimelineSeek = useCallback((time: number) => {
+    if (videoPreviewRef.current?.isPlaying()) {
+      wasPlayingBeforeSeekRef.current = true;
+    }
+    videoPreviewRef.current?.seekTo(time);
     setCurrentTime(time);
 
-    // Clear any pending resume timer
     if (resumeAfterSeekRef.current !== null) {
       clearTimeout(resumeAfterSeekRef.current);
     }
-
-    // Resume 150ms after the last seek event (debounced, covers rapid scrubbing)
     resumeAfterSeekRef.current = setTimeout(() => {
       resumeAfterSeekRef.current = null;
       if (wasPlayingBeforeSeekRef.current) {
         wasPlayingBeforeSeekRef.current = false;
-        setIsPlaying(true);
+        videoPreviewRef.current?.play();
       }
     }, 150);
-  }, [isPlaying]);
+  }, []);
 
 
   // Handle asset upload
@@ -2249,16 +2097,21 @@ export default function Home() {
             {hasPreviewContent ? (
               <VideoPreview
                 ref={videoPreviewRef}
-                layers={previewLayers}
-                isPlaying={isPlaying && !previewAssetId}
+                spec={spec}
+                fps={previewFps}
+                compositionWidth={compositionWidth}
+                compositionHeight={compositionHeight}
+                durationInFrames={durationInFrames}
                 aspectRatio={aspectRatio}
+                previewAsset={previewAsset}
+                overlayClips={overlayClips}
                 onLayerMove={handleLayerMove}
                 onLayerSelect={handleLayerSelect}
                 selectedLayerId={selectedClipId}
-                activeTransitions={previewActiveTransitions}
-                currentTime={currentTime}
+                onFrameUpdate={handleFrameUpdate}
+                onPlaybackChange={handlePlaybackChange}
               />
-            ) : clips.length > 0 ? (
+            ) : activeClips.length > 0 ? (
               // Assets exist but playhead is not over any clip
               <div className={`relative ${aspectRatio === '9:16' ? 'h-[65vh] w-auto aspect-[9/16]' : 'w-full max-w-4xl aspect-video'} bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 flex items-center justify-center`}>
                 <div className="text-center text-zinc-600">

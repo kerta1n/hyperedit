@@ -46,6 +46,7 @@ export interface Track {
   type: 'video' | 'audio' | 'text';
   name: string;
   order: number;
+  muted?: boolean;
 }
 
 // Caption word with timing

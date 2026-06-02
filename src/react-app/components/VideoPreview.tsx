@@ -1,480 +1,141 @@
-import { Play, Image as ImageIcon, Layers, Move } from 'lucide-react';
-import { useRef, useEffect, forwardRef, useImperativeHandle, useMemo, useState, useCallback } from 'react';
-import CaptionRenderer from './CaptionRenderer';
-import { getCanvasDraw, getTransitionVolumes } from '@/remotion/transitions/canvas-draw';
-import type { CaptionWord, CaptionStyle } from '@/react-app/hooks/useProject';
+import { Play, Layers, Move } from 'lucide-react';
+import React, { useRef, useEffect, forwardRef, useImperativeHandle, useState, useCallback, useMemo } from 'react';
+import { Player, type PlayerRef } from '@remotion/player';
+import { ProjectTimeline } from '@/remotion/ProjectTimeline';
+import type { RemotionProjectSpec, RemotionClipTransform } from '@/shared/remotion-core';
 
-export interface ActiveTransition {
+export interface OverlayClipInfo {
   id: string;
-  transitionFileId: string;
-  startTime: number;
-  durationSec: number;
-  fromClipId?: string;
-  toClipId?: string;
-  fromSrc?: string;
-  toSrc?: string;
-  fromAssetType?: 'video' | 'image';
-  toAssetType?: 'video' | 'image';
-  fromStartSec: number;
-  toStartSec: number;
-  params: Record<string, number | string | boolean>;
-}
-
-interface ClipTransform {
-  x?: number;
-  y?: number;
-  scale?: number;
-  rotation?: number;
-  opacity?: number;
-  cropTop?: number;
-  cropBottom?: number;
-  cropLeft?: number;
-  cropRight?: number;
-}
-
-interface ClipLayer {
-  id: string;
-  url: string;
-  type: 'video' | 'image' | 'audio' | 'caption';
   trackId: string;
-  clipTime: number;
-  transform?: ClipTransform;
-  visible?: boolean;
-  captionWords?: CaptionWord[];
-  captionStyle?: CaptionStyle;
+  transform?: RemotionClipTransform;
+  assetType: 'video' | 'image';
 }
 
 interface VideoPreviewProps {
-  layers?: ClipLayer[];
-  isPlaying?: boolean;
-  aspectRatio?: '16:9' | '9:16';
+  spec: RemotionProjectSpec | null;
+  fps: number;
+  compositionWidth: number;
+  compositionHeight: number;
+  durationInFrames: number;
+  aspectRatio: '16:9' | '9:16';
+  previewAsset?: { url: string; type: 'video' | 'image' | 'audio' } | null;
+  overlayClips?: OverlayClipInfo[];
   onLayerMove?: (layerId: string, x: number, y: number) => void;
   onLayerSelect?: (layerId: string) => void;
   selectedLayerId?: string | null;
-  activeTransitions?: ActiveTransition[];
-  currentTime?: number;
+  onFrameUpdate?: (frame: number) => void;
+  onPlaybackChange?: (isPlaying: boolean) => void;
 }
 
 export interface VideoPreviewHandle {
   seekTo: (time: number) => void;
-  getVideoElement: () => HTMLVideoElement | null;
-}
-
-// Helper to build CSS styles from transform
-function getTransformStyles(transform?: ClipTransform, zIndex: number = 0, isDragging?: boolean): React.CSSProperties {
-  const t = transform || {};
-
-  const transforms: string[] = [];
-
-  // Position (translate)
-  if (t.x || t.y) {
-    transforms.push(`translate(${t.x || 0}px, ${t.y || 0}px)`);
-  }
-
-  // Scale
-  if (t.scale && t.scale !== 1) {
-    transforms.push(`scale(${t.scale})`);
-  }
-
-  // Rotation
-  if (t.rotation) {
-    transforms.push(`rotate(${t.rotation}deg)`);
-  }
-
-  // Crop using clip-path
-  const cropTop = t.cropTop || 0;
-  const cropBottom = t.cropBottom || 0;
-  const cropLeft = t.cropLeft || 0;
-  const cropRight = t.cropRight || 0;
-  const hasClip = cropTop || cropBottom || cropLeft || cropRight;
-
-  return {
-    zIndex,
-    transform: transforms.length > 0 ? transforms.join(' ') : undefined,
-    opacity: t.opacity ?? 1,
-    clipPath: hasClip
-      ? `inset(${cropTop}% ${cropRight}% ${cropBottom}% ${cropLeft}%)`
-      : undefined,
-    cursor: isDragging ? 'grabbing' : undefined,
-  };
+  play: () => void;
+  pause: () => void;
+  toggle: () => void;
+  isPlaying: () => boolean;
 }
 
 const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
-  layers = [],
-  isPlaying = false,
-  aspectRatio = '16:9',
+  spec,
+  fps,
+  compositionWidth,
+  compositionHeight,
+  durationInFrames,
+  aspectRatio,
+  previewAsset,
+  overlayClips = [],
   onLayerMove,
   onLayerSelect,
   selectedLayerId,
-  activeTransitions = [],
-  currentTime = 0,
+  onFrameUpdate,
+  onPlaybackChange,
 }, ref) => {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const loadedSrcRef = useRef<string | null>(null);
-  const overlayVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
+  const playerRef = useRef<PlayerRef>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const hiddenVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
-  const hiddenImageRefs = useRef<Map<string, HTMLImageElement>>(new Map());
-  const currentTimeRef = useRef(currentTime);
-  currentTimeRef.current = currentTime;
-  const activeTransitionsRef = useRef(activeTransitions);
-  activeTransitionsRef.current = activeTransitions;
   const [draggingLayer, setDraggingLayer] = useState<string | null>(null);
-  const hasActiveTransition = activeTransitions.length > 0;
   const [dragStart, setDragStart] = useState<{ x: number; y: number; layerX: number; layerY: number } | null>(null);
-
-  // Find the base video layer (V1) for audio/playback control
-  const foundBaseLayer = layers.find(l => l.trackId === 'V1' && l.type === 'video');
-  const baseLayerId = foundBaseLayer?.id;
-  const baseLayerUrl = foundBaseLayer?.url;
-  const baseLayerClipTime = foundBaseLayer?.clipTime;
-
-  // Memoize to prevent effect triggers when only caption layers change
-  const baseVideoLayer = useMemo(() => {
-    return foundBaseLayer;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [baseLayerId, baseLayerUrl]);
-
-  // Get all layers sorted by track for rendering (V1 at bottom, then V2/V3, then T1 captions on top)
-  const sortedLayers = useMemo(() => {
-    const getTrackOrder = (trackId: string) => {
-      if (trackId === 'V1') return 0;
-      if (trackId === 'V2') return 1;
-      if (trackId === 'V3') return 2;
-      if (trackId.startsWith('T')) return 10; // Text/caption tracks on top
-      return 5; // Other tracks in between
-    };
-    return [...layers].sort((a, b) => getTrackOrder(a.trackId) - getTrackOrder(b.trackId));
-  }, [layers]);
+  const onFrameUpdateRef = useRef(onFrameUpdate);
+  onFrameUpdateRef.current = onFrameUpdate;
+  const onPlaybackChangeRef = useRef(onPlaybackChange);
+  onPlaybackChangeRef.current = onPlaybackChange;
 
   useImperativeHandle(ref, () => ({
     seekTo: (time: number) => {
-      if (videoRef.current) videoRef.current.currentTime = time;
+      const player = playerRef.current;
+      if (!player) return;
+      player.pause();
+      player.seekTo(Math.round(time * fps));
     },
-    getVideoElement: () => videoRef.current,
+    play: () => { playerRef.current?.play(); },
+    pause: () => { playerRef.current?.pause(); },
+    toggle: () => {
+      const player = playerRef.current;
+      if (!player) return;
+      if (player.isPlaying()) {
+        player.pause();
+      } else {
+        player.play();
+      }
+    },
+    isPlaying: () => playerRef.current?.isPlaying() ?? false,
   }));
 
-  // Reload video when source URL changes (e.g., after dead air removal)
-  // Using stable key + manual load() preserves the audio permission from user gesture
+  // Subscribe to Player events
   useEffect(() => {
-    const video = videoRef.current;
-    if (!video || !baseLayerUrl) return;
-    if (loadedSrcRef.current !== baseLayerUrl) {
-      if (loadedSrcRef.current) {
-        console.log('[VideoPreview] Source changed, reloading video with audio');
-        console.log('[VideoPreview] Old:', loadedSrcRef.current?.slice(-60));
-        console.log('[VideoPreview] New:', baseLayerUrl.slice(-60));
-      }
-      video.src = baseLayerUrl;
-      video.load();
-      loadedSrcRef.current = baseLayerUrl;
-    }
-  }, [baseLayerUrl]);
+    const player = playerRef.current;
+    if (!player) return;
 
-
-
-  // --- Canvas transition compositing ---
-
-  const getVideoSource = useCallback((clipId: string | undefined, src: string | undefined, assetType: string | undefined): CanvasImageSource | null => {
-    if (!clipId && !src) return null;
-
-    // Try native elements first
-    if (clipId) {
-      if (clipId === baseLayerId && videoRef.current) return videoRef.current;
-      const overlay = overlayVideoRefs.current.get(clipId);
-      if (overlay) return overlay;
-    }
-
-    // Hidden video/image fallback
-    if (src) {
-      if (assetType === 'image') {
-        let img = hiddenImageRefs.current.get(src);
-        if (!img) {
-          img = new Image();
-          img.crossOrigin = 'anonymous';
-          img.src = src;
-          hiddenImageRefs.current.set(src, img);
-        }
-        return img.complete ? img : null;
-      }
-      const hidden = hiddenVideoRefs.current.get(src);
-      if (hidden && hidden.readyState >= 2) return hidden;
-    }
-    return null;
-  }, [baseLayerId]);
-
-  const drawFrame = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const ct = currentTimeRef.current;
-    const transitions = activeTransitionsRef.current;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    for (const t of transitions) {
-      const progress = Math.max(0, Math.min(1, (ct - t.startTime) / t.durationSec));
-      const drawFn = getCanvasDraw(t.transitionFileId);
-      const fromEl = getVideoSource(t.fromClipId, t.fromSrc, t.fromAssetType);
-      const toEl = getVideoSource(t.toClipId, t.toSrc, t.toAssetType);
-      drawFn(ctx, fromEl, toEl, progress, canvas.width, canvas.height, t.params);
-
-      // Volume crossfade
-      const { fromVolume, toVolume } = getTransitionVolumes(t.transitionFileId, progress);
-      if (t.fromClipId) {
-        const fromVideo = t.fromClipId === baseLayerId ? videoRef.current : overlayVideoRefs.current.get(t.fromClipId);
-        if (fromVideo) fromVideo.volume = fromVolume;
-      }
-      if (t.toClipId) {
-        const toVideo = t.toClipId === baseLayerId ? videoRef.current : overlayVideoRefs.current.get(t.toClipId);
-        if (toVideo) toVideo.volume = toVolume;
-      }
-    }
-  }, [getVideoSource, baseLayerId]);
-
-  // rAF loop when playing with active transitions
-  useEffect(() => {
-    if (!hasActiveTransition || !isPlaying) return;
-    let animId: number;
-    const loop = () => {
-      drawFrame();
-      animId = requestAnimationFrame(loop);
+    const onFrame = (e: { detail: { frame: number } }) => {
+      onFrameUpdateRef.current?.(e.detail.frame);
     };
-    animId = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(animId);
-  }, [hasActiveTransition, isPlaying, drawFrame]);
+    const onPlay = () => { onPlaybackChangeRef.current?.(true); };
+    const onPause = () => { onPlaybackChangeRef.current?.(false); };
+    const onEnded = () => { onPlaybackChangeRef.current?.(false); };
 
-  // Single draw on scrub (paused)
-  useEffect(() => {
-    if (!hasActiveTransition || isPlaying) return;
-    drawFrame();
-  }, [currentTime, hasActiveTransition, isPlaying, drawFrame]);
+    player.addEventListener('frameupdate', onFrame);
+    player.addEventListener('play', onPlay);
+    player.addEventListener('pause', onPause);
+    player.addEventListener('ended', onEnded);
 
-  // Manage hidden videos for same-track transitions
-  useEffect(() => {
-    const neededSrcs = new Set<string>();
-    for (const t of activeTransitions) {
-      if (t.fromSrc && t.fromAssetType === 'video') {
-        const hasNative = (t.fromClipId === baseLayerId && videoRef.current) ||
-          (t.fromClipId && overlayVideoRefs.current.has(t.fromClipId));
-        if (!hasNative) neededSrcs.add(t.fromSrc);
-      }
-      if (t.toSrc && t.toAssetType === 'video') {
-        const hasNative = (t.toClipId === baseLayerId && videoRef.current) ||
-          (t.toClipId && overlayVideoRefs.current.has(t.toClipId));
-        if (!hasNative) neededSrcs.add(t.toSrc);
-      }
-    }
-
-    // Create missing hidden videos
-    for (const src of neededSrcs) {
-      if (!hiddenVideoRefs.current.has(src)) {
-        const v = document.createElement('video');
-        v.preload = 'auto';
-        v.playsInline = true;
-        v.muted = true;
-        v.src = src;
-        v.style.display = 'none';
-        document.body.appendChild(v);
-        hiddenVideoRefs.current.set(src, v);
-      }
-    }
-
-    // Remove stale hidden videos
-    for (const [src, v] of hiddenVideoRefs.current) {
-      if (!neededSrcs.has(src)) {
-        v.pause();
-        v.src = '';
-        v.load();
-        v.remove();
-        hiddenVideoRefs.current.delete(src);
-      }
-    }
-  }, [activeTransitions, baseLayerId]);
-
-  // Sync hidden video currentTime
-  useEffect(() => {
-    for (const t of activeTransitions) {
-      const elapsed = currentTime - t.startTime;
-      if (t.fromSrc && t.fromAssetType === 'video') {
-        const hidden = hiddenVideoRefs.current.get(t.fromSrc);
-        if (hidden) {
-          const targetTime = t.fromStartSec + elapsed;
-          if (isPlaying) {
-            if (hidden.paused) {
-              hidden.currentTime = targetTime;
-              hidden.play().catch(() => {});
-            }
-          } else {
-            hidden.pause();
-            if (Math.abs(hidden.currentTime - targetTime) > 0.05) {
-              hidden.currentTime = targetTime;
-            }
-          }
-        }
-      }
-      if (t.toSrc && t.toAssetType === 'video') {
-        const hidden = hiddenVideoRefs.current.get(t.toSrc);
-        if (hidden) {
-          const targetTime = t.toStartSec + elapsed;
-          if (isPlaying) {
-            if (hidden.paused) {
-              hidden.currentTime = targetTime;
-              hidden.play().catch(() => {});
-            }
-          } else {
-            hidden.pause();
-            if (Math.abs(hidden.currentTime - targetTime) > 0.05) {
-              hidden.currentTime = targetTime;
-            }
-          }
-        }
-      }
-    }
-  }, [activeTransitions, currentTime, isPlaying]);
-
-  // Reset volumes when transitions end + cleanup on unmount
-  useEffect(() => {
-    if (!hasActiveTransition) {
-      if (videoRef.current) videoRef.current.volume = 1;
-      overlayVideoRefs.current.forEach(v => { v.volume = 1; });
-    }
-  }, [hasActiveTransition]);
-
-  useEffect(() => {
-    const refs = hiddenVideoRefs.current;
     return () => {
-      refs.forEach(v => { v.pause(); v.src = ''; v.load(); v.remove(); });
-      refs.clear();
+      player.removeEventListener('frameupdate', onFrame);
+      player.removeEventListener('play', onPlay);
+      player.removeEventListener('pause', onPause);
+      player.removeEventListener('ended', onEnded);
     };
-  }, []);
+  }, [spec]);
 
-  // Coordinated media sync: V1 + overlays play/pause/seek in ONE effect.
-  // V1 never starts until all overlays are ready (canplay).
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
+  // Drag: convert screen deltas to composition-space deltas
+  const getScreenScale = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return 1;
+    return el.clientWidth / compositionWidth;
+  }, [compositionWidth]);
 
-    const overlayMedia = layers.filter(
-      l => (l.type === 'video' && l.trackId !== 'V1') || l.type === 'audio'
-    );
-
-    if (!isPlaying) {
-      video.pause();
-      if (baseLayerClipTime !== undefined && Math.abs(video.currentTime - baseLayerClipTime) > 0.05) {
-        video.currentTime = baseLayerClipTime;
-      }
-      for (const layer of overlayMedia) {
-        const el = overlayVideoRefs.current.get(layer.id);
-        if (!el || layer.clipTime === undefined) continue;
-        if (!el.paused) el.pause();
-        if (Math.abs(el.currentTime - layer.clipTime) > 0.05) {
-          el.currentTime = layer.clipTime;
-        }
-      }
-      return;
-    }
-
-    // PLAYING: collect paused overlays that need to start
-    const toStart: HTMLMediaElement[] = [];
-    for (const layer of overlayMedia) {
-      const el = overlayVideoRefs.current.get(layer.id);
-      if (!el || layer.clipTime === undefined) continue;
-      if (el.paused) {
-        if (Math.abs(el.currentTime - layer.clipTime) > 0.05) {
-          el.currentTime = layer.clipTime;
-        }
-        toStart.push(el);
-      } else if (Math.abs(el.currentTime - layer.clipTime) > 0.5) {
-        el.currentTime = layer.clipTime;
-      }
-    }
-
-    if (toStart.length === 0) {
-      if (video.paused) video.play().catch(() => {});
-      return;
-    }
-
-    // Wait for ALL overlays to be ready, then play V1 + overlays TOGETHER
-    let cancelled = false;
-    const playAll = () => {
-      if (cancelled) return;
-      cancelled = true;
-      if (video.paused) video.play().catch(() => {});
-      for (const el of toStart) {
-        if (el.paused) el.play().catch(() => {});
-      }
-    };
-
-    const notReady = toStart.filter(el => el.readyState < 3);
-    if (notReady.length === 0) {
-      playAll();
-    } else {
-      let remaining = notReady.length;
-      const handlers: [HTMLMediaElement, () => void][] = [];
-      for (const el of notReady) {
-        const handler = () => {
-          remaining--;
-          if (remaining === 0) playAll();
-        };
-        handlers.push([el, handler]);
-        el.addEventListener('canplay', handler, { once: true });
-      }
-      const timer = setTimeout(playAll, 300);
-      return () => {
-        cancelled = true;
-        clearTimeout(timer);
-        for (const [el, handler] of handlers) {
-          el.removeEventListener('canplay', handler);
-        }
-      };
-    }
-
-    return () => { cancelled = true; };
-  }, [isPlaying, baseLayerClipTime, layers]);
-
-  // Seek on load
-  const handleLoaded = () => {
-    if (videoRef.current && baseLayerClipTime !== undefined) {
-      videoRef.current.currentTime = baseLayerClipTime;
-    }
-  };
-
-  // Handle mouse down on draggable layer
-  const handleLayerMouseDown = useCallback((e: React.MouseEvent, layer: ClipLayer) => {
-    // Only allow dragging non-V1 layers (overlays)
-    if (layer.trackId === 'V1') return;
+  const handleLayerMouseDown = useCallback((e: React.MouseEvent, clip: OverlayClipInfo) => {
+    if (clip.trackId === 'V1') return;
     if (e.button !== 0) return;
-
     e.preventDefault();
     e.stopPropagation();
-
-    setDraggingLayer(layer.id);
+    setDraggingLayer(clip.id);
     setDragStart({
       x: e.clientX,
       y: e.clientY,
-      layerX: layer.transform?.x || 0,
-      layerY: layer.transform?.y || 0,
+      layerX: clip.transform?.x || 0,
+      layerY: clip.transform?.y || 0,
     });
-
-    // Select this layer
-    onLayerSelect?.(layer.id);
+    onLayerSelect?.(clip.id);
   }, [onLayerSelect]);
 
-  // Handle mouse move for dragging
   useEffect(() => {
     if (!draggingLayer || !dragStart) return;
 
+    const scale = getScreenScale();
+
     const handleMouseMove = (e: MouseEvent) => {
-      const deltaX = e.clientX - dragStart.x;
-      const deltaY = e.clientY - dragStart.y;
-
-      const newX = dragStart.layerX + deltaX;
-      const newY = dragStart.layerY + deltaY;
-
-      onLayerMove?.(draggingLayer, newX, newY);
+      const deltaX = (e.clientX - dragStart.x) / scale;
+      const deltaY = (e.clientY - dragStart.y) / scale;
+      onLayerMove?.(draggingLayer, dragStart.layerX + deltaX, dragStart.layerY + deltaY);
     };
 
     const handleMouseUp = () => {
@@ -484,30 +145,44 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
 
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
-
     return () => {
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [draggingLayer, dragStart, onLayerMove]);
+  }, [draggingLayer, dragStart, onLayerMove, getScreenScale]);
 
-  // Aspect ratio styles
+  const inputProps = useMemo(() => ({ spec: spec! }), [spec]);
+
   const isVertical = aspectRatio === '9:16';
-  // Use object-contain to show full video without cropping
-  const videoFitClass = 'object-contain';
-
-  // Container classes based on aspect ratio
   const containerClass = isVertical
-    ? 'h-[65vh] w-auto aspect-[9/16]'  // Vertical: fixed height, width from aspect ratio
-    : 'w-full max-w-4xl aspect-video';  // Horizontal: constrain width, height follows
+    ? 'h-[65vh] w-auto aspect-[9/16]'
+    : 'w-full max-w-4xl aspect-video';
 
-  // Separate base video from overlay layers to prevent re-render issues
-  const overlayLayers = useMemo(() =>
-    sortedLayers.filter(l => !(l.trackId === 'V1' && l.type === 'video')),
-    [sortedLayers]
-  );
+  // Single-asset preview mode
+  if (previewAsset) {
+    return (
+      <div className={`relative ${containerClass} bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10`}>
+        {previewAsset.type === 'video' ? (
+          <video
+            src={previewAsset.url}
+            className="absolute inset-0 w-full h-full object-contain"
+            playsInline
+            preload="auto"
+            controls
+          />
+        ) : previewAsset.type === 'image' ? (
+          <img
+            src={previewAsset.url}
+            alt="Preview"
+            className="absolute inset-0 w-full h-full object-contain"
+          />
+        ) : null}
+      </div>
+    );
+  }
 
-  if (layers.length === 0) {
+  // No spec — empty state
+  if (!spec || durationInFrames < 1) {
     return (
       <div className={`relative ${containerClass} bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10 flex items-center justify-center`}>
         <div className="text-center text-zinc-600">
@@ -523,176 +198,102 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
       ref={containerRef}
       className={`relative ${containerClass} bg-black rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10`}
     >
-      {/* Base video layer (V1) - rendered separately for stability */}
-      {foundBaseLayer && (
-        <video
-          key="base-video"
-          ref={videoRef}
-          src={foundBaseLayer.url}
-          className={`absolute inset-0 w-full h-full ${videoFitClass}`}
-          style={{ zIndex: 1 }}
-          playsInline
-          preload="auto"
-          onLoadedData={handleLoaded}
-        />
-      )}
-
-      {/* Render overlay layers (V2+, images, captions) */}
-      {overlayLayers.map((layer, index) => {
-        const isOverlay = layer.trackId !== 'V1';
-        const isDragging = draggingLayer === layer.id;
-        const isSelected = selectedLayerId === layer.id;
-        const styles = getTransformStyles(layer.transform, index + 2, isDragging);
-
-        if (layer.type === 'video') {
-          return (
-            <video
-              key={`${layer.id}-${layer.url}`}
-              ref={(el) => {
-                if (el) {
-                  overlayVideoRefs.current.set(layer.id, el);
-                } else {
-                  overlayVideoRefs.current.delete(layer.id);
-                }
-              }}
-              src={layer.url}
-              className={`absolute inset-0 w-full h-full ${videoFitClass} cursor-grab active:cursor-grabbing ${
-                isSelected ? 'ring-2 ring-orange-500 ring-offset-2 ring-offset-black' : ''
-              }`}
-              style={styles}
-              playsInline
-              preload="auto"
-              onLoadedData={(e) => {
-                e.currentTarget.currentTime = layer.clipTime ?? 0;
-              }}
-              onMouseDown={(e) => handleLayerMouseDown(e, layer)}
-            />
-          );
-        }
-
-        if (layer.type === 'image') {
-          // For overlay images (V2, V3), use explicit sizing instead of fill-then-scale
-          if (isOverlay) {
-            const scale = layer.transform?.scale || 0.2;
-            const xOffset = layer.transform?.x || 0;
-            const yOffset = layer.transform?.y || 0;
-            const baseZIndex = (styles.zIndex as number) || 0;
-
-            return (
-              <div
-                key={layer.id}
-                className="absolute cursor-grab active:cursor-grabbing"
-                style={{
-                  width: `${scale * 100}%`,
-                  top: `calc(70% + ${yOffset}px)`,
-                  left: `calc(50% + ${xOffset}px)`,
-                  transform: 'translateX(-50%)',
-                  zIndex: baseZIndex + 100,
-                  opacity: layer.transform?.opacity ?? 1,
-                }}
-                onMouseDown={(e) => handleLayerMouseDown(e, layer)}
-              >
-                <img
-                  src={layer.url}
-                  alt="Layer"
-                  className="w-full h-auto rounded-lg shadow-lg pointer-events-none"
-                  draggable={false}
-                />
-                {/* Selection indicator */}
-                {isSelected && (
-                  <div className="absolute inset-0 ring-2 ring-orange-500 rounded-lg pointer-events-none" />
-                )}
-                {/* Drag handle indicator */}
-                {!isDragging && (
-                  <div className="absolute top-2 right-2 p-1.5 bg-black/60 rounded text-white/70 pointer-events-none">
-                    <Move className="w-3 h-3" />
-                  </div>
-                )}
-              </div>
-            );
-          }
-
-          // For V1 images (full background), use the original fill approach
-          return (
-            <div
-              key={layer.id}
-              className="absolute inset-0 w-full h-full"
-              style={{ ...styles, pointerEvents: 'none' }}
-            >
-              <img
-                src={layer.url}
-                alt="Layer"
-                className="w-full h-full object-contain pointer-events-none"
-                draggable={false}
-              />
-            </div>
-          );
-        }
-
-        if (layer.type === 'caption' && layer.captionWords && layer.captionStyle) {
-          return (
-            <CaptionRenderer
-              key={layer.id}
-              words={layer.captionWords}
-              style={layer.captionStyle}
-              currentTime={layer.clipTime}
-            />
-          );
-        }
-
-        if (layer.type === 'audio') {
-          return (
-            <audio
-              key={`audio-${layer.id}`}
-              ref={(el) => {
-                if (el) {
-                  overlayVideoRefs.current.set(layer.id, el as unknown as HTMLVideoElement);
-                } else {
-                  overlayVideoRefs.current.delete(layer.id);
-                }
-              }}
-              src={layer.url}
-              preload="auto"
-              onLoadedData={(e) => {
-                e.currentTarget.currentTime = layer.clipTime ?? 0;
-              }}
-              style={{ display: 'none' }}
-            />
-          );
-        }
-
-        return null;
-      })}
-
-      {/* Canvas transition compositor */}
-      <canvas
-        ref={canvasRef}
-        width={isVertical ? 1080 : 1920}
-        height={isVertical ? 1920 : 1080}
+      <Player
+        ref={playerRef}
+        component={ProjectTimeline}
+        inputProps={inputProps}
+        durationInFrames={durationInFrames}
+        fps={fps}
+        compositionWidth={compositionWidth}
+        compositionHeight={compositionHeight}
         style={{
-          position: 'absolute',
-          inset: 0,
           width: '100%',
           height: '100%',
-          zIndex: 50,
-          pointerEvents: 'none',
-          display: hasActiveTransition ? 'block' : 'none',
         }}
       />
 
-      {/* Layer count indicator */}
-      {layers.length > 1 && (
-        <div className="absolute top-3 left-3 text-xs text-white/60 bg-black/50 px-2 py-1 rounded flex items-center gap-1 z-50">
-          <Layers className="w-3 h-3" />
-          <span>{layers.length} layers</span>
+      {/* Transparent drag overlay for V2/V3 interaction */}
+      {overlayClips.length > 0 && (
+        <div
+          className="absolute inset-0"
+          style={{ zIndex: 10, pointerEvents: 'none' }}
+        >
+          {overlayClips.map((clip) => {
+            const scale = clip.transform?.scale ?? 1;
+            const x = clip.transform?.x ?? 0;
+            const y = clip.transform?.y ?? 0;
+            const isSelected = selectedLayerId === clip.id;
+            const isDragging = draggingLayer === clip.id;
+
+            if (clip.assetType === 'image') {
+              // Image overlay hit-box: positioned like ProjectTimeline's AbsoluteFill + transform
+              const screenScale = getScreenScale();
+              const hitW = compositionWidth * scale * screenScale;
+              const hitH = compositionHeight * scale * screenScale;
+              const hitLeft = (containerRef.current?.clientWidth ?? 0) / 2 + x * screenScale - hitW / 2;
+              const hitTop = (containerRef.current?.clientHeight ?? 0) / 2 + y * screenScale - hitH / 2;
+
+              return (
+                <div
+                  key={clip.id}
+                  className="absolute cursor-grab active:cursor-grabbing"
+                  style={{
+                    pointerEvents: 'auto',
+                    left: hitLeft,
+                    top: hitTop,
+                    width: hitW,
+                    height: hitH,
+                  }}
+                  onMouseDown={(e) => handleLayerMouseDown(e, clip)}
+                >
+                  {isSelected && (
+                    <div className="absolute inset-0 ring-2 ring-orange-500 rounded-lg pointer-events-none" />
+                  )}
+                  {!isDragging && (
+                    <div className="absolute top-2 right-2 p-1.5 bg-black/60 rounded text-white/70 pointer-events-none">
+                      <Move className="w-3 h-3" />
+                    </div>
+                  )}
+                </div>
+              );
+            }
+
+            // Video overlay hit-box
+            const screenScale = getScreenScale();
+            const hitW = compositionWidth * scale * screenScale;
+            const hitH = compositionHeight * scale * screenScale;
+            const hitLeft = (containerRef.current?.clientWidth ?? 0) / 2 + x * screenScale - hitW / 2;
+            const hitTop = (containerRef.current?.clientHeight ?? 0) / 2 + y * screenScale - hitH / 2;
+
+            return (
+              <div
+                key={clip.id}
+                className="absolute cursor-grab active:cursor-grabbing"
+                style={{
+                  pointerEvents: 'auto',
+                  left: hitLeft,
+                  top: hitTop,
+                  width: hitW,
+                  height: hitH,
+                }}
+                onMouseDown={(e) => handleLayerMouseDown(e, clip)}
+              >
+                {isSelected && (
+                  <div className="absolute inset-0 ring-2 ring-orange-500 pointer-events-none" />
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
 
-      {/* Type indicator */}
-      <div className="absolute bottom-3 right-3 text-xs text-white/60 bg-black/50 px-2 py-1 rounded flex items-center gap-1 z-50">
-        {baseVideoLayer ? <Play className="w-3 h-3" /> : <ImageIcon className="w-3 h-3" />}
-        <span>{baseVideoLayer ? 'video' : layers[0]?.type}</span>
-      </div>
+      {/* Layer count */}
+      {spec.clips.length > 1 && (
+        <div className="absolute top-3 left-3 text-xs text-white/60 bg-black/50 px-2 py-1 rounded flex items-center gap-1 z-50">
+          <Layers className="w-3 h-3" />
+          <span>{spec.clips.length} layers</span>
+        </div>
+      )}
 
       {/* Dragging indicator */}
       {draggingLayer && (
@@ -704,4 +305,4 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   );
 });
 
-export default VideoPreview;
+export default React.memo(VideoPreview);
