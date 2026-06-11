@@ -1,7 +1,8 @@
 import { Play, Image as ImageIcon, Layers, Move } from 'lucide-react';
 import { useRef, useEffect, forwardRef, useImperativeHandle, useMemo, useState, useCallback } from 'react';
 import CaptionRenderer from './CaptionRenderer';
-import TransitionPreview, { type ActiveTransition } from './TransitionPreview';
+import { type ActiveTransition } from './TransitionPreview';
+import { getCanvasDraw } from '@/remotion/transitions/canvas-draw';
 import type { CaptionWord, CaptionStyle } from '@/react-app/hooks/useProject';
 
 interface ClipTransform {
@@ -22,8 +23,10 @@ interface ClipLayer {
   type: 'video' | 'image' | 'audio' | 'caption';
   trackId: string;
   clipTime: number;
+  clipStart: number;
+  inPoint: number;
+  isPremounted?: boolean;
   transform?: ClipTransform;
-  // Caption-specific data
   captionWords?: CaptionWord[];
   captionStyle?: CaptionStyle;
 }
@@ -37,6 +40,8 @@ interface VideoPreviewProps {
   selectedLayerId?: string | null;
   activeTransitions?: ActiveTransition[];
   currentTime?: number;
+  currentTimeRef?: React.MutableRefObject<number>;
+  onV1Seeked?: (projectTime: number) => void;
 }
 
 export interface VideoPreviewHandle {
@@ -92,11 +97,20 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
   selectedLayerId,
   activeTransitions = [],
   currentTime = 0,
+  currentTimeRef,
+  onV1Seeked,
 }, ref) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const loadedSrcRef = useRef<string | null>(null);
   const overlayVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
   const containerRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const hiddenImageRefs = useRef<Map<string, HTMLImageElement>>(new Map());
+  const hiddenVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
+  const activeTransitionsRef = useRef<ActiveTransition[]>([]);
+  activeTransitionsRef.current = activeTransitions;
+  const wasPlayingRef = useRef(false);
+  const measSessionRef = useRef(0);
   const [draggingLayer, setDraggingLayer] = useState<string | null>(null);
   const [dragStart, setDragStart] = useState<{ x: number; y: number; layerX: number; layerY: number } | null>(null);
 
@@ -137,25 +151,29 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     const video = videoRef.current;
     if (!video || !baseLayerUrl) return;
     if (loadedSrcRef.current !== baseLayerUrl) {
-      if (loadedSrcRef.current) {
-        console.log('[VideoPreview] Source changed, reloading video with audio');
-        console.log('[VideoPreview] Old:', loadedSrcRef.current?.slice(-60));
-        console.log('[VideoPreview] New:', baseLayerUrl.slice(-60));
-      }
       video.src = baseLayerUrl;
       video.load();
       loadedSrcRef.current = baseLayerUrl;
     }
   }, [baseLayerUrl]);
 
-  // Seek control for base video (only when paused/scrubbing)
+  // Seek control for base video — fires on boundary crossings, user seeks, and pause
   useEffect(() => {
     const video = videoRef.current;
     if (!video || baseLayerClipTime === undefined) return;
-    if (isPlaying) return;
 
     if (Math.abs(video.currentTime - baseLayerClipTime) > 0.1) {
-      video.currentTime = baseLayerClipTime;
+      const requested = baseLayerClipTime;
+      video.currentTime = requested;
+      const immediate = video.currentTime;
+      console.log(`[V2MEAS][seekReq] id=V1 trackId=V1 requested=${requested.toFixed(4)} immediate=${immediate.toFixed(4)} eps_immediate=${(immediate - requested).toFixed(4)}`);
+      const t0 = performance.now();
+      const onMeasSeeked = () => {
+        const elapsed = performance.now() - t0;
+        const settled = video.currentTime;
+        console.log(`[V2MEAS][seekSettled] id=V1 trackId=V1 requested=${requested.toFixed(4)} settled=${settled.toFixed(4)} eps=${(settled - requested).toFixed(4)} elapsedMs=${elapsed.toFixed(0)}`);
+      };
+      video.addEventListener('seeked', onMeasSeeked, { once: true });
     }
   }, [baseLayerClipTime, isPlaying]);
 
@@ -165,39 +183,125 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     if (!video) return;
 
     if (isPlaying) {
+      const tr = video.buffered;
+      const ranges: [string, string][] = [];
+      for (let i = 0; i < tr.length; i++) ranges.push([tr.start(i).toFixed(2), tr.end(i).toFixed(2)]);
+      console.log(`[V2MEAS][playPrep] id=V1 trackId=V1 readyState=${video.readyState} buffered=${JSON.stringify(ranges)} ct=${video.currentTime.toFixed(3)}`);
+      measSessionRef.current += 1;
+      const session = measSessionRef.current;
+      const playT0 = performance.now();
       video.play().catch((err) => {
         console.error('[VideoPreview] Play failed:', err.name, err.message);
       });
+      if (typeof (video as HTMLVideoElement).requestVideoFrameCallback === 'function') {
+        (video as HTMLVideoElement).requestVideoFrameCallback((now, meta) => {
+          if (session !== measSessionRef.current) return;
+          const m = meta as VideoFrameCallbackMetadata;
+          const played = video.played;
+          const playedRanges: [string, string][] = [];
+          for (let i = 0; i < played.length; i++) playedRanges.push([played.start(i).toFixed(3), played.end(i).toFixed(3)]);
+          console.log(`[V2MEAS][firstFrame] id=V1 trackId=V1 playToFrameMs=${(now - playT0).toFixed(0)} mediaTime=${meta.mediaTime.toFixed(4)} expectedCT=${video.currentTime.toFixed(4)} expectedDisplayTime=${m.expectedDisplayTime?.toFixed(2) ?? 'na'} presentationTime=${m.presentationTime?.toFixed(2) ?? 'na'} processingDuration=${m.processingDuration?.toFixed(4) ?? 'na'} presentedFrames=${m.presentedFrames ?? 'na'} captureTime=${m.captureTime?.toFixed(2) ?? 'na'} played=${JSON.stringify(playedRanges)}`);
+        });
+      }
     } else {
       video.pause();
     }
   }, [isPlaying]);
 
-  // Play/pause control for overlay videos (V2, V3, etc.)
+  // After V1 finishes seeking, correct currentTimeRef and React state to V1's actual
+  // post-keyframe-snap position. V1 snaps backward to the nearest keyframe (ε can be
+  // several seconds). Without this, every layer.clipTime is computed from the requested
+  // seek time, not V1's real position — creating a persistent ε offset in all overlays.
   useEffect(() => {
-    overlayVideoRefs.current.forEach((video) => {
-      if (isPlaying) {
-        video.play().catch(() => {});
+    const v1Video = videoRef.current;
+    if (!v1Video || !currentTimeRef) return;
+    const onSeeked = () => {
+      const v1Layer = layers.find(l => l.trackId === 'V1' && l.type === 'video');
+      const projectTime = v1Video.currentTime + (v1Layer?.clipStart ?? 0) - (v1Layer?.inPoint ?? 0);
+      currentTimeRef.current = projectTime;
+      onV1Seeked?.(projectTime);
+    };
+    v1Video.addEventListener('seeked', onSeeked);
+    return () => v1Video.removeEventListener('seeked', onSeeked);
+  }, [layers, currentTimeRef, onV1Seeked]);
+
+  // Play/pause control for overlay videos (V2, V3, etc.)
+  // `layers` dep: fires at boundary crossings so newly-loaded videos start playing even if
+  // onLoadedData's play() was aborted by a boundary-triggered seek.
+  useEffect(() => {
+    overlayVideoRefs.current.forEach((video, id) => {
+      const layer = layers.find(l => l.id === id);
+      if (layer && (layer.trackId === 'V2' || layer.trackId === 'V3')) {
+        console.log(`[V2DBG][playEffect] id=${id} isPremounted=${layer.isPremounted} isPlaying=${isPlaying} readyState=${video.readyState} paused=${video.paused} ct=${video.currentTime.toFixed(3)}`);
+        const tr = video.buffered;
+        const ranges: [string, string][] = [];
+        for (let i = 0; i < tr.length; i++) ranges.push([tr.start(i).toFixed(2), tr.end(i).toFixed(2)]);
+        console.log(`[V2MEAS][playPrep] id=${id} trackId=${layer.trackId} readyState=${video.readyState} buffered=${JSON.stringify(ranges)} requested=${layer.clipTime.toFixed(3)} isPremounted=${layer.isPremounted}`);
+      }
+      if (isPlaying && layer && !layer.isPremounted) {
+        if (video.paused && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+          // 3a drift gate at 30ms (one frame at 30fps). Skip the redundant pre-play seek
+          // if V2 is already at target; redundant seek flushes Chrome decoder pipeline.
+          if (Math.abs(video.currentTime - layer.clipTime) > 0.03) {
+            video.currentTime = layer.clipTime;
+          }
+          const session = measSessionRef.current;
+          const playT0 = performance.now();
+          video.play().catch(() => {});
+          if ((layer.trackId === 'V2' || layer.trackId === 'V3') && typeof (video as HTMLVideoElement).requestVideoFrameCallback === 'function') {
+            (video as HTMLVideoElement).requestVideoFrameCallback((now, meta) => {
+              if (session !== measSessionRef.current) return;
+              const m = meta as VideoFrameCallbackMetadata;
+              const played = video.played;
+              const playedRanges: [string, string][] = [];
+              for (let i = 0; i < played.length; i++) playedRanges.push([played.start(i).toFixed(3), played.end(i).toFixed(3)]);
+              console.log(`[V2MEAS][firstFrame] id=${id} trackId=${layer.trackId} playToFrameMs=${(now - playT0).toFixed(0)} mediaTime=${meta.mediaTime.toFixed(4)} expectedClipTime=${layer.clipTime.toFixed(4)} expectedDisplayTime=${m.expectedDisplayTime?.toFixed(2) ?? 'na'} presentationTime=${m.presentationTime?.toFixed(2) ?? 'na'} processingDuration=${m.processingDuration?.toFixed(4) ?? 'na'} presentedFrames=${m.presentedFrames ?? 'na'} captureTime=${m.captureTime?.toFixed(2) ?? 'na'} played=${JSON.stringify(playedRanges)}`);
+            });
+          }
+        }
       } else {
-        video.pause();
+        // Guard against redundant pause() calls. playEffect dep is [isPlaying, layers];
+        // layers is unstable (recomputed every Home.tsx render) so this effect fires many
+        // times per session. Each redundant pause() propagates to Chrome's media pipeline
+        // as an extra kPause event (verified via chrome://media-internals). Skip if already
+        // paused to keep V2's pipeline state machine quieter.
+        if (!video.paused) {
+          video.pause();
+        }
       }
     });
-  }, [isPlaying]);
+  }, [isPlaying, layers]);
 
-  // Sync overlay video and audio seeking when scrubbing
+  // Sync overlay video and audio seeking — fires on boundary crossings, user seeks, and pause.
+  // Uses tight 5ms threshold on play-start to minimize static startup offset between tracks.
   useEffect(() => {
-    if (isPlaying) return; // Don't interfere during playback
+    const justStarted = isPlaying && !wasPlayingRef.current;
+    wasPlayingRef.current = isPlaying;
+    // 50ms play-start threshold — small enough to enforce sync but larger than the
+    // floating-point noise from a same-value currentTime assignment.
+    const threshold = justStarted ? 0.05 : 0.1;
 
-    // Find overlay video and audio layers and sync their time
     const overlayMediaLayers = layers.filter(
       l => (l.type === 'video' && l.trackId !== 'V1') || l.type === 'audio'
     );
-
     overlayMediaLayers.forEach((layer) => {
       const mediaEl = overlayVideoRefs.current.get(layer.id);
       if (mediaEl && layer.clipTime !== undefined) {
-        if (Math.abs(mediaEl.currentTime - layer.clipTime) > 0.1) {
-          mediaEl.currentTime = layer.clipTime;
+        if (layer.trackId === 'V2' || layer.trackId === 'V3') {
+          console.log(`[V2DBG][seekEffect] id=${layer.id} isPremounted=${layer.isPremounted} video.ct=${mediaEl.currentTime.toFixed(3)} layer.clipTime=${layer.clipTime.toFixed(3)} threshold=${threshold} willSeek=${Math.abs(mediaEl.currentTime - layer.clipTime) > threshold}`);
+        }
+        if (Math.abs(mediaEl.currentTime - layer.clipTime) > threshold) {
+          const requested = layer.clipTime;
+          mediaEl.currentTime = requested;
+          const immediate = mediaEl.currentTime;
+          console.log(`[V2MEAS][seekReq] id=${layer.id} trackId=${layer.trackId} requested=${requested.toFixed(4)} immediate=${immediate.toFixed(4)} eps_immediate=${(immediate - requested).toFixed(4)}`);
+          const t0 = performance.now();
+          const onMeasSeeked = () => {
+            const elapsed = performance.now() - t0;
+            const settled = mediaEl.currentTime;
+            console.log(`[V2MEAS][seekSettled] id=${layer.id} trackId=${layer.trackId} requested=${requested.toFixed(4)} settled=${settled.toFixed(4)} eps=${(settled - requested).toFixed(4)} elapsedMs=${elapsed.toFixed(0)}`);
+          };
+          mediaEl.addEventListener('seeked', onMeasSeeked, { once: true });
         }
       }
     });
@@ -209,6 +313,123 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
       videoRef.current.currentTime = baseLayerClipTime;
     }
   };
+
+  // Return the live media element for a given transition clip source.
+  // Videos: matched by clip ID against V1 base ref or overlay refs.
+  // Images: cached HTMLImageElement keyed by URL (no hidden video elements).
+  const getVideoSource = useCallback((
+    clipId: string | undefined,
+    src: string | undefined,
+    assetType: 'video' | 'image' | undefined,
+  ): HTMLVideoElement | HTMLImageElement | null => {
+    if (!src) return null;
+
+    if (assetType === 'image') {
+      let img = hiddenImageRefs.current.get(src);
+      if (!img) {
+        img = new Image();
+        img.src = src;
+        img.crossOrigin = 'anonymous';
+        hiddenImageRefs.current.set(src, img);
+      }
+      return img;
+    }
+
+    if (!clipId) return null;
+    const baseId = layers.find(l => l.trackId === 'V1' && l.type === 'video')?.id;
+    if (clipId === baseId && videoRef.current) return videoRef.current;
+    const overlayEl = overlayVideoRefs.current.get(clipId);
+    if (overlayEl) return overlayEl;
+    return hiddenVideoRefs.current.get(clipId) ?? null;
+  }, [layers]);
+
+  // Draw the current transition frame onto the canvas.
+  // Uses currentTimeRef for accurate playhead position without re-renders.
+  const drawFrame = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !currentTimeRef) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const transitions = activeTransitionsRef.current;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (transitions.length === 0) return;
+
+    const ct = currentTimeRef.current;
+    for (const t of transitions) {
+      const progress = Math.max(0, Math.min(1, (ct - t.startTime) / t.durationSec));
+      const drawFn = getCanvasDraw(t.transitionFileId);
+      if (!drawFn) continue;
+      const fromEl = getVideoSource(t.fromClipId, t.fromSrc, t.fromAssetType);
+      const toEl   = getVideoSource(t.toClipId,   t.toSrc,   t.toAssetType);
+      drawFn(ctx, fromEl, toEl, progress, canvas.width, canvas.height, t.params);
+    }
+  }, [getVideoSource, currentTimeRef]);
+
+  // Canvas RAF draw loop during playback
+  useEffect(() => {
+    if (!isPlaying || activeTransitions.length === 0) return;
+    let rafId: number;
+    const loop = () => { drawFrame(); rafId = requestAnimationFrame(loop); };
+    rafId = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(rafId);
+  }, [isPlaying, activeTransitions.length, drawFrame]);
+
+  // Canvas single draw on scrub (not playing)
+  useEffect(() => {
+    if (isPlaying) return;
+    drawFrame();
+  }, [currentTime, isPlaying, drawFrame]);
+
+  // Create/cleanup hidden video elements for transition from-clips that have ended
+  // (not in overlayVideoRefs — needed as canvas draw sources for facecam transitions)
+  useEffect(() => {
+    for (const t of activeTransitions) {
+      if (!t.fromClipId || !t.fromSrc || t.fromAssetType !== 'video') continue;
+      if (overlayVideoRefs.current.has(t.fromClipId)) continue;
+      const baseId = layers.find(l => l.trackId === 'V1' && l.type === 'video')?.id;
+      if (t.fromClipId === baseId) continue;
+      if (hiddenVideoRefs.current.has(t.fromClipId)) continue;
+      const el = document.createElement('video');
+      el.src = t.fromSrc;
+      el.muted = true;
+      el.playsInline = true;
+      el.preload = 'auto';
+      el.style.cssText = 'position:fixed;width:0;height:0;top:-1px;left:-1px;opacity:0;pointer-events:none;';
+      document.body.appendChild(el);
+      hiddenVideoRefs.current.set(t.fromClipId, el);
+    }
+    const activeFromIds = new Set(
+      activeTransitions
+        .filter(t => t.fromClipId && t.fromAssetType === 'video')
+        .map(t => t.fromClipId!)
+    );
+    for (const [clipId, el] of hiddenVideoRefs.current) {
+      if (!activeFromIds.has(clipId)) {
+        el.pause();
+        el.src = '';
+        el.parentNode?.removeChild(el);
+        hiddenVideoRefs.current.delete(clipId);
+      }
+    }
+  }, [activeTransitions, layers]);
+
+  // Seek hidden from-videos to correct frame (capped at last frame of the clip)
+  useEffect(() => {
+    for (const t of activeTransitions) {
+      if (!t.fromClipId) continue;
+      const el = hiddenVideoRefs.current.get(t.fromClipId);
+      if (!el) continue;
+      const elapsed = currentTime - (t.fromClipStart ?? t.startTime);
+      const rawPos = (t.fromInPoint ?? 0) + elapsed;
+      const maxPos = t.fromClipDuration != null
+        ? (t.fromInPoint ?? 0) + t.fromClipDuration - 0.033
+        : rawPos;
+      const targetPos = Math.max(0, Math.min(rawPos, maxPos));
+      if (Math.abs(el.currentTime - targetPos) > 0.05) {
+        el.currentTime = targetPos;
+      }
+    }
+  }, [activeTransitions, currentTime]);
 
   // Handle mouse down on draggable layer
   const handleLayerMouseDown = useCallback((e: React.MouseEvent, layer: ClipLayer) => {
@@ -319,26 +540,33 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
               ref={(el) => {
                 if (el) {
                   overlayVideoRefs.current.set(layer.id, el);
+                  if (layer.trackId === 'V2' || layer.trackId === 'V3') {
+                    console.log(`[V2MEAS][mount] id=${layer.id} trackId=${layer.trackId} urlTail=${layer.url.slice(-50)} t=${performance.now().toFixed(0)}`);
+                  }
                 } else {
                   overlayVideoRefs.current.delete(layer.id);
+                  if (layer.trackId === 'V2' || layer.trackId === 'V3') {
+                    console.log(`[V2MEAS][unmount] id=${layer.id} trackId=${layer.trackId} t=${performance.now().toFixed(0)}`);
+                  }
                 }
               }}
               src={layer.url}
               className={`absolute inset-0 w-full h-full ${videoFitClass} cursor-grab active:cursor-grabbing ${
                 isSelected ? 'ring-2 ring-orange-500 ring-offset-2 ring-offset-black' : ''
               }`}
-              style={styles}
+              style={layer.isPremounted ? { opacity: 0, pointerEvents: 'none' as const } : styles}
               playsInline
               preload="auto"
-              muted
               onLoadedData={(e) => {
-                // Seek to correct time when loaded
                 const video = e.currentTarget;
-                if (layer.clipTime !== undefined) {
-                  video.currentTime = layer.clipTime;
+                const targetTime = layer.clipTime;
+                if (layer.trackId === 'V2' || layer.trackId === 'V3') {
+                  console.log(`[V2DBG][onLoadedData] id=${layer.id} isPremounted=${layer.isPremounted} video.ct=${video.currentTime.toFixed(3)} targetTime=${targetTime.toFixed(3)} isPlaying=${isPlaying}`);
                 }
-                // Auto-play if timeline is playing
-                if (isPlaying) {
+                if (Math.abs(video.currentTime - targetTime) > 0.05) {
+                  video.currentTime = targetTime;
+                }
+                if (isPlaying && !layer.isPremounted) {
                   video.play().catch(() => {});
                 }
               }}
@@ -413,6 +641,9 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
               words={layer.captionWords}
               style={layer.captionStyle}
               currentTime={layer.clipTime}
+              isPlaying={isPlaying}
+              clipStart={layer.clipStart}
+              currentTimeRef={currentTimeRef}
             />
           );
         }
@@ -433,12 +664,13 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
               preload="auto"
               onLoadedData={(e) => {
                 const audio = e.currentTarget;
-                if (layer.clipTime !== undefined) {
-                  audio.currentTime = layer.clipTime;
+                const targetTime = currentTimeRef
+                  ? Math.max(0, currentTimeRef.current - layer.clipStart + layer.inPoint)
+                  : layer.clipTime;
+                if (Math.abs(audio.currentTime - targetTime) > 0.05) {
+                  audio.currentTime = targetTime;
                 }
-                if (isPlaying) {
-                  audio.play().catch(() => {});
-                }
+                if (isPlaying) audio.play().catch(() => {});
               }}
               style={{ display: 'none' }}
             />
@@ -448,17 +680,21 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
         return null;
       })}
 
-      {/* Transition overlays via @remotion/player */}
-      {activeTransitions.map(t => (
-        <TransitionPreview
-          key={t.id}
-          transition={t}
-          currentTime={currentTime}
-          fps={30}
-          width={isVertical ? 1080 : 1920}
-          height={isVertical ? 1920 : 1080}
-        />
-      ))}
+      {/* Transition compositor canvas — draws from already-playing video refs */}
+      <canvas
+        ref={canvasRef}
+        width={isVertical ? 1080 : 1920}
+        height={isVertical ? 1920 : 1080}
+        style={{
+          position: 'absolute',
+          inset: 0,
+          width: '100%',
+          height: '100%',
+          zIndex: 50,
+          pointerEvents: 'none',
+          display: activeTransitions.length > 0 ? 'block' : 'none',
+        }}
+      />
 
       {/* Layer count indicator */}
       {layers.length > 1 && (

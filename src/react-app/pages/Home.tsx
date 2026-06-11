@@ -29,6 +29,8 @@ interface ChapterData {
   summary: string;
 }
 
+const PREMOUNT_SECS = 2;
+
 export default function Home() {
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
@@ -52,6 +54,8 @@ export default function Home() {
   const videoPreviewRef = useRef<VideoPreviewHandle>(null);
   const playbackRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(0);
+  const currentTimeRef = useRef<number>(0);
+  const boundariesRef = useRef<number[]>([]);
 
   // Use the new project hook for multi-asset management
   const {
@@ -169,6 +173,7 @@ export default function Home() {
           trackId: 'V1',
           clipTime: 0,
           clipStart: 0,
+          inPoint: 0,
         }];
       }
       return [];
@@ -182,6 +187,8 @@ export default function Home() {
       trackId: string;
       clipTime: number;
       clipStart: number;
+      inPoint: number;
+      isPremounted?: boolean;
       transform?: TimelineClip['transform'];
       captionWords?: Array<{ text: string; start: number; end: number }>;
       captionStyle?: CaptionStyle;
@@ -191,9 +198,10 @@ export default function Home() {
     const videoTracks = ['V1', 'V2', 'V3'];
 
     for (const trackId of videoTracks) {
+      const isOverlayTrack = trackId !== 'V1';
       const clipsOnTrack = activeClips.filter(c =>
         c.trackId === trackId &&
-        currentTime >= c.start &&
+        currentTime >= c.start - (isOverlayTrack ? PREMOUNT_SECS : 0) &&
         currentTime < c.start + c.duration
       );
 
@@ -202,8 +210,13 @@ export default function Home() {
         // Use asset.streamUrl which has cache-busting timestamp from refreshAssets
         const url = asset?.streamUrl || (asset ? getAssetStreamUrl(asset.id) : null);
         if (asset && url) {
-          // Calculate the time within the clip (accounting for in-point)
-          const clipTime = (currentTime - clip.start) + (clip.inPoint || 0);
+          const isPremounted = isOverlayTrack && currentTime < clip.start;
+          const clipTime = isPremounted
+            ? (clip.inPoint || 0)
+            : (currentTime - clip.start) + (clip.inPoint || 0);
+          if (trackId === 'V2' || trackId === 'V3') {
+            console.log(`[V2DBG][getPreviewLayers] clip=${clip.id} isPremounted=${isPremounted} clipTime=${clipTime.toFixed(3)} currentTime=${currentTime.toFixed(3)} clip.start=${clip.start}`);
+          }
           layers.push({
             id: clip.id,
             url,
@@ -211,6 +224,8 @@ export default function Home() {
             trackId: clip.trackId,
             clipTime,
             clipStart: clip.start,
+            inPoint: clip.inPoint || 0,
+            isPremounted,
             transform: clip.transform,
           });
         }
@@ -221,8 +236,8 @@ export default function Home() {
     const audioTracks = ['A1', 'A2'];
 
     for (const trackId of audioTracks) {
-      const clipsOnTrack = activeClips.filter(c =>
-        c.trackId === trackId &&
+      const allTrackClips = activeClips.filter(c => c.trackId === trackId);
+      const clipsOnTrack = allTrackClips.filter(c =>
         currentTime >= c.start &&
         currentTime < c.start + c.duration
       );
@@ -239,6 +254,7 @@ export default function Home() {
             trackId: clip.trackId,
             clipTime,
             clipStart: clip.start,
+            inPoint: clip.inPoint || 0,
           });
         }
       }
@@ -262,6 +278,7 @@ export default function Home() {
           trackId: clip.trackId,
           clipTime: currentTime - clip.start, // Convert to clip-relative time
           clipStart: clip.start,
+          inPoint: 0,
           captionWords: caption.words,
           captionStyle: caption.style,
         });
@@ -294,16 +311,15 @@ export default function Home() {
           transitionFileId: t.transitionFileId,
           startTime: t.startTime,
           durationSec: t.durationSec,
+          fromClipId: t.fromClipId ?? undefined,
+          toClipId:   t.toClipId   ?? undefined,
           fromSrc: fromAsset ? (fromAsset.streamUrl || getAssetStreamUrl(fromAsset.id) || undefined) : undefined,
-          toSrc: toAsset ? (toAsset.streamUrl || getAssetStreamUrl(toAsset.id) || undefined) : undefined,
+          toSrc:   toAsset   ? (toAsset.streamUrl   || getAssetStreamUrl(toAsset.id)   || undefined) : undefined,
           fromAssetType: fromAsset?.type === 'video' ? 'video' as const : fromAsset ? 'image' as const : undefined,
-          toAssetType: toAsset?.type === 'video' ? 'video' as const : toAsset ? 'image' as const : undefined,
-          fromStartFrom: fromClip
-            ? Math.max(0, Math.round(((t.startTime - fromClip.start) + (fromClip.inPoint || 0)) * 30))
-            : 0,
-          toStartFrom: toClip
-            ? Math.max(0, Math.round(((t.startTime - toClip.start) + (toClip.inPoint || 0)) * 30))
-            : 0,
+          toAssetType:   toAsset?.type   === 'video' ? 'video' as const : toAsset   ? 'image' as const : undefined,
+          fromClipStart: fromClip ? fromClip.start : undefined,
+          fromInPoint:   fromClip ? (fromClip.inPoint || 0) : undefined,
+          fromClipDuration: fromClip ? fromClip.duration : undefined,
           params: t.params,
         };
       });
@@ -315,23 +331,51 @@ export default function Home() {
     return Math.max(...activeClips.map(c => c.start + c.duration));
   }, [activeClips]);
 
-  // Timeline playback effect
+  // Pre-compute clip/transition boundary times for RAF boundary detection
+  const clipBoundaries = useMemo(() => {
+    const times = new Set<number>();
+    activeClips.forEach(c => {
+      times.add(c.start);
+      times.add(c.start + c.duration);
+      if (c.trackId === 'V2' || c.trackId === 'V3') {
+        times.add(Math.max(0, c.start - PREMOUNT_SECS));
+      }
+    });
+    const txns = activeTabId === 'main'
+      ? timelineTransitions
+      : (timelineTabs.find(t => t.id === activeTabId)?.timelineTransitions || []);
+    txns.forEach(t => { times.add(t.startTime); times.add(t.startTime + t.durationSec); });
+    return Array.from(times).sort((a, b) => a - b);
+  }, [activeClips, activeTabId, timelineTransitions, timelineTabs]);
+  boundariesRef.current = clipBoundaries;
+
+  // Timeline playback — ref-based time with boundary-triggered state updates
   useEffect(() => {
     if (isPlaying && duration > 0) {
       lastTimeRef.current = performance.now();
 
       const animate = (now: number) => {
-        const delta = (now - lastTimeRef.current) / 1000; // Convert to seconds
+        const delta = (now - lastTimeRef.current) / 1000;
         lastTimeRef.current = now;
+        const prevTime = currentTimeRef.current;
+        const newTime = prevTime + delta;
 
-        setCurrentTime(prev => {
-          const newTime = prev + delta;
-          if (newTime >= duration) {
-            setIsPlaying(false);
-            return duration;
+        if (newTime >= duration) {
+          currentTimeRef.current = duration;
+          setCurrentTime(duration);
+          setIsPlaying(false);
+          return;
+        }
+
+        currentTimeRef.current = newTime;
+
+        const boundaries = boundariesRef.current;
+        for (let i = 0; i < boundaries.length; i++) {
+          if (prevTime < boundaries[i] && newTime >= boundaries[i]) {
+            setCurrentTime(newTime);
+            break;
           }
-          return newTime;
-        });
+        }
 
         playbackRef.current = requestAnimationFrame(animate);
       };
@@ -346,25 +390,35 @@ export default function Home() {
     }
   }, [isPlaying, duration]);
 
-  // Handle play/pause
   const handlePlayPause = useCallback(() => {
     if (currentTime >= duration && duration > 0) {
-      // If at end, restart from beginning
       setCurrentTime(0);
+      currentTimeRef.current = 0;
+    } else if (isPlaying) {
+      setCurrentTime(currentTimeRef.current);
+    } else {
+      currentTimeRef.current = currentTime;
     }
     setIsPlaying(prev => !prev);
-  }, [currentTime, duration]);
+  }, [currentTime, duration, isPlaying]);
 
-  // Handle stop (go to beginning)
   const handleStop = useCallback(() => {
     setIsPlaying(false);
     setCurrentTime(0);
+    currentTimeRef.current = 0;
   }, []);
 
-  // Handle timeline seeking
   const handleTimelineSeek = useCallback((time: number) => {
+    currentTimeRef.current = time;
     setCurrentTime(time);
-    // Don't seek the video directly - let the clipTime prop handle it
+  }, []);
+
+  // Called by VideoPreview after V1's seeked event fires with V1's actual post-snap position.
+  // V1 keyframe-snaps backward from the requested time; this propagates the correction into
+  // React state so getPreviewLayers recomputes layer.clipTime accurately for all overlays.
+  const handleV1Seeked = useCallback((projectTime: number) => {
+    currentTimeRef.current = projectTime;
+    setCurrentTime(projectTime);
   }, []);
 
 
@@ -2204,6 +2258,8 @@ export default function Home() {
                 selectedLayerId={selectedClipId}
                 activeTransitions={previewActiveTransitions}
                 currentTime={currentTime}
+                currentTimeRef={currentTimeRef}
+                onV1Seeked={handleV1Seeked}
               />
             ) : clips.length > 0 ? (
               // Assets exist but playhead is not over any clip
@@ -2237,6 +2293,7 @@ export default function Home() {
               selectedClipId={selectedClipId}
               selectedClipIds={selectedClipIds}
               currentTime={currentTime}
+              currentTimeRef={currentTimeRef}
               duration={duration}
               isPlaying={isPlaying}
               aspectRatio={aspectRatio}

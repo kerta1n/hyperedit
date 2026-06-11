@@ -1,15 +1,35 @@
-import { useMemo } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import type { CaptionWord, CaptionStyle } from '@/react-app/hooks/useProject';
 
 interface CaptionRendererProps {
   words: CaptionWord[];
   style: CaptionStyle;
-  currentTime: number;  // Time within the caption clip
+  currentTime: number;
+  isPlaying?: boolean;
+  clipStart?: number;
+  currentTimeRef?: React.RefObject<number>;
 }
 
-export default function CaptionRenderer({ words, style, currentTime }: CaptionRendererProps) {
-  // Apply time offset (negative = captions appear earlier, positive = later)
-  const adjustedTime = currentTime - (style.timeOffset || 0);
+export default function CaptionRenderer({ words, style, currentTime, isPlaying, clipStart, currentTimeRef }: CaptionRendererProps) {
+  const [liveTime, setLiveTime] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!isPlaying || !currentTimeRef) { setLiveTime(null); return; }
+    let rafId: number;
+    let lastUpdate = 0;
+    const tick = (now: number) => {
+      if (now - lastUpdate >= 100) {
+        lastUpdate = now;
+        setLiveTime(currentTimeRef.current - (clipStart ?? 0));
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, [isPlaying, currentTimeRef, clipStart]);
+
+  const effectiveTime = liveTime ?? currentTime;
+  const adjustedTime = effectiveTime - (style.timeOffset || 0);
 
   // Find which words are visible and which is currently active
   const { visibleWords, activeWordIndex } = useMemo(() => {

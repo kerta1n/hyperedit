@@ -31,6 +31,7 @@ interface TimelineProps {
   onAddTransition: (fromClipId: string, toClipId: string, type?: JunctionTransitionType, durationSec?: number) => JunctionTransition;
   onUpdateTransition: (transitionId: string, updates: Partial<Omit<JunctionTransition, 'id'>>) => void;
   onRemoveTransition: (transitionId: string) => void;
+  currentTimeRef?: React.RefObject<number>;
   // V2 timeline transitions
   timelineTransitions?: TimelineTransition[];
   selectedTransitionId?: string | null;
@@ -79,6 +80,7 @@ export default function Timeline({
   onAddTransition,
   onUpdateTransition,
   onRemoveTransition,
+  currentTimeRef,
   timelineTransitions = [],
   selectedTransitionId,
   onSelectTransition,
@@ -92,6 +94,8 @@ export default function Timeline({
   const timelineRef = useRef<HTMLDivElement>(null);
   const tracksContainerRef = useRef<HTMLDivElement>(null);
   const trackHeadersRef = useRef<HTMLDivElement>(null);
+  const playheadRef = useRef<HTMLDivElement>(null);
+  const timeDisplayRef = useRef<HTMLSpanElement>(null);
 
   // Sync vertical scroll between track headers and tracks content
   useEffect(() => {
@@ -153,6 +157,24 @@ export default function Timeline({
   const pixelsPerSecond = basePixelsPerSecond * zoom;
   const timelineWidth = Math.max(totalDuration * pixelsPerSecond, 800);
 
+  // Direct DOM updates for playhead + time display during playback (60fps, no React re-renders)
+  useEffect(() => {
+    if (!isPlaying || !currentTimeRef) return;
+    let rafId: number;
+    const update = () => {
+      const t = currentTimeRef.current;
+      if (playheadRef.current) {
+        playheadRef.current.style.left = `${t * pixelsPerSecond}px`;
+      }
+      if (timeDisplayRef.current) {
+        timeDisplayRef.current.textContent = formatTime(t);
+      }
+      rafId = requestAnimationFrame(update);
+    };
+    rafId = requestAnimationFrame(update);
+    return () => cancelAnimationFrame(rafId);
+  }, [isPlaying, currentTimeRef, pixelsPerSecond]);
+
   // Track header width
   const headerWidth = 48;
 
@@ -194,11 +216,16 @@ export default function Timeline({
     onSelectClip(null);
   }, [pixelsPerSecond, duration, onTimeChange, onSelectClip]);
 
-  // Handle playhead dragging
   const handlePlayheadMouseDown = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
+    if (isPlaying) {
+      onPlayPause();
+      if (currentTimeRef) {
+        onTimeChange(currentTimeRef.current);
+      }
+    }
     setIsDraggingPlayhead(true);
-  }, []);
+  }, [isPlaying, onPlayPause, currentTimeRef, onTimeChange]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     if (!isDraggingPlayhead || !tracksContainerRef.current) return;
@@ -364,7 +391,7 @@ export default function Timeline({
 
           {/* Time display */}
           <div className="flex items-center gap-2 text-xs">
-            <span className="font-mono text-orange-400">{formatTime(currentTime)}</span>
+            <span ref={timeDisplayRef} className="font-mono text-orange-400">{formatTime(currentTime)}</span>
             <span className="text-zinc-600">/</span>
             <span className="font-mono text-zinc-400">{formatTime(duration)}</span>
           </div>
@@ -611,6 +638,7 @@ export default function Timeline({
 
             {/* Playhead */}
             <div
+              ref={playheadRef}
               className="absolute top-0 bottom-0 w-0.5 bg-orange-500 z-40 pointer-events-none"
               style={{ left: `${currentTime * pixelsPerSecond}px` }}
             >
