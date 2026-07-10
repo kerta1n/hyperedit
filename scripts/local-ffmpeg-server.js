@@ -2537,180 +2537,6 @@ async function handleRenderFromSpec(req, res, sessionId) {
   }
 }
 
-// Render project to video with FFmpeg (legacy compositor)
-async function handleProjectRender(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
-
-  try {
-    let body = '';
-    for await (const chunk of req) body += chunk;
-    const options = body ? JSON.parse(body) : {};
-    const isPreview = options.preview === true;
-
-    const clips = session.project.clips;
-    const settings = session.project.settings;
-
-    if (clips.length === 0) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'No clips in timeline' }));
-      return;
-    }
-
-    console.log(`\n[${sessionId}] === RENDER ${isPreview ? 'PREVIEW' : 'EXPORT'} ===`);
-    console.log(`[${sessionId}] ${clips.length} clips, ${settings.width}x${settings.height}`);
-
-    // Sort clips by track for layering (V1 first, then V2, etc.)
-    const videoClips = clips
-      .filter(c => session.assets.get(c.assetId)?.type !== 'audio')
-      .sort((a, b) => {
-        const trackOrder = { 'V1': 0, 'V2': 1, 'V3': 2 };
-        return (trackOrder[a.trackId] || 0) - (trackOrder[b.trackId] || 0);
-      });
-
-    const audioClips = clips
-      .filter(c => session.assets.get(c.assetId)?.type === 'audio');
-
-    // Calculate total duration from all clips
-    const totalDuration = Math.max(
-      ...clips.map(c => c.start + c.duration),
-      0.1
-    );
-
-    // Build FFmpeg filter_complex
-    const inputs = [];
-    const filterParts = [];
-    let inputIndex = 0;
-
-    // Create black background
-    filterParts.push(`color=black:s=${settings.width}x${settings.height}:d=${totalDuration}:r=${settings.fps}[base]`);
-    let lastVideo = 'base';
-
-    // Process video clips
-    for (const clip of videoClips) {
-      const asset = session.assets.get(clip.assetId);
-      if (!asset) continue;
-
-      inputs.push('-i', asset.path);
-      const idx = inputIndex++;
-
-      // Apply trim and scale
-      const inPoint = clip.inPoint || 0;
-      const outPoint = clip.outPoint || asset.duration;
-      const trimDuration = outPoint - inPoint;
-
-      let clipFilter = `[${idx}:v]`;
-
-      // Trim
-      clipFilter += `trim=${inPoint}:${outPoint},setpts=PTS-STARTPTS,`;
-
-      // Scale/fit to canvas
-      clipFilter += `scale=${settings.width}:${settings.height}:force_original_aspect_ratio=decrease,`;
-      clipFilter += `pad=${settings.width}:${settings.height}:(ow-iw)/2:(oh-ih)/2`;
-
-      // Apply transform if present
-      if (clip.transform) {
-        const { x = 0, y = 0, scale = 1, opacity = 1 } = clip.transform;
-        if (scale !== 1) {
-          clipFilter += `,scale=iw*${scale}:ih*${scale}`;
-        }
-        // Opacity is handled in overlay
-      }
-
-      clipFilter += `[v${idx}]`;
-      filterParts.push(clipFilter);
-
-      // Overlay onto base
-      const overlayX = clip.transform?.x || `(W-w)/2`;
-      const overlayY = clip.transform?.y || `(H-h)/2`;
-      const enable = `between(t,${clip.start},${clip.start + trimDuration})`;
-
-      filterParts.push(`[${lastVideo}][v${idx}]overlay=x=${overlayX}:y=${overlayY}:enable='${enable}'[out${idx}]`);
-      lastVideo = `out${idx}`;
-    }
-
-    // Rename final output
-    filterParts.push(`[${lastVideo}]copy[vout]`);
-
-    // Audio mixing
-    let audioFilter = '';
-    if (audioClips.length > 0) {
-      const audioInputs = [];
-      for (const clip of audioClips) {
-        const asset = session.assets.get(clip.assetId);
-        if (!asset) continue;
-
-        inputs.push('-i', asset.path);
-        const idx = inputIndex++;
-        const inPoint = clip.inPoint || 0;
-        const outPoint = clip.outPoint || asset.duration;
-
-        audioInputs.push(`[${idx}:a]atrim=${inPoint}:${outPoint},asetpts=PTS-STARTPTS,adelay=${Math.floor(clip.start * 1000)}|${Math.floor(clip.start * 1000)}[a${idx}]`);
-      }
-
-      if (audioInputs.length > 0) {
-        filterParts.push(...audioInputs);
-        const audioMix = audioInputs.map((_, i) => `[a${clips.indexOf(audioClips[i]) + videoClips.length}]`).join('');
-        filterParts.push(`${audioMix}amix=inputs=${audioInputs.length}[aout]`);
-        audioFilter = '-map [aout]';
-      }
-    }
-
-    // Build final command
-    const outputPath = join(session.rendersDir, isPreview ? 'preview.mp4' : `export-${Date.now()}.mp4`);
-
-    const ffmpegArgs = [
-      '-y',
-      ...inputs,
-      '-filter_complex', filterParts.join(';'),
-      '-map', '[vout]',
-    ];
-
-    if (audioFilter) {
-      ffmpegArgs.push('-map', '[aout]');
-    }
-
-    // Encoding settings
-    if (isPreview) {
-      ffmpegArgs.push('-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28');
-    } else {
-      ffmpegArgs.push('-c:v', 'libx264', '-preset', 'medium', '-crf', '18');
-    }
-
-    ffmpegArgs.push('-c:a', 'aac', '-b:a', '192k');
-    ffmpegArgs.push('-movflags', '+faststart');
-    ffmpegArgs.push('-t', totalDuration.toString());
-    ffmpegArgs.push(outputPath);
-
-    console.log(`[${sessionId}] FFmpeg render command prepared`);
-
-    await runFFmpeg(ffmpegArgs, sessionId);
-
-    const { stat } = await import('fs/promises');
-    const outputStats = await stat(outputPath);
-
-    console.log(`[${sessionId}] Render complete: ${(outputStats.size / 1024 / 1024).toFixed(1)} MB`);
-    console.log(`[${sessionId}] === RENDER COMPLETE ===\n`);
-
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
-      success: true,
-      path: outputPath,
-      size: outputStats.size,
-      duration: totalDuration,
-      downloadUrl: `/session/${sessionId}/renders/${isPreview ? 'preview' : 'export'}`,
-    }));
-
-  } catch (error) {
-    console.error(`[${sessionId}] Render error:`, error.message);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
-  }
-}
 
 // Render project to video with Remotion-first deterministic core
 async function handleProjectRenderRemotion(req, res, sessionId) {
@@ -8832,9 +8658,6 @@ const server = http.createServer(async (req, res) => {
     else if (req.method === 'POST' && action === 'render-variants') {
       await handleRenderVariants(req, res, sessionId);
     }
-    else if (req.method === 'POST' && action === 'render-ffmpeg') {
-      await handleProjectRender(req, res, sessionId);
-    }
     // GIF creation
     else if (req.method === 'POST' && action === 'create-gif') {
       await handleCreateGif(req, res, sessionId);
@@ -9054,7 +8877,6 @@ server.listen(PORT, () => {
   console.log(`   POST /session/:id/render - Render project via Remotion core`);
   console.log(`   POST /session/:id/render-from-spec - Render directly from spec JSON`);
   console.log(`   POST /session/:id/render-variants - Batch render generated variants`);
-  console.log(`   POST /session/:id/render-ffmpeg - Legacy FFmpeg timeline render`);
   console.log(`   GET  /session/:id/renders/preview - Download preview`);
   console.log(`   GET  /session/:id/renders/export - Download export`);
   console.log(`\n   AI/Auto GIF API:`);

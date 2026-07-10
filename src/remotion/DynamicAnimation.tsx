@@ -5,7 +5,6 @@ import { Circle, Rect, Triangle, Star, Polygon, Ellipse } from '@remotion/shapes
 import { AnimatedEmoji } from '@remotion/animated-emoji';
 import { Gif } from '@remotion/gif';
 import { Lottie, LottieAnimationData } from '@remotion/lottie';
-import { Scene3D } from './components/Scene3D';
 
 // Shape definition for shapes scene
 export interface ShapeConfig {
@@ -77,7 +76,7 @@ export interface LottieConfig {
 
 export interface Scene {
   id: string;
-  type: 'title' | 'steps' | 'features' | 'stats' | 'text' | 'transition' | 'media' | 'chart' | 'countdown' | 'comparison' | 'shapes' | 'emoji' | 'gif' | 'lottie' | '3d';
+  type: 'title' | 'steps' | 'features' | 'stats' | 'text' | 'transition' | 'media' | 'chart' | 'countdown' | 'comparison' | 'shapes' | 'emoji' | 'gif' | 'lottie';
   duration: number;
   content: {
     title?: string;
@@ -157,21 +156,6 @@ export interface Scene {
     camera?: {
       type: 'zoom-in' | 'zoom-out' | 'pan-left' | 'pan-right' | 'pan-up' | 'pan-down' | 'ken-burns' | 'shake';
       intensity?: number; // 0-1, default 0.3
-    };
-    // For 3D scenes
-    scene3d?: {
-      style: '3d-text' | '3d-logo' | '3d-product' | '3d-particles' | '3d-shapes' | '3d-showcase';
-      text?: string;
-      secondaryColor?: string;
-      cameraAnimation?: 'orbit' | 'zoom-in' | 'zoom-out' | 'pan' | 'static';
-      intensity?: number;
-      shapes?: Array<{
-        type: 'cube' | 'sphere' | 'torus' | 'cylinder' | 'cone' | 'dodecahedron' | 'octahedron';
-        color?: string;
-        position?: [number, number, number];
-        scale?: number;
-        animation?: 'spin' | 'float' | 'pulse' | 'bounce';
-      }>;
     };
   };
   // Scene transition (how this scene exits / next scene enters)
@@ -3252,21 +3236,6 @@ const SceneRenderer: React.FC<{ scene: Scene }> = ({ scene }) => {
         return <GifScene content={scene.content} />;
       case 'lottie':
         return <LottieScene content={scene.content} />;
-      case '3d':
-        return (
-          <Scene3D
-            config={{
-              style: scene.content.scene3d?.style || '3d-shapes',
-              text: scene.content.title || scene.content.scene3d?.text,
-              color: scene.content.color,
-              backgroundColor: scene.content.backgroundColor,
-              secondaryColor: scene.content.scene3d?.secondaryColor,
-              cameraAnimation: scene.content.scene3d?.cameraAnimation,
-              intensity: scene.content.scene3d?.intensity,
-              shapes: scene.content.scene3d?.shapes,
-            }}
-          />
-        );
       default:
         return <TitleScene content={scene.content} />;
     }

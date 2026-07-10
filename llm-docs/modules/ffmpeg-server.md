@@ -254,7 +254,6 @@ All endpoints are on `localhost:3333`. CORS headers (`*`) are set on every respo
 | `POST` | `/session/:id/render` | `handleProjectRenderRemotion` (2715) | **Primary render path** — Remotion Node API; streams NDJSON progress; generates thumbnail for non-preview exports |
 | `POST` | `/session/:id/render-from-spec` | `handleRenderFromSpec` (2468) | Renders from externally-supplied spec JSON |
 | `POST` | `/session/:id/render-variants` | `handleRenderVariants` (2385) | `renderVariantBatch` + `scoreVariantBatch` |
-| `POST` | `/session/:id/render-ffmpeg` | `handleProjectRender` (2540) | **Legacy** FFmpeg filter_complex compositor; builds black base + overlay pipeline |
 
 ### Render Gallery
 
@@ -496,13 +495,11 @@ POST /session/:id/upload-transition  (or generate-transition)
 
 1. **`render-motion-graphic` is a placeholder** (`handleRenderMotionGraphic`, line 4669): creates a solid-color video with FFmpeg `drawtext` instead of rendering a Remotion template. The `MotionGraphicsPanel` in the frontend is never wired to this endpoint for actual rendering.
 
-2. **Legacy `handleProjectRender` (line 2540) is effectively dead code**: the routing block maps `POST /session/:id/render` → `handleProjectRenderRemotion`. The legacy FFmpeg filter_complex compositor is only reachable via `POST /session/:id/render-ffmpeg`, which no frontend code calls.
+2. **`session.transcriptCache` is in-memory only**: server restart loses all cached transcriptions. Re-upload or re-transcription required.
 
-3. **`session.transcriptCache` is in-memory only**: server restart loses all cached transcriptions. Re-upload or re-transcription required.
+3. **`WHISPER_CONDITION_ON_PREV_TEXT=false` disables conditioning** to reduce hallucination loops in long audio files — documented behavior, not a bug, but worth knowing when captions loop repetitively.
 
-4. **`WHISPER_CONDITION_ON_PREV_TEXT=false` disables conditioning** to reduce hallucination loops in long audio files — documented behavior, not a bug, but worth knowing when captions loop repetitively.
-
-5. **`handleRestyleVideo` (line 6181) hard-compresses input to 720p/10 s before fal.ai upload**: videos longer than 10 s are silently truncated. No UI warning is shown.
+4. **`handleRestyleVideo` (line 6181) hard-compresses input to 720p/10 s before fal.ai upload**: videos longer than 10 s are silently truncated. No UI warning is shown.
 
 6. **Remotion bundle cache invalidation** (`invalidateBundleCache()`) is called on every transition upload/delete but does not exist as a named function in the file — it is defined inline elsewhere and referenced at lines 8370, 8415, 8576. If the Remotion bundle cache path changes, all three call sites must be updated.
 

@@ -12,7 +12,6 @@
     "src/react-app/vite-env.d.ts"
   ],
   "ignoreDependencies": [
-    "@getmocha/vite-plugins",
-    "@getmocha/users-service"
+    "@getmocha/vite-plugins"
   ]
 }

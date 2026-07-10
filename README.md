@@ -79,7 +79,6 @@ Variant generation now supports:
 - `POST /session/:id/render` → render via Remotion core
 - `POST /session/:id/render-from-spec` → render explicit spec JSON
 - `POST /session/:id/render-variants` → generate + render variant batch (+ score report)
-- `POST /session/:id/render-ffmpeg` → legacy FFmpeg compositor path
 
 ### Variant + ad tooling
 

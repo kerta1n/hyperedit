@@ -21,13 +21,21 @@ npm run cf-typegen       # Generate Cloudflare worker types
 
 **Local development** requires both `npm run dev` and `npm run ffmpeg-server` running simultaneously.
 
+## Code Conventions
+
+- **File length**: ESLint `max-lines` errors at 1,000 lines. That's a tripwire, not a target — the governing rule is **one concern per file: if describing what a file does requires the word "and", split it.** Files oversized at rule adoption are grandfathered in `eslint.config.js`; that list may only shrink (each refactor deletes the entries it decomposes) — never add entries.
+- **Naming (non-React files)**: descriptive kebab-case where the name alone states the file's concern, ending in a role word from a fixed vocabulary: `-service`, `-gateway`, `-worker`, `-queue`, `-store`, `-helpers`, `-schema`, `-scene` (e.g. `asset-service.js`, `llm-gateway.js`, `title-scene.tsx`). Role-based searches must work: `rg --glob '*-service.js'` finds all services. React files unchanged: components `PascalCase.tsx`, hooks `useX.ts`.
+- **Vendor-neutral code**: model/vendor names (`gemini`, `openai`, `kimi`, `deepseek`, `veo`, `sora`, `kling`, `ltx`, `bria`, and future ones) may appear in exactly three places: (a) the provider adapter implementing that vendor (`*-provider.*` / `*-gateway.*` files), (b) `ai-config.json` entries, (c) env var names referenced through the config's `apiKeyEnv` indirection. Everywhere else — call sites, endpoints, UI text, logs, errors, comments, type names — use task vocabulary: `llm`, `provider`, `textModel`, `video-gen`, `image-gen`, `bg-removal`. Leakage check:
+  `rg -i 'gemini|openai|kling|veo' --glob '!*-provider*' --glob '!*-gateway*' src/ scripts/`
+  Existing violations are pre-gateway legacy (Phase 2 routes them through the gateway); do not add new ones.
+
 ## Architecture
 
 ```
 src/
 ├── react-app/           # Frontend React SPA
 │   ├── components/      # UI: Timeline, VideoPreview, AssetLibrary, AIPromptPanel, MotionGraphicsPanel
-│   ├── hooks/           # useProject (main state), useFFmpeg, useVideoSession
+│   ├── hooks/           # useProject (main state), useVideoSession
 │   └── pages/Home.tsx   # Main editor layout
 ├── worker/index.ts      # Hono backend API (AI editing via Gemini)
 ├── remotion/            # Motion graphics system
@@ -73,7 +81,7 @@ Key endpoints on `localhost:3333`:
 - `POST /session/{id}/transcribe` - Whisper transcription for captions
 - `POST /session/{id}/render` - Render final video
 - `POST /session/{id}/render-motion-graphic` - Render Remotion animation
-- `POST /session/{id}/generate-animation` - AI-generated Remotion code (Gemini writes JSX → Remotion CLI renders)
+- `POST /session/{id}/generate-animation` - AI-generated Remotion code (Gemini writes JSX → in-process render via @remotion/bundler + @remotion/renderer)
 - `POST /session/{id}/edit-animation` - Modify existing Remotion source in-place (same asset ID reused after re-render)
 - `POST /session/{id}/process-asset` - Apply FFmpeg command to a specific asset (replaces in-place)
 - `POST /session/{id}/extract-audio` - Split video into muted video + audio on A1
@@ -101,7 +109,7 @@ Motion graphics use Remotion 4.x. Two distinct subsystems coexist:
 
 **Static Templates** (`src/remotion/templates/`): 11 pre-built components registered in `MOTION_TEMPLATES` with categories (text, engagement, data, branding, mockup, showcase). Used by `MotionGraphicsPanel` with `@remotion/player` for live preview.
 
-**AI-Generated Dynamic Animations** (`src/remotion/DynamicAnimation.tsx`): Takes `scenes: Scene[]` prop with types like title, steps, features, stats, chart, countdown, emoji, gif, lottie, etc. Composition `id="DynamicAnimation"` is what the FFmpeg server renders. Uses `@remotion/shapes`, `@remotion/animated-emoji`, `@remotion/gif`, `@remotion/lottie`, `@remotion/three`.
+**AI-Generated Dynamic Animations** (`src/remotion/DynamicAnimation.tsx`): Takes `scenes: Scene[]` prop with types like title, steps, features, stats, chart, countdown, emoji, gif, lottie, etc. Composition `id="DynamicAnimation"` is what the FFmpeg server renders. Uses `@remotion/shapes`, `@remotion/animated-emoji`, `@remotion/gif`, `@remotion/lottie`.
 
 When working on templates, use the `/remotion-best-practices` skill for domain-specific guidance. Tailwind only scans `./src/react-app/` — not the remotion directory.
 
