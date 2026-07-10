@@ -1619,9 +1619,13 @@ async function handleSessionRemoveDeadAir(req, res, sessionId) {
       const segmentPath = join(session.dir, `segment-${Date.now()}-${i}.mp4`);
       segmentPaths.push(segmentPath);
 
+      // -ss before -i (input seeking): jumps to the segment instead of decoding the
+      // whole file up to it — O(n) instead of O(n²) across segments. Frame-accurate
+      // here because every segment is re-encoded.
       const args = [
-        '-y', '-i', videoAsset.path,
+        '-y',
         '-ss', seg.start.toString(),
+        '-i', videoAsset.path,
         '-t', (seg.end - seg.start).toString(),
         '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18',
         '-c:a', 'aac', '-b:a', '192k',
@@ -6758,12 +6762,14 @@ async function handleAnalyzeForAnimation(req, res, sessionId) {
     console.log(`[${jobId}] Step 1: Transcribing ${hasTimeRange ? 'segment' : 'video'}...`);
 
     // Extract audio from video - optionally just from the specified time range
-    const ffmpegArgs = ['-y', '-i', videoAsset.path];
+    const ffmpegArgs = ['-y'];
     if (hasTimeRange) {
-      // Use -ss for seeking and -t for duration to extract only the segment
+      // -ss before -i (input seeking): jump to the segment instead of decoding the
+      // whole file up to it; frame-accurate because the audio is re-encoded
       ffmpegArgs.push('-ss', segmentStart.toString());
       ffmpegArgs.push('-t', segmentDuration.toString());
     }
+    ffmpegArgs.push('-i', videoAsset.path);
     ffmpegArgs.push('-vn', '-acodec', 'libmp3lame', '-ar', '16000', '-ac', '1', '-q:a', '9', audioPath);
 
     await runFFmpeg(ffmpegArgs, jobId);
