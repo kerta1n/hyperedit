@@ -7,3 +7,16 @@ src/remotion/transitions/custom
 .dev.vars
 worker-configuration.d.ts
 .claude/settings.local.json
+.codegraph
+
+# --- AI Agent & Environment Setup ---
+
+# Ignore the first-time initialization tracker
+.agents/.first-time-setup-done
+
+# Ignore dynamically fetched domain skills (from npx skills CLI)
+.claude/skills/
+.codex/skills/
+.cursor/skills/
+.windsurf/skills/
+.agents/skills/
