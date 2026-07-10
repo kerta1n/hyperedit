@@ -93,6 +93,7 @@ export default function MotionGraphicsPanel({ onAddToTimeline }: MotionGraphicsP
 
     return (
       <Player
+        acknowledgeRemotionLicense
         component={Component}
         inputProps={templateProps}
         durationInFrames={durationInFrames}

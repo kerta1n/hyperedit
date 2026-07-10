@@ -19,6 +19,9 @@ import type {
 } from '../shared/remotion-core';
 import { CAPTION_STYLE_PRESETS } from '../shared/remotion-core';
 import { getTransition } from './transitions/registry';
+import { loadCaptionFonts } from './caption-font-helpers';
+
+loadCaptionFonts();
 
 interface ProjectTimelineProps {
   spec: RemotionProjectSpec;
@@ -263,14 +266,16 @@ const CaptionOverlay: React.FC<{
   const offsetX = style.positionX ?? 0;
   const offsetY = style.positionY ?? 0;
 
+  // The container is positioned by its left edge at 50%, so every branch needs
+  // the -50% X translate or the box runs from center to right edge and clips.
   const positionStyle: React.CSSProperties = (() => {
     if (style.position === 'top') {
-      return { top: `${7 + offsetY}%` };
+      return { top: `${7 + offsetY}%`, transform: 'translateX(-50%)' };
     }
     if (style.position === 'center') {
       return { top: `${50 + offsetY}%`, transform: 'translate(-50%, -50%)' };
     }
-    return { bottom: `${7 - offsetY}%` };
+    return { bottom: `${7 - offsetY}%`, transform: 'translateX(-50%)' };
   })();
 
   const computedText = style.textCase === 'upper' ? caption.text.toUpperCase() : caption.text;

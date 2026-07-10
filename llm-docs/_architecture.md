@@ -69,7 +69,7 @@ tags: [overview, system-design, data-flow]
 1. User uploads asset
    Browser ──POST multipart──► FFmpeg Server /session/{id}/assets
    Server: store file, generate thumbnail, return metadata
-   Frontend: add to assets[], auto-add clip to timeline
+   Frontend: add to assets[] (clips reach the timeline via drag-and-drop, not automatically)
 
 2. User requests AI edit (Director panel)
    Browser ──POST──► FFmpeg Server /ai-edit
