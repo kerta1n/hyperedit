@@ -92,7 +92,7 @@ Key endpoints on `localhost:3333`:
 - `POST /session/{id}/giphy/*` - GIPHY search/trending/add proxy
 - `POST /session/{id}/create-gif` - Animated GIF from image with motion effects
 
-Sessions persist to `/tmp/hyperedit-ffmpeg/sessions/{sessionId}/` with assets, renders, project.json, and assets-meta.json (stores `aiGenerated`, `duration`, `editCount`).
+Sessions persist to `{HYPEREDIT_SESSIONS_DIR}/{sessionId}/` with assets, renders, project.json, and assets-meta.json (stores `aiGenerated`, `duration`, `editCount`). Uploads stage to `HYPEREDIT_UPLOAD_STAGING_DIR` (default `{HYPEREDIT_SESSIONS_DIR}/.upload-staging`), which must share a volume with the sessions directory so the post-parse move is a rename. Storage policy: churn goes to the ramdisk (`HYPEREDIT_TEMP_DIR`), bulk goes to the HDD, flash stays read-mostly.
 
 ## TypeScript Configuration
 
@@ -116,6 +116,9 @@ When working on templates, use the `/remotion-best-practices` skill for domain-s
 ## Environment Variables
 
 Required in `.dev.vars` for local development:
+- `HYPEREDIT_TEMP_DIR` - ramdisk scratch path (e.g. `R:/Temp`); the FFmpeg server **refuses to start** if this or `HYPEREDIT_SESSIONS_DIR` is unset — no silent `os.tmpdir()` fallback
+- `HYPEREDIT_SESSIONS_DIR` - session storage on the HDD
+- `HYPEREDIT_UPLOAD_STAGING_DIR` - optional; upload staging dir, defaults to `{HYPEREDIT_SESSIONS_DIR}/.upload-staging` (must share a volume with sessions)
 - `GEMINI_API_KEY` - Google AI for editing commands (worker uses `gemini-2.5-flash`)
 - `FAL_API_KEY` - fal.ai for Picasso/DiCaprio (note: server aliases this to `FAL_KEY` for the fal.ai SDK)
 - `GIPHY_API_KEY` - GIF search

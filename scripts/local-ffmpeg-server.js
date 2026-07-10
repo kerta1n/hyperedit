@@ -1,8 +1,7 @@
 import http from 'http';
 import { spawn, execSync } from 'child_process';
-import { createWriteStream, createReadStream, unlinkSync, rmSync, mkdirSync, existsSync, writeFileSync, readFileSync, readdirSync, statSync } from 'fs';
+import { createWriteStream, createReadStream, unlinkSync, rmSync, mkdirSync, existsSync, writeFileSync, readFileSync, readdirSync, statSync, renameSync, copyFileSync } from 'fs';
 import { join } from 'path';
-import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
 import formidable from 'formidable';
 import { GoogleGenAI } from '@google/genai';
@@ -178,18 +177,29 @@ function parseLLMJson(text) {
 }
 
 const PORT = 3333;
-const TEMP_DIR = process.env.HYPEREDIT_TEMP_DIR
-  ? join(process.env.HYPEREDIT_TEMP_DIR, 'hyperedit-ffmpeg')
-  : join(tmpdir(), 'hyperedit-ffmpeg');
-const SESSIONS_DIR = process.env.HYPEREDIT_SESSIONS_DIR || join(TEMP_DIR, 'sessions');
+
+// Storage policy: churn goes to the ramdisk, bulk goes to the HDD, flash stays
+// read-mostly. A silent os.tmpdir() fallback would route Chrome render profiles,
+// webpack bundles, and upload staging onto the OS drive, so refuse to start instead.
+if (!process.env.HYPEREDIT_TEMP_DIR || !process.env.HYPEREDIT_SESSIONS_DIR) {
+  console.error('[Server] FATAL: HYPEREDIT_TEMP_DIR and HYPEREDIT_SESSIONS_DIR must be set (in .dev.vars or the environment).');
+  console.error('[Server] No fallback to the OS temp directory — it would route render profiles, bundles, and upload staging onto the OS drive.');
+  process.exit(1);
+}
+
+const TEMP_DIR = join(process.env.HYPEREDIT_TEMP_DIR, 'hyperedit-ffmpeg');
+const SESSIONS_DIR = process.env.HYPEREDIT_SESSIONS_DIR;
+// Upload staging must share a volume with the sessions directory so the post-parse
+// move into a session is a rename, not a second full-file write — and so large
+// uploads never land on the ramdisk (one 4-8GB OBS source would evict every tenant).
+const UPLOAD_STAGING_DIR = process.env.HYPEREDIT_UPLOAD_STAGING_DIR || join(SESSIONS_DIR, '.upload-staging');
+const MAX_UPLOAD_BYTES = 64 * 1024 * 1024 * 1024; // sanity cap; long-form OBS sources run 4-8GB
 
 // Force Node's internal os.tmpdir() to respect our explicit temp drive,
 // preventing libraries like Formidable or Remotion from leaking default OS temp files.
-if (process.env.HYPEREDIT_TEMP_DIR) {
-  process.env.TMPDIR = TEMP_DIR;
-  process.env.TEMP = TEMP_DIR;
-  process.env.TMP = TEMP_DIR;
-}
+process.env.TMPDIR = TEMP_DIR;
+process.env.TEMP = TEMP_DIR;
+process.env.TMP = TEMP_DIR;
 
 // Active video sessions - keeps videos on disk between edits
 const sessions = new Map();
@@ -201,27 +211,47 @@ if (!existsSync(TEMP_DIR)) {
 if (!existsSync(SESSIONS_DIR)) {
   mkdirSync(SESSIONS_DIR, { recursive: true });
 }
+if (!existsSync(UPLOAD_STAGING_DIR)) {
+  mkdirSync(UPLOAD_STAGING_DIR, { recursive: true });
+}
+
+// Parse a multipart upload. Files stage to UPLOAD_STAGING_DIR by default so the
+// post-parse move into a session directory is a same-volume rename. Override
+// uploadDir only for direct-to-destination (session assets) or tiny transient
+// files where the ramdisk is the right home.
+function parseMultipartForm(req, options = {}) {
+  const form = formidable({
+    maxFileSize: options.maxFileSize ?? MAX_UPLOAD_BYTES,
+    uploadDir: options.uploadDir ?? UPLOAD_STAGING_DIR,
+    keepExtensions: true,
+  });
+  return form.parse(req);
+}
 
 // Clean up stale 0kb temp files that Formidable or ffmpeg might leave behind
 function cleanupStaleTempFiles() {
-  try {
-    const files = readdirSync(TEMP_DIR);
-    let count = 0;
-    const now = Date.now();
-    for (const file of files) {
-      if (file === 'sessions' || file === 'webaudio') continue;
-      const fullPath = join(TEMP_DIR, file);
-      const stats = statSync(fullPath);
-      // Delete files that are 0KB or older than 12 hours
-      if (stats.isFile() && (stats.size === 0 || now - stats.mtimeMs > 12 * 60 * 60 * 1000)) {
-        unlinkSync(fullPath);
-        count++;
+  const sweep = (dir) => {
+    try {
+      const files = readdirSync(dir);
+      let count = 0;
+      const now = Date.now();
+      for (const file of files) {
+        if (file === 'sessions') continue;
+        const fullPath = join(dir, file);
+        const stats = statSync(fullPath);
+        // Delete files that are 0KB or older than 12 hours
+        if (stats.isFile() && (stats.size === 0 || now - stats.mtimeMs > 12 * 60 * 60 * 1000)) {
+          unlinkSync(fullPath);
+          count++;
+        }
       }
+      if (count > 0) console.log(`[Cleanup] Removed ${count} stale temp files from ${dir}`);
+    } catch (err) {
+      console.warn(`[Cleanup] Error cleaning ${dir}:`, err.message);
     }
-    if (count > 0) console.log(`[Cleanup] Removed ${count} stale temp files from ${TEMP_DIR}`);
-  } catch (err) {
-    console.warn('[Cleanup] Error cleaning TEMP_DIR:', err.message);
-  }
+  };
+  sweep(TEMP_DIR);
+  sweep(UPLOAD_STAGING_DIR);
 }
 cleanupStaleTempFiles();
 
@@ -229,7 +259,7 @@ cleanupStaleTempFiles();
 function restoreSessionsFromDisk() {
   console.log('[Server] Restoring sessions from disk...');
   const sessionDirs = readdirSync(SESSIONS_DIR, { withFileTypes: true })
-    .filter(dirent => dirent.isDirectory())
+    .filter(dirent => dirent.isDirectory() && !dirent.name.startsWith('.'))
     .map(dirent => dirent.name);
 
   for (const sessionId of sessionDirs) {
@@ -251,7 +281,16 @@ function restoreSessionsFromDisk() {
       try {
         projectState = ensureProjectDefaults(JSON.parse(readFileSync(projectPath, 'utf-8')));
       } catch (e) {
-        console.log(`[Session] Could not read project.json for ${sessionId}`);
+        console.log(`[Session] Could not read project.json for ${sessionId}, trying backups`);
+        for (let i = 1; i <= 3; i++) {
+          const bakPath = `${projectPath}.bak${i}`;
+          if (!existsSync(bakPath)) continue;
+          try {
+            projectState = ensureProjectDefaults(JSON.parse(readFileSync(bakPath, 'utf-8')));
+            console.log(`[Session] Recovered project.json for ${sessionId} from .bak${i}`);
+            break;
+          } catch { }
+        }
       }
     }
 
@@ -358,6 +397,25 @@ function restoreSessionsFromDisk() {
   console.log(`[Server] Restored ${sessions.size} sessions from disk`);
 }
 
+// Atomic JSON write for all session-state JSON: write to a temp file, then rename
+// over the target — a crash or power loss mid-write can never corrupt the only
+// copy. `backups` keeps rolling copies of the previous contents
+// (.bak1 newest → .bakN oldest) for files representing hours of editing work.
+function writeJsonAtomic(filePath, data, { backups = 0 } = {}) {
+  const tmpPath = `${filePath}.${process.pid}.tmp`;
+  writeFileSync(tmpPath, JSON.stringify(data, null, 2));
+  if (backups > 0 && existsSync(filePath)) {
+    for (let i = backups - 1; i >= 1; i--) {
+      const older = `${filePath}.bak${i}`;
+      if (existsSync(older)) {
+        try { renameSync(older, `${filePath}.bak${i + 1}`); } catch { }
+      }
+    }
+    try { copyFileSync(filePath, `${filePath}.bak1`); } catch { }
+  }
+  renameSync(tmpPath, filePath);
+}
+
 // Save asset metadata to disk (preserves aiGenerated flag, etc.)
 function saveAssetMetadata(session) {
   if (!session || !session.dir) return;
@@ -384,7 +442,7 @@ function saveAssetMetadata(session) {
   }
 
   try {
-    writeFileSync(assetsMetaPath, JSON.stringify(metadata, null, 2));
+    writeJsonAtomic(assetsMetaPath, metadata, { backups: 3 });
   } catch (e) {
     console.log(`[Session] Could not save assets metadata: ${e.message}`);
   }
@@ -480,10 +538,10 @@ restoreSessionsFromDisk();
 function saveSessionMeta(session) {
   try {
     const metaPath = join(session.dir, 'session-meta.json');
-    writeFileSync(metaPath, JSON.stringify({
+    writeJsonAtomic(metaPath, {
       name: session.originalName,
       createdAt: session.createdAt,
-    }));
+    });
   } catch (e) {
     console.log(`[Session] Could not save session-meta.json: ${e.message}`);
   }
@@ -739,20 +797,15 @@ function calculateKeepSegments(silencePeriods, totalDuration, minSegmentDuration
 // Remove dead air from video
 async function handleRemoveDeadAir(req, res) {
   const jobId = randomUUID();
-  const inputPath = join(TEMP_DIR, `${jobId}-input.mp4`);
-  const outputPath = join(TEMP_DIR, `${jobId}-output.mp4`);
-  const concatListPath = join(TEMP_DIR, `${jobId}-concat.txt`);
+  // Full-size video artifacts stay on the upload staging volume (HDD) — they can
+  // exceed the ramdisk, and the post-parse move must be a same-volume rename.
+  const inputPath = join(UPLOAD_STAGING_DIR, `${jobId}-input.mp4`);
+  const outputPath = join(UPLOAD_STAGING_DIR, `${jobId}-output.mp4`);
+  const concatListPath = join(UPLOAD_STAGING_DIR, `${jobId}-concat.txt`);
   const segmentPaths = [];
 
   try {
-    // Parse the multipart form
-    const form = formidable({
-      maxFileSize: 2 * 1024 * 1024 * 1024, // 2GB
-      uploadDir: TEMP_DIR,
-      keepExtensions: true,
-    });
-
-    const [fields, files] = await form.parse(req);
+    const [fields, files] = await parseMultipartForm(req);
 
     const videoFile = files.video?.[0];
     // More aggressive defaults for "magical" dead air removal
@@ -924,18 +977,12 @@ function parseFFmpegArgs(command) {
 
 async function handleProcess(req, res) {
   const jobId = randomUUID();
-  const inputPath = join(TEMP_DIR, `${jobId}-input.mp4`);
-  const outputPath = join(TEMP_DIR, `${jobId}-output.mp4`);
+  // Full-size video artifacts stay on the upload staging volume (HDD).
+  const inputPath = join(UPLOAD_STAGING_DIR, `${jobId}-input.mp4`);
+  const outputPath = join(UPLOAD_STAGING_DIR, `${jobId}-output.mp4`);
 
   try {
-    // Parse the multipart form
-    const form = formidable({
-      maxFileSize: 2 * 1024 * 1024 * 1024, // 2GB
-      uploadDir: TEMP_DIR,
-      keepExtensions: true,
-    });
-
-    const [fields, files] = await form.parse(req);
+    const [fields, files] = await parseMultipartForm(req);
 
     const videoFile = files.video?.[0];
     const command = fields.command?.[0];
@@ -1051,7 +1098,9 @@ function formatTimestamp(seconds) {
 // Generate chapters from video using AI
 async function handleGenerateChapters(req, res) {
   const jobId = randomUUID();
-  const inputPath = join(TEMP_DIR, `${jobId}-input.mp4`);
+  // Full-size video stays on the upload staging volume (HDD); the extracted
+  // audio is small speech-rate MP3, so the ramdisk is the right home for it.
+  const inputPath = join(UPLOAD_STAGING_DIR, `${jobId}-input.mp4`);
   const audioPath = join(TEMP_DIR, `${jobId}-audio.mp3`);
 
   try {
@@ -1063,14 +1112,7 @@ async function handleGenerateChapters(req, res) {
       return;
     }
 
-    // Parse the multipart form
-    const form = formidable({
-      maxFileSize: 2 * 1024 * 1024 * 1024, // 2GB
-      uploadDir: TEMP_DIR,
-      keepExtensions: true,
-    });
-
-    const [fields, files] = await form.parse(req);
+    const [fields, files] = await parseMultipartForm(req);
 
     const videoFile = files.video?.[0];
     if (!videoFile) {
@@ -1305,13 +1347,7 @@ async function handleSessionCreate(req, res) {
 // Upload video and create a session
 async function handleSessionUpload(req, res) {
   try {
-    const form = formidable({
-      maxFileSize: 10 * 1024 * 1024 * 1024, // 10GB limit
-      uploadDir: TEMP_DIR,
-      keepExtensions: true,
-    });
-
-    const [fields, files] = await form.parse(req);
+    const [fields, files] = await parseMultipartForm(req);
     const videoFile = files.video?.[0];
 
     if (!videoFile) {
@@ -1901,13 +1937,8 @@ async function handleAssetUpload(req, res, sessionId) {
   }
 
   try {
-    const form = formidable({
-      maxFileSize: 10 * 1024 * 1024 * 1024, // 10GB
-      uploadDir: session.assetsDir,
-      keepExtensions: true,
-    });
-
-    const [fields, files] = await form.parse(req);
+    // Direct-to-destination: the asset's final home, so the move is a same-dir rename.
+    const [fields, files] = await parseMultipartForm(req, { uploadDir: session.assetsDir });
     const uploadedFile = files.file?.[0] || files.video?.[0];
 
     if (!uploadedFile) {
@@ -2237,7 +2268,7 @@ async function handleProjectSave(req, res, sessionId) {
 
     // Save to disk for persistence
     const projectPath = join(session.dir, 'project.json');
-    writeFileSync(projectPath, JSON.stringify(ensureProjectDefaults(session.project), null, 2));
+    writeJsonAtomic(projectPath, ensureProjectDefaults(session.project), { backups: 3 });
 
     console.log(`[${sessionId}] Project saved: ${session.project.clips.length} clips`);
 
@@ -5180,7 +5211,7 @@ ${attachedAssetIds?.length ? `- IMPORTANT: Include media scenes to showcase the 
 
       // Store the scene data for future editing (don't delete props)
       const sceneDataPath = join(session.dir, `${assetId}-scenes.json`);
-      writeFileSync(sceneDataPath, JSON.stringify(sceneData, null, 2));
+      writeJsonAtomic(sceneDataPath, sceneData);
 
       // Clean up temporary props file (but keep scene data)
       try {
@@ -5529,7 +5560,7 @@ Return ONLY the complete JSON structure with your minimal change applied. No mar
     const durationInSeconds = totalDuration / fps;
 
     // Store scene data for future editing (overwrite existing)
-    writeFileSync(existingSceneDataPath, JSON.stringify(newSceneData, null, 2));
+    writeJsonAtomic(existingSceneDataPath, newSceneData);
 
     // Write props for Remotion
     writeFileSync(propsPath, JSON.stringify(newSceneData, null, 2));
@@ -6581,7 +6612,7 @@ Make it visually engaging with good color choices. Use 2-4 scenes for variety.`;
       }
 
       // Save scene data
-      writeFileSync(sceneDataPath, JSON.stringify(sceneData, null, 2));
+      writeJsonAtomic(sceneDataPath, sceneData);
       writeFileSync(propsPath, JSON.stringify(sceneData, null, 2));
 
       const totalDuration = sceneData.totalDuration || sceneData.scenes.reduce((sum, s) => sum + s.duration, 0);
@@ -7077,7 +7108,7 @@ async function handleRenderFromConcept(req, res, sessionId) {
 
     // Save scene data for future editing (reusable path based on asset ID)
     const sceneDataPath = join(session.dir, `${assetId}-scenes.json`);
-    writeFileSync(sceneDataPath, JSON.stringify(sceneData, null, 2));
+    writeJsonAtomic(sceneDataPath, sceneData);
     console.log(`[${jobId}] Scene data saved to ${sceneDataPath} for future editing`);
 
     const animationTotalDuration = sceneData.totalDuration || sceneData.scenes.reduce((sum, s) => sum + s.duration, 0);
@@ -7397,7 +7428,7 @@ Pick phrases that are spread throughout the video. Each phrase should be 2-6 wor
 
     // Save scene data for future editing (persistent path based on asset ID)
     const sceneDataPath = join(session.dir, `${assetId}-scenes.json`);
-    writeFileSync(sceneDataPath, JSON.stringify(sceneData, null, 2));
+    writeJsonAtomic(sceneDataPath, sceneData);
     console.log(`[${jobId}] Scene data saved to ${sceneDataPath} for future editing`);
 
     writeFileSync(propsPath, JSON.stringify(sceneData, null, 2));
@@ -7703,7 +7734,7 @@ Use specific terms, concepts, and themes from the transcript.`;
 
     // Save scene data for future editing (persistent path based on asset ID)
     const sceneDataPath = join(session.dir, `${outputAssetId}-scenes.json`);
-    writeFileSync(sceneDataPath, JSON.stringify(sceneData, null, 2));
+    writeJsonAtomic(sceneDataPath, sceneData);
     console.log(`[${jobId}] Scene data saved to ${sceneDataPath} for future editing`);
 
     // Step 3: Render with Remotion Node API
@@ -7842,8 +7873,12 @@ async function handleAudioSync(req, res, sessionId) {
     const durB = parseFloat(await runFFmpegProbe([...durationArgs, assetObjB.path], jobId));
 
     const region = body.analysisRegion || 'full';
-    const segDuration = body.analysisDuration || null;
     const safetyLimit = 600;
+    // Clamp the caller-supplied window: correlation must stay bounded server-side
+    // regardless of input — offsets are findable within seconds of audio, and an
+    // unbounded window means ~150MB Float32Arrays and a multi-minute O(n*m)
+    // freeze of the single-threaded server on 40-minute assets.
+    const segDuration = body.analysisDuration ? Math.min(body.analysisDuration, safetyLimit) : null;
 
     const computeSeekAndDuration = (clipDur) => {
       if (region === 'full') {
@@ -8310,8 +8345,8 @@ async function handleUploadTransition(req, res, sessionId) {
     let code, name;
     const contentType = req.headers['content-type'] || '';
     if (contentType.includes('multipart/form-data')) {
-      const form = formidable({ maxFileSize: 1 * 1024 * 1024, keepExtensions: true, uploadDir: TEMP_DIR });
-      const [fields, files] = await form.parse(req);
+      // Tiny transient code file — ramdisk churn, read and unlinked immediately.
+      const [fields, files] = await parseMultipartForm(req, { maxFileSize: 1 * 1024 * 1024, uploadDir: TEMP_DIR });
       const uploadedFile = files.file?.[0];
       if (!uploadedFile) {
         res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
