@@ -129,13 +129,16 @@ async function callGeminiSDK(contents, options = {}) {
 }
 
 /**
- * Unified LLM call for text-only generation.
+ * Unified LLM call for text generation, optionally grounded in an audio file.
  * Routes to Google GenAI or OpenAI-compatible API based on env vars.
  *
  * @param {string} prompt - The user prompt text
  * @param {Object} options
  * @param {string} [options.systemPrompt] - Optional system prompt
  * @param {string} [options.responseMimeType] - 'application/json' for JSON output
+ * @param {string} [options.audioPath] - Audio file the model should analyze.
+ *   Providers with native audio understanding receive the audio inline;
+ *   text-only providers receive a timestamped local-Whisper transcript instead.
  * @returns {Promise<string>} The LLM response text
  */
 async function generateWithLLM(prompt, options = {}) {
@@ -143,21 +146,82 @@ async function generateWithLLM(prompt, options = {}) {
   if (!provider) throw new Error('No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars');
 
   if (provider === 'openai') {
+    let userPrompt = prompt;
+    if (options.audioPath) {
+      userPrompt = `${prompt}\n\nTimestamped transcript of the audio:\n${await transcribeForTextPrompt(options.audioPath)}`;
+    }
     const messages = [];
     if (options.systemPrompt) {
       messages.push({ role: 'system', content: options.systemPrompt });
     }
-    messages.push({ role: 'user', content: prompt });
+    messages.push({ role: 'user', content: userPrompt });
     return callOpenAICompat(messages, options);
   } else {
     // Google GenAI
     const parts = [{ text: prompt }];
+    if (options.audioPath) {
+      // Audio precedes the text part — the shape the audio-analysis calls always used
+      parts.unshift({ inlineData: { mimeType: 'audio/mp3', data: readFileSync(options.audioPath).toString('base64') } });
+    }
     const contents = [{ role: 'user', parts }];
     // For Gemini, embed system prompt as a preceding user message
     if (options.systemPrompt) {
       contents.unshift({ role: 'user', parts: [{ text: options.systemPrompt }] });
     }
     return callGeminiSDK(contents, options);
+  }
+}
+
+// Text-only providers cannot hear audio: build a timestamped transcript via
+// local Whisper for embedding into the prompt.
+async function transcribeForTextPrompt(audioPath) {
+  if (!(await checkLocalWhisper())) {
+    throw new Error('Audio analysis with a text-only LLM provider requires local Whisper (pip3 install openai-whisper torch)');
+  }
+  const transcription = await runLocalWhisper(audioPath, 'llm-audio');
+  const words = transcription.words || [];
+  if (words.length === 0) return transcription.text || '(no speech detected)';
+  const bucketSeconds = 15;
+  const lines = [];
+  let bucketStart = 0;
+  let current = [];
+  for (const w of words) {
+    if (w.start >= bucketStart + bucketSeconds && current.length) {
+      lines.push(`[${bucketStart}s] ${current.join(' ')}`);
+      bucketStart = Math.floor(w.start / bucketSeconds) * bucketSeconds;
+      current = [];
+    }
+    current.push(w.text);
+  }
+  if (current.length) lines.push(`[${bucketStart}s] ${current.join(' ')}`);
+  return lines.join('\n');
+}
+
+// Transcription fallback through the LLM provider's audio understanding
+// (estimated timestamps — less accurate than Whisper). This is the
+// audio-transcription provider adapter; vendor SDK calls stay in callGeminiSDK.
+async function transcribeAudioWithLLM(audioPath, durationSeconds, jobId, { wordTimestamps = true } = {}) {
+  console.log(`[${jobId}]    Using LLM audio transcription...`);
+  const audioBuffer = readFileSync(audioPath);
+  if (audioBuffer.length < 1000) {
+    console.log(`[${jobId}]    Audio file too small, video may have no audio track`);
+    return { text: '', words: [] };
+  }
+  const instruction = wordTimestamps
+    ? `Transcribe this audio with word timestamps. Duration: ${durationSeconds}s. Return JSON: {"text": "full transcript", "words": [{"text": "word", "start": 0.0, "end": 0.5}]}`
+    : `Transcribe this audio. Return ONLY the text content. Duration: ${durationSeconds}s`;
+  const respText = await callGeminiSDK([{
+    role: 'user',
+    parts: [
+      { inlineData: { mimeType: 'audio/mp3', data: audioBuffer.toString('base64') } },
+      { text: instruction },
+    ],
+  }]);
+  if (!wordTimestamps) return { text: respText || '', words: [] };
+  try {
+    return parseLLMJson(respText);
+  } catch {
+    return { text: respText, words: [] };
   }
 }
 
@@ -1172,10 +1236,8 @@ async function handleGenerateChapters(req, res) {
   const audioPath = join(TEMP_DIR, `${jobId}-audio.mp3`);
 
   try {
-    // Check for API key
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      sendJSON(res, { error: 'GEMINI_API_KEY not configured in .dev.vars' }, 400);
+    if (!hasLLMProvider()) {
+      sendJSON(res, { error: 'No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars' }, 400);
       return;
     }
 
@@ -1215,28 +1277,9 @@ async function handleGenerateChapters(req, res) {
     const audioStats = await stat(audioPath);
     console.log(`\n[${jobId}] Audio extracted: ${(audioStats.size / 1024 / 1024).toFixed(1)} MB`);
 
-    // Step 3: Read audio file as base64
-    console.log(`[${jobId}] Sending to Gemini for analysis...`);
-    const audioBuffer = readFileSync(audioPath);
-    const audioBase64 = audioBuffer.toString('base64');
-
-    // Step 4: Send to Gemini for transcription and chapter analysis
-    const ai = new GoogleGenAI({ apiKey });
-
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            {
-              inlineData: {
-                mimeType: 'audio/mp3',
-                data: audioBase64
-              }
-            },
-            {
-              text: `Analyze this audio from a video that is ${totalDuration.toFixed(1)} seconds long.
+    // Step 3: Send audio to the LLM provider for chapter analysis
+    console.log(`[${jobId}] Sending audio to LLM provider for analysis...`);
+    const responseText = await generateWithLLM(`Analyze this audio from a video that is ${totalDuration.toFixed(1)} seconds long.
 
 Your task is to identify logical chapter breaks based on topic changes, new sections, or natural transitions in the content.
 
@@ -1262,26 +1305,14 @@ Return your response as valid JSON with exactly this structure:
   "summary": "Brief 1-2 sentence summary of the video content"
 }
 
-Only return the JSON, no other text.`
-            }
-          ]
-        }
-      ],
-      config: {
-        responseMimeType: 'application/json',
-      }
-    });
-
-    const responseText = response.text || '{}';
-    console.log(`[${jobId}] Gemini response received`);
+Only return the JSON, no other text.`, { audioPath, responseMimeType: 'application/json' });
+    console.log(`[${jobId}] LLM response received`);
 
     let result;
     try {
-      result = JSON.parse(responseText);
+      result = parseLLMJson(responseText);
     } catch {
-      // Try to extract JSON from response
-      const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-      result = jsonMatch ? JSON.parse(jsonMatch[0]) : { chapters: [], summary: 'Failed to parse response' };
+      result = { chapters: [], summary: 'Failed to parse response' };
     }
 
     // Format chapters for YouTube
@@ -1718,9 +1749,8 @@ async function handleSessionChapters(req, res, sessionId) {
   const audioPath = join(session.dir, `audio-${Date.now()}.mp3`);
 
   try {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      sendJSON(res, { error: 'GEMINI_API_KEY not configured' }, 400);
+    if (!hasLLMProvider()) {
+      sendJSON(res, { error: 'No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars' }, 400);
       return;
     }
 
@@ -1766,20 +1796,9 @@ async function handleSessionChapters(req, res, sessionId) {
     const audioStats = await stat(audioPath);
     console.log(`\n[${jobId}] Audio: ${(audioStats.size / 1024 / 1024).toFixed(1)} MB`);
 
-    // Send to Gemini
-    console.log(`[${jobId}] Analyzing with Gemini...`);
-    const audioBuffer = readFileSync(audioPath);
-    const audioBase64 = audioBuffer.toString('base64');
-
-    const ai = new GoogleGenAI({ apiKey });
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
-      contents: [{
-        role: 'user',
-        parts: [
-          { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
-          {
-            text: `Analyze this audio from a video that is ${totalDuration.toFixed(1)} seconds long.
+    // Send audio to the LLM provider for chapter analysis
+    console.log(`[${jobId}] Analyzing with LLM provider...`);
+    const responseText = await generateWithLLM(`Analyze this audio from a video that is ${totalDuration.toFixed(1)} seconds long.
 
 Identify logical chapter breaks based on topic changes or natural transitions.
 
@@ -1793,30 +1812,15 @@ Guidelines:
 - At least 30 seconds apart
 - Engaging titles for YouTube
 
-Return JSON: {"chapters": [{"start": 0, "title": "Introduction"}], "summary": "Brief summary"}` }
-        ]
-      }],
-      config: { responseMimeType: 'application/json' }
-    });
+Return JSON: {"chapters": [{"start": 0, "title": "Introduction"}], "summary": "Brief summary"}`, { audioPath, responseMimeType: 'application/json' });
 
-    // Get the response text - handle different SDK versions
-    let responseText = '';
-    if (typeof response.text === 'function') {
-      responseText = await response.text();
-    } else if (response.text) {
-      responseText = response.text;
-    } else if (response.candidates && response.candidates[0]?.content?.parts?.[0]?.text) {
-      responseText = response.candidates[0].content.parts[0].text;
-    }
-
-    console.log(`[${jobId}] Gemini response:`, responseText.substring(0, 500));
+    console.log(`[${jobId}] LLM response:`, responseText.substring(0, 500));
 
     let result;
     try {
-      result = JSON.parse(responseText || '{}');
+      result = parseLLMJson(responseText || '{}');
     } catch {
-      const match = (responseText || '').match(/\{[\s\S]*\}/);
-      result = match ? JSON.parse(match[0]) : { chapters: [], summary: '' };
+      result = { chapters: [], summary: '' };
     }
 
     // If no chapters detected, create automatic chapters based on duration
@@ -3470,32 +3474,10 @@ async function getOrTranscribeVideo(session, videoAsset, jobId) {
 
   let transcription = { text: '', words: [] };
 
-  // Helper to transcribe with Gemini (always available as fallback if geminiKey exists)
-  const transcribeWithGeminiLocal = async () => {
+  // Fallback transcription via the LLM provider's audio understanding
+  const transcribeWithLLMLocal = async () => {
     if (!geminiKey) throw new Error('No transcription method available');
-    console.log(`[${jobId}] Using Gemini for transcription...`);
-    const ai = new GoogleGenAI({ apiKey: geminiKey });
-    const audioBuffer = readFileSync(audioPath);
-    const audioBase64 = audioBuffer.toString('base64');
-
-    const result = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
-      contents: [{
-        role: 'user',
-        parts: [
-          { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
-          { text: `Transcribe this audio with word timestamps. Duration: ${videoAsset.duration}s. Return JSON: {"text": "full transcript", "words": [{"text": "word", "start": 0.0, "end": 0.5}]}` }
-        ]
-      }],
-    });
-
-    const respText = result.candidates[0].content.parts[0].text || '';
-    try {
-      return JSON.parse(respText);
-    } catch {
-      const match = respText.match(/\{[\s\S]*\}/);
-      return match ? JSON.parse(match[0]) : { text: respText, words: [] };
-    }
+    return transcribeAudioWithLLM(audioPath, videoAsset.duration, jobId);
   };
 
   if (hasLocalWhisper) {
@@ -3505,7 +3487,7 @@ async function getOrTranscribeVideo(session, videoAsset, jobId) {
     } catch (whisperError) {
       console.log(`[${jobId}] Local Whisper failed: ${whisperError.message}`);
       console.log(`[${jobId}] Falling back to Gemini...`);
-      transcription = await transcribeWithGeminiLocal();
+      transcription = await transcribeWithLLMLocal();
     }
   } else if (openaiKey) {
     console.log(`[${jobId}] Using OpenAI Whisper API...`);
@@ -3537,7 +3519,7 @@ async function getOrTranscribeVideo(session, videoAsset, jobId) {
       })),
     };
   } else if (geminiKey) {
-    transcription = await transcribeWithGeminiLocal();
+    transcription = await transcribeWithLLMLocal();
   }
 
   // Clean up audio file
@@ -3748,29 +3730,8 @@ async function handleTranscribe(req, res, sessionId) {
       } catch (whisperError) {
         console.log(`[${jobId}] Local Whisper failed: ${whisperError.message}`);
         if (geminiKey) {
-          console.log(`[${jobId}] Falling back to Gemini for transcription...`);
-          // Fall through to Gemini transcription below by setting useGemini-like behavior
-          const audioBuffer = readFileSync(audioPath);
-          const audioBase64 = audioBuffer.toString('base64');
-          const ai = new GoogleGenAI({ apiKey: geminiKey });
-
-          const response = await ai.models.generateContent({
-            model: 'gemini-2.0-flash',
-            contents: [{
-              role: 'user', parts: [
-                { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
-                { text: `Transcribe this audio with word-level timestamps. Duration: ${totalDuration.toFixed(1)}s. Return JSON: {"text": "full text", "words": [{"text": "word", "start": 0.0, "end": 0.5}]}` }
-              ]
-            }]
-          });
-
-          const responseText = response.text || '';
-          try {
-            transcription = JSON.parse(responseText);
-          } catch {
-            const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-            transcription = jsonMatch ? JSON.parse(jsonMatch[0]) : { text: responseText, words: [] };
-          }
+          console.log(`[${jobId}] Falling back to LLM transcription...`);
+          transcription = await transcribeAudioWithLLM(audioPath, totalDuration.toFixed(1), jobId);
         } else {
           throw whisperError;
         }
@@ -3818,27 +3779,18 @@ async function handleTranscribe(req, res, sessionId) {
       };
 
     } else if (useGemini) {
-      // === Gemini - Estimated timestamps (less accurate) ===
-      console.log(`[${jobId}] Sending to Gemini for transcription...`);
+      // === LLM audio transcription - estimated timestamps (less accurate) ===
+      console.log(`[${jobId}] Sending audio for LLM transcription...`);
       const audioBuffer = readFileSync(audioPath);
       const audioBase64 = audioBuffer.toString('base64');
 
-      const ai = new GoogleGenAI({ apiKey: geminiKey });
-
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.0-flash',
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              {
-                inlineData: {
-                  mimeType: 'audio/mp3',
-                  data: audioBase64
-                }
-              },
-              {
-                text: `Transcribe this audio with word-level timestamps. The audio is ${totalDuration.toFixed(1)} seconds long.
+      const responseText = await callGeminiSDK([
+        {
+          role: 'user',
+          parts: [
+            { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
+            {
+              text: `Transcribe this audio with word-level timestamps. The audio is ${totalDuration.toFixed(1)} seconds long.
 
 IMPORTANT: Return ONLY valid JSON, no markdown, no explanation. The response must be parseable JSON.
 
@@ -3858,15 +3810,12 @@ Guidelines:
 - Words should be in order
 - Estimate timing based on natural speech patterns if exact timing is unclear
 - Do not include filler sounds like "um" or "uh" unless they're clearly intentional`
-              }
-            ]
-          }
-        ]
-      });
-
-      const responseText = response.text || '';
-      console.log(`[${jobId}] Gemini response length: ${responseText.length} chars`);
-      console.log(`[${jobId}] Gemini raw response:`, responseText.substring(0, 1000));
+            }
+          ]
+        }
+      ]);
+      console.log(`[${jobId}] LLM response length: ${responseText.length} chars`);
+      console.log(`[${jobId}] LLM raw response:`, responseText.substring(0, 1000));
 
       // Parse the JSON response
       try {
@@ -4206,26 +4155,8 @@ async function handleGenerateBroll(req, res, sessionId) {
         transcription = await runLocalWhisper(audioPath, jobId);
       } catch (whisperError) {
         console.log(`[${jobId}]    Local Whisper failed: ${whisperError.message}`);
-        console.log(`[${jobId}]    Falling back to Gemini...`);
-        const audioBuffer = readFileSync(audioPath);
-        const audioBase64 = audioBuffer.toString('base64');
-        const ai = new GoogleGenAI({ apiKey });
-        const response = await ai.models.generateContent({
-          model: 'gemini-2.0-flash',
-          contents: [{
-            role: 'user', parts: [
-              { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
-              { text: `Transcribe this audio with word timestamps. Duration: ${totalDuration}s. Return JSON: {"text": "...", "words": [{"text": "word", "start": 0.0, "end": 0.5}]}` }
-            ]
-          }]
-        });
-        const respText = response.text || '';
-        try {
-          transcription = JSON.parse(respText);
-        } catch {
-          const match = respText.match(/\{[\s\S]*\}/);
-          transcription = match ? JSON.parse(match[0]) : { text: respText, words: [] };
-        }
+        console.log(`[${jobId}]    Falling back to LLM transcription...`);
+        transcription = await transcribeAudioWithLLM(audioPath, totalDuration, jobId);
       }
     } else if (openaiKey) {
       console.log(`[${jobId}]    Using OpenAI Whisper API...`);
@@ -4259,30 +4190,7 @@ async function handleGenerateBroll(req, res, sessionId) {
         }))
       };
     } else {
-      // Use Gemini for transcription
-      console.log(`[${jobId}]    Using Gemini for transcription...`);
-      const audioBuffer = readFileSync(audioPath);
-      const audioBase64 = audioBuffer.toString('base64');
-
-      const ai = new GoogleGenAI({ apiKey });
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.0-flash',
-        contents: [{
-          role: 'user',
-          parts: [
-            { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
-            { text: `Transcribe this audio with word timestamps. Duration: ${totalDuration}s. Return JSON: {"text": "...", "words": [{"text": "word", "start": 0.0, "end": 0.5}]}` }
-          ]
-        }]
-      });
-
-      const respText = response.text || '';
-      try {
-        transcription = JSON.parse(respText);
-      } catch {
-        const match = respText.match(/\{[\s\S]*\}/);
-        transcription = match ? JSON.parse(match[0]) : { text: respText, words: [] };
-      }
+      transcription = await transcribeAudioWithLLM(audioPath, totalDuration, jobId);
     }
 
     try { unlinkSync(audioPath); } catch { }
@@ -5482,7 +5390,42 @@ Return ONLY the complete JSON structure with your minimal change applied. No mar
   }
 }
 
-// Generate image using fal.ai nano-banana-pro model (Picasso agent)
+// ============== GENERATIVE PROVIDER GATEWAY (fal.ai) ==============
+
+// Upload a local file to the generative provider's storage, returning a URL.
+async function falUpload(filePath, mimeType, jobId) {
+  const buffer = readFileSync(filePath);
+  console.log(`[${jobId}] Uploading ${(buffer.length / (1024 * 1024)).toFixed(1)} MB to provider storage...`);
+  const url = await fal.storage.upload(new Blob([buffer], { type: mimeType }));
+  console.log(`[${jobId}] Uploaded: ${url.substring(0, 50)}...`);
+  return url;
+}
+
+// Generative model call; resolves with the SDK's { data, requestId }.
+// Queue-managed by default; queue: false for short synchronous models.
+function callFal(model, input, jobId, { queue = true } = {}) {
+  if (!queue) return fal.run(model, { input });
+  return fal.subscribe(model, {
+    input,
+    logs: true,
+    onQueueUpdate: (update) => {
+      if (update.status === 'IN_QUEUE') {
+        console.log(`[${jobId}] Queued at position ${update.position || '?'}`);
+      } else if (update.status === 'IN_PROGRESS') {
+        console.log(`[${jobId}] Processing...`);
+      }
+    },
+  });
+}
+
+// Download a generated artifact URL to a local file.
+async function downloadArtifact(url, outputPath, label = 'artifact') {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Failed to download ${label}: ${response.status}`);
+  writeFileSync(outputPath, Buffer.from(await response.arrayBuffer()));
+}
+
+// Generate image using the generative provider (Picasso agent)
 async function handleGenerateImage(req, res, sessionId) {
   const session = requireSession(res, sessionId);
   if (!session) return;
@@ -5555,17 +5498,15 @@ async function handleGenerateImage(req, res, sessionId) {
       console.log(`[${jobId}] No LLM provider, using original prompt`);
     }
 
-    // Call fal.ai nano-banana-pro API with enhanced prompt
-    console.log(`[${jobId}] Sending to fal.ai...`);
-    const falResult = await fal.run('fal-ai/nano-banana-pro', {
-      input: {
-        prompt: enhancedPrompt,
-        num_images: Math.min(numImages, 4),
-        aspect_ratio: aspectRatio,
-        resolution,
-        output_format: 'png',
-      },
-    });
+    // Call the image-gen model with the enhanced prompt
+    console.log(`[${jobId}] Sending to image-gen provider...`);
+    const falResult = await callFal('fal-ai/nano-banana-pro', {
+      prompt: enhancedPrompt,
+      num_images: Math.min(numImages, 4),
+      aspect_ratio: aspectRatio,
+      resolution,
+      output_format: 'png',
+    }, jobId, { queue: false });
     console.log(`[${jobId}] Generated ${falResult.data?.images?.length || 0} images`);
 
     // SDK returns { data, requestId }
@@ -5727,33 +5668,17 @@ Return ONLY the enhanced prompt text. No explanations, no quotes, no markdown.`;
       }
     }
 
-    // Upload image to fal.ai storage to get a URL (handles large files)
-    console.log(`[${jobId}] Uploading image to fal.ai storage...`);
-    const imageBuffer = readFileSync(imageAsset.path);
+    // Upload image to provider storage to get a URL (handles large files)
     const mimeType = imageAsset.filename.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
-    const imageBlob = new Blob([imageBuffer], { type: mimeType });
-    const uploadedImageUrl = await fal.storage.upload(imageBlob);
-    console.log(`[${jobId}] Image uploaded: ${uploadedImageUrl.substring(0, 50)}...`);
+    const uploadedImageUrl = await falUpload(imageAsset.path, mimeType, jobId);
 
-    console.log(`[${jobId}] Calling fal.ai video generation...`);
-
-    // Use fal.ai SDK with automatic queue handling
-    const falResult = await fal.subscribe('fal-ai/kling-video/v1.5/pro/image-to-video', {
-      input: {
-        prompt: enhancedPrompt,
-        image_url: uploadedImageUrl,
-        duration: duration === 10 ? '10' : '5',
-        aspect_ratio: '16:9',
-      },
-      logs: true,
-      onQueueUpdate: (update) => {
-        if (update.status === 'IN_QUEUE') {
-          console.log(`[${jobId}] Queued at position ${update.position || '?'}`);
-        } else if (update.status === 'IN_PROGRESS') {
-          console.log(`[${jobId}] Processing...`);
-        }
-      },
-    });
+    console.log(`[${jobId}] Calling video-gen provider...`);
+    const falResult = await callFal('fal-ai/kling-video/v1.5/pro/image-to-video', {
+      prompt: enhancedPrompt,
+      image_url: uploadedImageUrl,
+      duration: duration === 10 ? '10' : '5',
+      aspect_ratio: '16:9',
+    }, jobId);
 
     console.log(`[${jobId}] Video generation complete!`);
 
@@ -5763,20 +5688,13 @@ Return ONLY the enhanced prompt text. No explanations, no quotes, no markdown.`;
       throw new Error('No video URL in response');
     }
 
-    const videoResponse = await fetch(videoUrl);
-    if (!videoResponse.ok) {
-      throw new Error('Failed to download generated video');
-    }
-
-    const videoBuffer = Buffer.from(await videoResponse.arrayBuffer());
-
     // Save to assets
     const videoId = randomUUID();
     const shortPrompt = prompt.substring(0, 30).replace(/[^a-zA-Z0-9]/g, '-').replace(/-+/g, '-');
     const videoPath = join(session.assetsDir, `${videoId}.mp4`);
     const thumbPath = join(session.assetsDir, `${videoId}_thumb.jpg`);
 
-    writeFileSync(videoPath, videoBuffer);
+    await downloadArtifact(videoUrl, videoPath, 'generated video');
 
     // Generate thumbnail
     await runFFmpeg([
@@ -5786,34 +5704,7 @@ Return ONLY the enhanced prompt text. No explanations, no quotes, no markdown.`;
       thumbPath
     ], jobId);
 
-    // Get video duration using ffprobe
-    let videoDuration = duration;
-    try {
-      const probeResult = await new Promise((resolve, reject) => {
-        const proc = spawn('ffprobe', [
-          '-v', 'error',
-          '-show_entries', 'format=duration',
-          '-of', 'json',
-          videoPath
-        ]);
-        let output = '';
-        proc.stdout.on('data', d => output += d.toString());
-        proc.on('close', code => {
-          if (code === 0) {
-            try {
-              const data = JSON.parse(output);
-              resolve(parseFloat(data.format.duration) || duration);
-            } catch { resolve(duration); }
-          } else {
-            resolve(duration);
-          }
-        });
-        proc.on('error', () => resolve(duration));
-      });
-      videoDuration = probeResult;
-    } catch (e) {
-      console.log(`[${jobId}] Could not probe video duration, using default`);
-    }
+    const videoDuration = (await getVideoDuration(videoPath)) || duration;
 
     const { stat } = await import('fs/promises');
     const stats = await stat(videoPath);
@@ -5939,41 +5830,22 @@ Return ONLY the enhanced prompt, no explanations.`)).trim();
       compressedPath
     ], jobId);
 
-    // Upload compressed video to fal.ai storage
-    console.log(`[${jobId}] Uploading compressed video to fal.ai storage...`);
-    const videoBuffer = readFileSync(compressedPath);
-    const fileSizeMB = videoBuffer.length / (1024 * 1024);
-    console.log(`[${jobId}] Compressed size: ${fileSizeMB.toFixed(1)} MB`);
-
-    const videoBlob = new Blob([videoBuffer], { type: 'video/mp4' });
-    const uploadedVideoUrl = await fal.storage.upload(videoBlob);
-    console.log(`[${jobId}] Video uploaded: ${uploadedVideoUrl.substring(0, 50)}...`);
+    // Upload compressed video to provider storage
+    const uploadedVideoUrl = await falUpload(compressedPath, 'video/mp4', jobId);
 
     // Clean up compressed file
     try { unlinkSync(compressedPath); } catch (e) { }
 
-    console.log(`[${jobId}] Calling fal.ai LTX-2 video-to-video...`);
-
-    // Use fal.ai SDK with automatic queue handling
-    const falResult = await fal.subscribe('fal-ai/ltx-2-19b/video-to-video', {
-      input: {
-        prompt: enhancedPrompt,
-        video_url: uploadedVideoUrl,
-        num_inference_steps: 40,
-        guidance_scale: 3,
-        video_strength: 0.7,
-        generate_audio: false,
-        video_quality: 'high',
-      },
-      logs: true,
-      onQueueUpdate: (update) => {
-        if (update.status === 'IN_QUEUE') {
-          console.log(`[${jobId}] Queued at position ${update.position || '?'}`);
-        } else if (update.status === 'IN_PROGRESS') {
-          console.log(`[${jobId}] Processing...`);
-        }
-      },
-    });
+    console.log(`[${jobId}] Calling restyle provider...`);
+    const falResult = await callFal('fal-ai/ltx-2-19b/video-to-video', {
+      prompt: enhancedPrompt,
+      video_url: uploadedVideoUrl,
+      num_inference_steps: 40,
+      guidance_scale: 3,
+      video_strength: 0.7,
+      generate_audio: false,
+      video_quality: 'high',
+    }, jobId);
 
     console.log(`[${jobId}] Video restyle complete!`);
 
@@ -5983,20 +5855,13 @@ Return ONLY the enhanced prompt, no explanations.`)).trim();
       throw new Error('No video URL in response');
     }
 
-    const videoResponse = await fetch(outputVideoUrl);
-    if (!videoResponse.ok) {
-      throw new Error('Failed to download restyled video');
-    }
-
-    const outputBuffer = Buffer.from(await videoResponse.arrayBuffer());
-
     // Save to assets
     const newVideoId = randomUUID();
     const shortPrompt = prompt.substring(0, 20).replace(/[^a-zA-Z0-9]/g, '-').replace(/-+/g, '-');
     const outputPath = join(session.assetsDir, `${newVideoId}.mp4`);
     const thumbPath = join(session.assetsDir, `${newVideoId}_thumb.jpg`);
 
-    writeFileSync(outputPath, outputBuffer);
+    await downloadArtifact(outputVideoUrl, outputPath, 'restyled video');
 
     // Generate thumbnail
     await runFFmpeg([
@@ -6006,23 +5871,7 @@ Return ONLY the enhanced prompt, no explanations.`)).trim();
       thumbPath
     ], jobId);
 
-    // Get video duration
-    let videoDuration = videoAsset.duration || 5;
-    try {
-      const probeResult = await new Promise((resolve) => {
-        const proc = spawn('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'json', outputPath]);
-        let output = '';
-        proc.stdout.on('data', d => output += d.toString());
-        proc.on('close', code => {
-          if (code === 0) {
-            try { resolve(parseFloat(JSON.parse(output).format.duration)); }
-            catch { resolve(videoDuration); }
-          } else resolve(videoDuration);
-        });
-        proc.on('error', () => resolve(videoDuration));
-      });
-      videoDuration = probeResult;
-    } catch (e) { /* use default */ }
+    const videoDuration = (await getVideoDuration(outputPath)) || videoAsset.duration || 5;
 
     const { stat } = await import('fs/promises');
     const stats = await stat(outputPath);
@@ -6115,36 +5964,17 @@ async function handleRemoveVideoBg(req, res, sessionId) {
       compressedPath
     ], jobId);
 
-    // Upload compressed video to fal.ai storage
-    console.log(`[${jobId}] Uploading compressed video to fal.ai storage...`);
-    const videoBuffer = readFileSync(compressedPath);
-    const fileSizeMB = videoBuffer.length / (1024 * 1024);
-    console.log(`[${jobId}] Compressed size: ${fileSizeMB.toFixed(1)} MB`);
-
-    const videoBlob = new Blob([videoBuffer], { type: 'video/mp4' });
-    const uploadedVideoUrl = await fal.storage.upload(videoBlob);
-    console.log(`[${jobId}] Video uploaded: ${uploadedVideoUrl.substring(0, 50)}...`);
+    // Upload compressed video to provider storage
+    const uploadedVideoUrl = await falUpload(compressedPath, 'video/mp4', jobId);
 
     // Clean up compressed file
     try { unlinkSync(compressedPath); } catch (e) { }
 
-    console.log(`[${jobId}] Calling fal.ai Bria video background removal...`);
-
-    // Use fal.ai SDK with automatic queue handling
-    const falResult = await fal.subscribe('fal-ai/ben/v2/video', {
-      input: {
-        video_url: uploadedVideoUrl,
-        output_format: 'webm',  // WebM for transparency support
-      },
-      logs: true,
-      onQueueUpdate: (update) => {
-        if (update.status === 'IN_QUEUE') {
-          console.log(`[${jobId}] Queued at position ${update.position || '?'}`);
-        } else if (update.status === 'IN_PROGRESS') {
-          console.log(`[${jobId}] Processing...`);
-        }
-      },
-    });
+    console.log(`[${jobId}] Calling bg-removal provider...`);
+    const falResult = await callFal('fal-ai/ben/v2/video', {
+      video_url: uploadedVideoUrl,
+      output_format: 'webm',  // WebM for transparency support
+    }, jobId);
 
     console.log(`[${jobId}] Background removal complete!`);
 
@@ -6154,20 +5984,13 @@ async function handleRemoveVideoBg(req, res, sessionId) {
       throw new Error('No video URL in response');
     }
 
-    const videoResponse = await fetch(outputVideoUrl);
-    if (!videoResponse.ok) {
-      throw new Error('Failed to download processed video');
-    }
-
-    const outputBuffer = Buffer.from(await videoResponse.arrayBuffer());
-
     // Save to assets (webm for transparency support)
     const newVideoId = randomUUID();
     const baseName = videoAsset.filename.replace(/\.[^/.]+$/, '');
     const outputPath = join(session.assetsDir, `${newVideoId}.webm`);
     const thumbPath = join(session.assetsDir, `${newVideoId}_thumb.jpg`);
 
-    writeFileSync(outputPath, outputBuffer);
+    await downloadArtifact(outputVideoUrl, outputPath, 'processed video');
 
     // Generate thumbnail
     await runFFmpeg([
@@ -6177,23 +6000,7 @@ async function handleRemoveVideoBg(req, res, sessionId) {
       thumbPath
     ], jobId);
 
-    // Get video duration
-    let videoDuration = videoAsset.duration || 5;
-    try {
-      const probeResult = await new Promise((resolve) => {
-        const proc = spawn('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'json', outputPath]);
-        let output = '';
-        proc.stdout.on('data', d => output += d.toString());
-        proc.on('close', code => {
-          if (code === 0) {
-            try { resolve(parseFloat(JSON.parse(output).format.duration)); }
-            catch { resolve(videoDuration); }
-          } else resolve(videoDuration);
-        });
-        proc.on('error', () => resolve(videoDuration));
-      });
-      videoDuration = probeResult;
-    } catch (e) { /* use default */ }
+    const videoDuration = (await getVideoDuration(outputPath)) || videoAsset.duration || 5;
 
     const { stat } = await import('fs/promises');
     const stats = await stat(outputPath);
@@ -6576,37 +6383,9 @@ async function handleAnalyzeForAnimation(req, res, sessionId) {
     const hasLocalWhisper = await checkLocalWhisper();
     const openaiKey = process.env.OPENAI_API_KEY;
 
-    // Helper function to transcribe with Gemini (always available as fallback)
-    const transcribeWithGemini = async () => {
-      console.log(`[${jobId}]    Using Gemini for transcription...`);
-      const ai = new GoogleGenAI({ apiKey });
-      const audioBuffer = readFileSync(audioPath);
-      const fileSizeKB = audioBuffer.length / 1024;
-      console.log(`[${jobId}]    Audio file size: ${fileSizeKB.toFixed(1)}KB`);
-
-      // Check if audio file is too small (likely no audio track in video)
-      if (audioBuffer.length < 1000) {
-        console.log(`[${jobId}]    Audio file too small, video may have no audio track`);
-        return { text: '', words: [] };
-      }
-
-      const audioBase64 = audioBuffer.toString('base64');
-
-      const result = await ai.models.generateContent({
-        model: 'gemini-2.0-flash',
-        contents: [{
-          role: 'user',
-          parts: [
-            { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
-            { text: `Transcribe this audio. Return ONLY the text content. Duration: ${analyzedDuration.toFixed(1)}s` }
-          ]
-        }],
-      });
-
-      return {
-        text: result.candidates?.[0]?.content?.parts?.[0]?.text || '',
-        words: [],
-      };
+    // Fallback transcription via the LLM provider's audio understanding
+    const transcribeWithLLMFallback = async () => {
+      return transcribeAudioWithLLM(audioPath, analyzedDuration.toFixed(1), jobId, { wordTimestamps: false });
     };
 
     if (hasLocalWhisper) {
@@ -6616,7 +6395,7 @@ async function handleAnalyzeForAnimation(req, res, sessionId) {
       } catch (whisperError) {
         console.log(`[${jobId}]    Local Whisper failed: ${whisperError.message}`);
         console.log(`[${jobId}]    Falling back to Gemini...`);
-        transcription = await transcribeWithGemini();
+        transcription = await transcribeWithLLMFallback();
       }
     } else if (openaiKey) {
       console.log(`[${jobId}]    Using OpenAI Whisper API...`);
@@ -6650,7 +6429,7 @@ async function handleAnalyzeForAnimation(req, res, sessionId) {
       };
     } else {
       // Use Gemini as fallback
-      transcription = await transcribeWithGemini();
+      transcription = await transcribeWithLLMFallback();
     }
 
     console.log(`[${jobId}] Transcription complete: ${transcription.text.substring(0, 100)}...`);
@@ -7028,29 +6807,9 @@ async function handleGenerateTranscriptAnimation(req, res, sessionId) {
     const hasLocalWhisper = await checkLocalWhisper();
     const openaiKey = process.env.OPENAI_API_KEY;
 
-    // Helper for Gemini fallback
-    const transcribeWithGeminiForAnimation = async () => {
-      console.log(`[${jobId}]    Using Gemini for transcription...`);
-      const audioBuffer = readFileSync(audioPath);
-      const audioBase64 = audioBuffer.toString('base64');
-      const ai = new GoogleGenAI({ apiKey });
-      const geminiResponse = await ai.models.generateContent({
-        model: 'gemini-2.0-flash',
-        contents: [{
-          role: 'user', parts: [
-            { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
-            { text: `Transcribe this audio with word timestamps. Duration: ${totalDuration}s. Return JSON: {"text": "...", "words": [{"text": "word", "start": 0.0, "end": 0.5}]}` }
-          ]
-        }]
-      });
-      const respText = geminiResponse.text || '';
-      try {
-        return JSON.parse(respText);
-      } catch {
-        const match = respText.match(/\{[\s\S]*\}/);
-        return match ? JSON.parse(match[0]) : { text: respText, words: [] };
-      }
-    };
+    // Fallback transcription via the LLM provider's audio understanding
+    const transcribeWithLLMForAnimation = async () =>
+      transcribeAudioWithLLM(audioPath, totalDuration, jobId);
 
     let transcription;
     if (hasLocalWhisper) {
@@ -7060,7 +6819,7 @@ async function handleGenerateTranscriptAnimation(req, res, sessionId) {
       } catch (whisperError) {
         console.log(`[${jobId}]    Local Whisper failed: ${whisperError.message}`);
         console.log(`[${jobId}]    Falling back to Gemini...`);
-        transcription = await transcribeWithGeminiForAnimation();
+        transcription = await transcribeWithLLMForAnimation();
       }
     } else if (openaiKey) {
       console.log(`[${jobId}]    Using OpenAI Whisper API...`);
@@ -7094,7 +6853,7 @@ async function handleGenerateTranscriptAnimation(req, res, sessionId) {
         }))
       };
     } else {
-      transcription = await transcribeWithGeminiForAnimation();
+      transcription = await transcribeWithLLMForAnimation();
     }
 
     try { unlinkSync(audioPath); } catch { }
@@ -7347,29 +7106,9 @@ async function handleGenerateContextualAnimation(req, res, sessionId) {
     const hasLocalWhisper = await checkLocalWhisper();
     const openaiKey = process.env.OPENAI_API_KEY;
 
-    // Helper for Gemini fallback in contextual animation
-    const transcribeWithGeminiContextual = async () => {
-      console.log(`[${jobId}]    Using Gemini for transcription...`);
-      const ai = new GoogleGenAI({ apiKey });
-      const audioBuffer = readFileSync(audioPath);
-      const audioBase64 = audioBuffer.toString('base64');
-
-      const result = await ai.models.generateContent({
-        model: 'gemini-2.0-flash',
-        contents: [{
-          role: 'user',
-          parts: [
-            { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
-            { text: `Transcribe this audio. Return ONLY the text content, no timestamps needed. Duration: ${totalDuration.toFixed(1)}s` }
-          ]
-        }],
-      });
-
-      return {
-        text: result.candidates[0].content.parts[0].text || '',
-        words: [],
-      };
-    };
+    // Fallback transcription via the LLM provider's audio understanding
+    const transcribeWithLLMContextual = async () =>
+      transcribeAudioWithLLM(audioPath, totalDuration.toFixed(1), jobId, { wordTimestamps: false });
 
     if (hasLocalWhisper) {
       try {
@@ -7378,7 +7117,7 @@ async function handleGenerateContextualAnimation(req, res, sessionId) {
       } catch (whisperError) {
         console.log(`[${jobId}]    Local Whisper failed: ${whisperError.message}`);
         console.log(`[${jobId}]    Falling back to Gemini...`);
-        transcription = await transcribeWithGeminiContextual();
+        transcription = await transcribeWithLLMContextual();
       }
     } else if (openaiKey) {
       console.log(`[${jobId}]    Using OpenAI Whisper API...`);
@@ -7411,7 +7150,7 @@ async function handleGenerateContextualAnimation(req, res, sessionId) {
         })),
       };
     } else {
-      transcription = await transcribeWithGeminiContextual();
+      transcription = await transcribeWithLLMContextual();
     }
 
     console.log(`[${jobId}] Transcription complete: ${transcription.text.substring(0, 100)}...`);
