@@ -1222,39 +1222,6 @@ export default function AIPromptPanel({
     }
   };
 
-  // Poll for job completion
-  const pollForResult = async (jobId: string, maxAttempts = 60): Promise<any /* eslint-disable-line @typescript-eslint/no-explicit-any */> => {
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      setProcessingStatus(`AI is working... (${attempt + 1}s)`);
-
-      try {
-        const response = await fetch(`/api/ai-edit/status/${jobId}`);
-        if (!response.ok) {
-          throw new Error(`Status check failed: ${response.status}`);
-        }
-
-        const data = await response.json();
-
-        if (data.status === 'complete') {
-          return data;
-        }
-
-        if (data.status === 'error') {
-          throw new Error(data.error || 'Processing failed');
-        }
-
-        // Still processing, wait and try again
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      } catch (error) {
-        // On network error, wait and retry
-        console.error('Poll error:', error);
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
-    }
-
-    throw new Error('Request timed out after 60 seconds');
-  };
-
   // Handle the caption workflow
   const handleCaptionWorkflow = async () => {
     if (!onTranscribeAndAddCaptions) return;
@@ -2288,30 +2255,24 @@ export default function AIPromptPanel({
 
     // FFmpeg video edit (default for video manipulation)
     setIsProcessing(true);
-    setProcessingStatus('Starting AI...');
+    setProcessingStatus('AI is working...');
 
     try {
-      // Start the job - use fullMessage which includes reference context
-      const startResponse = await fetch('/api/ai-edit/start', {
+      // Single synchronous request to the local server - use fullMessage which
+      // includes reference context
+      const response = await fetch('http://localhost:3333/ai-edit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: fullMessage }),
       });
 
-      if (!startResponse.ok) {
-        const errorText = await startResponse.text();
-        console.error('Start error:', startResponse.status, errorText);
-        throw new Error(`Failed to start: ${startResponse.status}`);
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('AI edit error:', response.status, errorText);
+        throw new Error(`AI edit failed: ${response.status}`);
       }
 
-      const { jobId } = await startResponse.json();
-
-      if (!jobId) {
-        throw new Error('No job ID returned');
-      }
-
-      // Poll for the result
-      const data = await pollForResult(jobId);
+      const data = await response.json();
 
       setChatHistory((prev) => [
         ...prev,
