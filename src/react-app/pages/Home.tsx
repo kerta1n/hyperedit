@@ -214,9 +214,6 @@ export default function Home() {
           const clipTime = isPremounted
             ? (clip.inPoint || 0)
             : (currentTime - clip.start) + (clip.inPoint || 0);
-          if (trackId === 'V2' || trackId === 'V3') {
-            console.log(`[V2DBG][getPreviewLayers] clip=${clip.id} isPremounted=${isPremounted} clipTime=${clipTime.toFixed(3)} currentTime=${currentTime.toFixed(3)} clip.start=${clip.start}`);
-          }
           layers.push({
             id: clip.id,
             url,
