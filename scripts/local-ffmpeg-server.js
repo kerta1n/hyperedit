@@ -328,6 +328,18 @@ process.env.TMPDIR = TEMP_DIR;
 process.env.TEMP = TEMP_DIR;
 process.env.TMP = TEMP_DIR;
 
+// EPIPE shield: writes to already-dead pipes (Remotion's compositor child
+// after it exits, or a client socket after disconnect) surface as async
+// 'error' events no try/catch can reach, and must not kill the only server
+// process. Anything other than EPIPE keeps fail-fast crash semantics.
+process.on('uncaughtException', (err) => {
+  if (err && err.code === 'EPIPE') {
+    console.warn('[Server] Ignored EPIPE from a closed pipe:', err.message);
+    return;
+  }
+  throw err;
+});
+
 // Active video sessions - keeps videos on disk between edits
 const sessions = new Map();
 
@@ -807,6 +819,11 @@ function runFFmpeg(args, jobId, { timeout } = {}) {
 
 // Stream render progress as NDJSON, then write final result
 async function streamRender(res, renderFn) {
+  // A disconnecting client must not crash the server: writes to a destroyed
+  // socket emit async 'error' events that try/catch around res.write can't see.
+  res.on('error', (err) => {
+    console.warn('[Render] Response stream error (client gone?):', err.message);
+  });
   res.writeHead(200, {
     'Content-Type': 'application/x-ndjson',
     'Transfer-Encoding': 'chunked',
@@ -2536,12 +2553,6 @@ async function handleProjectRenderRemotion(req, res, sessionId) {
 
     session.project = ensureProjectDefaults(session.project);
 
-    if ((session.project.clips || []).length === 0 && !options.spec) {
-      sendJSON(res, { error: 'No clips in timeline' }, 400);
-      activeRenders.delete(sessionId);
-      return;
-    }
-
     const preview = options.preview === true;
     const renderOpts = options.renderOptions || {};
     const specResult = options.spec
@@ -2557,6 +2568,14 @@ async function handleProjectRenderRemotion(req, res, sessionId) {
         warnings: [],
       };
     const spec = specResult.spec;
+
+    // Guard both spec sources (client-supplied and server-built): an empty
+    // timeline renders black frames with no audio, which is never intended.
+    if ((spec.clips || []).length === 0) {
+      sendJSON(res, { error: 'Timeline is empty — add at least one clip before rendering' }, 400);
+      activeRenders.delete(sessionId);
+      return;
+    }
 
     // Derive file extension from renderOptions container format
     const containerExt = preview ? 'mp4' : (renderOpts.containerFormat || 'mp4');
@@ -7654,15 +7673,14 @@ async function handleProcessAsset(req, res, sessionId) {
     console.log(`[${jobId}] Source: ${asset.filename}`);
     console.log(`[${jobId}] Command: ${command}`);
 
-    // Parse the FFmpeg command and replace input/output placeholders
-    // Expected format: "ffmpeg -i input.mp4 [options] output.mp4"
-    // We'll replace input.mp4 with actual path and output.mp4 with new path
-    let ffmpegArgs = command
-      .replace(/^ffmpeg\s+/, '') // Remove 'ffmpeg' prefix
-      .replace(/input\.mp4|"input\.mp4"/gi, `"${asset.path}"`)
-      .replace(/output\.mp4|"output\.mp4"/gi, `"${outputPath}"`)
-      .split(/\s+/)
-      .filter(arg => arg.length > 0);
+    // Tokenize with the quote-aware parser (spawn uses no shell, so embedded
+    // quote characters would reach ffmpeg literally), then swap the
+    // input/output placeholders for real paths.
+    let ffmpegArgs = parseFFmpegArgs(command).map(arg => {
+      if (/^input\.[a-z0-9]+$/i.test(arg)) return asset.path;
+      if (/^output\.[a-z0-9]+$/i.test(arg)) return outputPath;
+      return arg;
+    });
 
     // If the command doesn't have proper input/output, construct a basic one
     if (!ffmpegArgs.some(arg => arg.includes(asset.path))) {
