@@ -221,8 +221,7 @@ async function handleAiEditCommand(req, res) {
     const body = await parseBody(req);
     const prompt = body.prompt;
     if (!prompt) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'Prompt is required' }));
+      sendJSON(res, { error: 'Prompt is required' }, 400);
       return;
     }
 
@@ -233,12 +232,10 @@ async function handleAiEditCommand(req, res) {
     const result = parseLLMJson(text);
     if (!result.command) throw new Error('LLM response missing "command"');
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ success: true, command: result.command, explanation: result.explanation || '' }));
+    sendJSON(res, { success: true, command: result.command, explanation: result.explanation || '' });
   } catch (error) {
     console.error('[AiEdit] Error:', error.message);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Failed to process AI request', details: error.message }));
+    sendJSON(res, { error: 'Failed to process AI request', details: error.message }, 500);
   }
 }
 
@@ -279,6 +276,21 @@ if (!existsSync(SESSIONS_DIR)) {
 }
 if (!existsSync(UPLOAD_STAGING_DIR)) {
   mkdirSync(UPLOAD_STAGING_DIR, { recursive: true });
+}
+
+// Send a JSON response. CORS headers are already applied globally per-request
+// in the server's request handler.
+function sendJSON(res, data, status = 200) {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(data));
+}
+
+// Look up a session, sending the standard 404 when missing. Callers bail with
+// `if (!session) return;`.
+function requireSession(res, sessionId) {
+  const session = getSession(sessionId);
+  if (!session) sendJSON(res, { error: 'Session not found' }, 404);
+  return session;
 }
 
 // Parse a multipart upload. Files stage to UPLOAD_STAGING_DIR by default so the
@@ -675,9 +687,12 @@ function cleanupSession(sessionId) {
 // }, 30 * 60 * 1000); // Check every 30 minutes
 
 // Run FFmpeg command and return a promise
-function runFFmpeg(args, jobId, { timeout } = {}) {
+// Shared spawn wrapper for ffmpeg/ffprobe: stderr capture, optional timeout,
+// optional inline progress logging. Resolves with the chosen output stream.
+function runProcess(binary, label, args, jobId, { timeout, resolveWith = 'stderr', logProgress = false } = {}) {
   return new Promise((resolve, reject) => {
-    const ffmpeg = spawn('ffmpeg', args);
+    const child = spawn(binary, args);
+    let stdout = '';
     let stderr = '';
     let killed = false;
     let timer;
@@ -685,35 +700,45 @@ function runFFmpeg(args, jobId, { timeout } = {}) {
     if (timeout) {
       timer = setTimeout(() => {
         killed = true;
-        ffmpeg.kill('SIGKILL');
+        child.kill('SIGKILL');
       }, timeout);
     }
 
-    ffmpeg.stderr.on('data', (data) => {
+    child.stdout.on('data', (data) => {
+      stdout += data.toString();
+    });
+
+    child.stderr.on('data', (data) => {
       stderr += data.toString();
-      const lines = data.toString().split('\n');
-      for (const line of lines) {
-        if (line.includes('time=') || line.includes('frame=')) {
-          process.stdout.write(`\r[${jobId}] ${line.trim()}`);
+      if (logProgress) {
+        const lines = data.toString().split('\n');
+        for (const line of lines) {
+          if (line.includes('time=') || line.includes('frame=')) {
+            process.stdout.write(`\r[${jobId}] ${line.trim()}`);
+          }
         }
       }
     });
 
-    ffmpeg.on('close', (code) => {
+    child.on('close', (code) => {
       if (timer) clearTimeout(timer);
       if (killed) {
-        reject(new Error(`FFmpeg timed out after ${timeout}ms`));
+        reject(new Error(`${label} timed out after ${timeout}ms`));
       } else if (code === 0) {
-        resolve(stderr);
+        resolve(resolveWith === 'stdout' ? stdout : stderr);
       } else {
-        reject(new Error(`FFmpeg failed with code ${code}: ${stderr.slice(-500)}`));
+        reject(new Error(`${label} failed with code ${code}: ${stderr.slice(-500)}`));
       }
     });
-    ffmpeg.on('error', (err) => {
+    child.on('error', (err) => {
       if (timer) clearTimeout(timer);
       reject(err);
     });
   });
+}
+
+function runFFmpeg(args, jobId, { timeout } = {}) {
+  return runProcess('ffmpeg', 'FFmpeg', args, jobId, { timeout, logProgress: true });
 }
 
 // Stream render progress as NDJSON, then write final result
@@ -749,28 +774,7 @@ async function streamRender(res, renderFn) {
 
 // Run FFprobe command and return stdout
 function runFFmpegProbe(args, jobId) {
-  return new Promise((resolve, reject) => {
-    const ffprobe = spawn('ffprobe', args);
-    let stdout = '';
-    let stderr = '';
-
-    ffprobe.stdout.on('data', (data) => {
-      stdout += data.toString();
-    });
-
-    ffprobe.stderr.on('data', (data) => {
-      stderr += data.toString();
-    });
-
-    ffprobe.on('close', (code) => {
-      if (code === 0) {
-        resolve(stdout);
-      } else {
-        reject(new Error(`FFprobe failed with code ${code}: ${stderr.slice(-500)}`));
-      }
-    });
-    ffprobe.on('error', reject);
-  });
+  return runProcess('ffprobe', 'FFprobe', args, jobId, { resolveWith: 'stdout' });
 }
 
 // Detect silence in video and return silence periods
@@ -880,8 +884,7 @@ async function handleRemoveDeadAir(req, res) {
     const minSilenceDuration = parseFloat(fields.minSilenceDuration?.[0] || '0.3');
 
     if (!videoFile) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Missing video file' }));
+      sendJSON(res, { error: 'Missing video file' }, 400);
       return;
     }
 
@@ -1054,8 +1057,7 @@ async function handleProcess(req, res) {
     const command = fields.command?.[0];
 
     if (!videoFile || !command) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Missing video or command' }));
+      sendJSON(res, { error: 'Missing video or command' }, 400);
       return;
     }
 
@@ -1173,8 +1175,7 @@ async function handleGenerateChapters(req, res) {
     // Check for API key
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'GEMINI_API_KEY not configured in .dev.vars' }));
+      sendJSON(res, { error: 'GEMINI_API_KEY not configured in .dev.vars' }, 400);
       return;
     }
 
@@ -1182,8 +1183,7 @@ async function handleGenerateChapters(req, res) {
 
     const videoFile = files.video?.[0];
     if (!videoFile) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'Missing video file' }));
+      sendJSON(res, { error: 'Missing video file' }, 400);
       return;
     }
 
@@ -1344,17 +1344,12 @@ function handleSessionList(req, res) {
     });
   }
   list.sort((a, b) => b.createdAt - a.createdAt);
-  res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ sessions: list }));
+  sendJSON(res, { sessions: list });
 }
 
 async function handleSessionRename(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   try {
     const body = await new Promise((resolve, reject) => {
@@ -1369,8 +1364,7 @@ async function handleSessionRename(req, res, sessionId) {
 
     const name = (body.name || '').trim();
     if (!name) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Name cannot be empty' }));
+      sendJSON(res, { error: 'Name cannot be empty' }, 400);
       return;
     }
 
@@ -1378,11 +1372,9 @@ async function handleSessionRename(req, res, sessionId) {
     saveSessionMeta(session);
     console.log(`[Session] Renamed ${sessionId} to "${name}"`);
 
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ success: true, name }));
+    sendJSON(res, { success: true, name });
   } catch (error) {
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
@@ -1396,17 +1388,15 @@ async function handleSessionCreate(req, res) {
 
     console.log(`[${session.id}] Empty session created`);
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       sessionId: session.id,
       name: session.originalName,
-    }));
+    });
 
   } catch (error) {
     console.error('[Create] Error:', error.message);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
@@ -1417,8 +1407,7 @@ async function handleSessionUpload(req, res) {
     const videoFile = files.video?.[0];
 
     if (!videoFile) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'Missing video file' }));
+      sendJSON(res, { error: 'Missing video file' }, 400);
       return;
     }
 
@@ -1432,30 +1421,24 @@ async function handleSessionUpload(req, res) {
 
     console.log(`[${session.id}] Video uploaded: ${(stats.size / 1024 / 1024).toFixed(1)} MB, ${duration.toFixed(2)}s`);
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       sessionId: session.id,
       duration,
       size: stats.size,
       name: session.originalName,
-    }));
+    });
 
   } catch (error) {
     console.error('[Upload] Error:', error.message);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
 // Stream video for preview (supports range requests for seeking)
 async function handleSessionStream(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   try {
     const { stat } = await import('fs/promises');
@@ -1490,48 +1473,37 @@ async function handleSessionStream(req, res, sessionId) {
     }
   } catch (error) {
     console.error(`[${sessionId}] Stream error:`, error.message);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
 // Get session info
 async function handleSessionInfo(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   try {
     const { stat } = await import('fs/promises');
     const stats = await stat(session.currentVideo);
     const duration = await getVideoDuration(session.currentVideo);
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       sessionId: session.id,
       duration,
       size: stats.size,
       name: session.originalName,
       editCount: session.editCount,
       createdAt: session.createdAt,
-    }));
+    });
   } catch (error) {
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
 // Process video within a session (edit in place)
 async function handleSessionProcess(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   try {
     // Parse JSON body
@@ -1540,8 +1512,7 @@ async function handleSessionProcess(req, res, sessionId) {
     const { command } = JSON.parse(body);
 
     if (!command) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'Missing command' }));
+      sendJSON(res, { error: 'Missing command' }, 400);
       return;
     }
 
@@ -1574,29 +1545,23 @@ async function handleSessionProcess(req, res, sessionId) {
 
     console.log(`\n[${sessionId}] Edit complete. New duration: ${newDuration.toFixed(2)}s, Size: ${(newStats.size / 1024 / 1024).toFixed(1)} MB`);
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       duration: newDuration,
       size: newStats.size,
       editCount: session.editCount,
-    }));
+    });
 
   } catch (error) {
     console.error(`[${sessionId}] Process error:`, error.message);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
 // Remove dead air within a session
 async function handleSessionRemoveDeadAir(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   const jobId = sessionId;
   const outputPath = join(session.dir, `deadair-output-${Date.now()}.mp4`);
@@ -1633,19 +1598,17 @@ async function handleSessionRemoveDeadAir(req, res, sessionId) {
     }
 
     if (!videoAsset) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'No video asset found in session. Please upload a video first.' }));
+      sendJSON(res, { error: 'No video asset found in session. Please upload a video first.' }, 400);
       return;
     }
 
     // Verify the video file exists on disk
     if (!existsSync(videoAsset.path)) {
       console.error(`[${jobId}] Video file missing: ${videoAsset.path}`);
-      res.writeHead(410, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({
+      sendJSON(res, {
         error: 'Video file no longer exists. Your session may have expired. Please re-upload your video.',
         code: 'VIDEO_FILE_MISSING'
-      }));
+      }, 410);
       return;
     }
 
@@ -1661,13 +1624,12 @@ async function handleSessionRemoveDeadAir(req, res, sessionId) {
 
     if (silencePeriods.length === 0) {
       console.log(`[${jobId}] No silence detected`);
-      res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({
+      sendJSON(res, {
         success: true,
         duration: totalDuration,
         removedDuration: 0,
         message: 'No silence detected',
-      }));
+      });
       return;
     }
 
@@ -1730,33 +1692,27 @@ async function handleSessionRemoveDeadAir(req, res, sessionId) {
 
     console.log(`\n[${jobId}] === DEAD AIR REMOVAL COMPLETE ===`);
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       duration: totalKeptDuration,
       originalDuration: totalDuration,
       removedDuration,
       size: newStats.size,
       editCount: session.editCount,
-    }));
+    });
 
   } catch (error) {
     console.error(`[${jobId}] Error:`, error.message);
     segmentPaths.forEach(p => { try { unlinkSync(p); } catch { } });
     try { unlinkSync(concatListPath); } catch { }
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
 // Generate chapters for a session
 async function handleSessionChapters(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   const jobId = sessionId;
   const audioPath = join(session.dir, `audio-${Date.now()}.mp3`);
@@ -1764,8 +1720,7 @@ async function handleSessionChapters(req, res, sessionId) {
   try {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'GEMINI_API_KEY not configured' }));
+      sendJSON(res, { error: 'GEMINI_API_KEY not configured' }, 400);
       return;
     }
 
@@ -1797,8 +1752,7 @@ async function handleSessionChapters(req, res, sessionId) {
     }
 
     if (!videoPath || !existsSync(videoPath)) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'No video found in session. Please upload a video first.' }));
+      sendJSON(res, { error: 'No video found in session. Please upload a video first.' }, 400);
       return;
     }
 
@@ -1896,31 +1850,25 @@ Return JSON: {"chapters": [{"start": 0, "title": "Introduction"}], "summary": "B
 
     console.log(`[${jobId}] Generated ${result.chapters?.length || 0} chapters`);
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       chapters: result.chapters || [],
       youtubeFormat: youtubeChapters,
       summary: result.summary || '',
       videoDuration: totalDuration,
-    }));
+    });
 
   } catch (error) {
     console.error(`[${jobId}] Error:`, error.message);
     try { unlinkSync(audioPath); } catch { }
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
 // Download final video
 async function handleSessionDownload(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   try {
     const { stat } = await import('fs/promises');
@@ -1939,16 +1887,14 @@ async function handleSessionDownload(req, res, sessionId) {
     console.log(`[${sessionId}] Downloading: ${filename}`);
 
   } catch (error) {
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
 // Delete session
 function handleSessionDelete(req, res, sessionId) {
   cleanupSession(sessionId);
-  res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-  res.end(JSON.stringify({ success: true }));
+  sendJSON(res, { success: true });
 }
 
 // ============== MULTI-ASSET HANDLERS ==============
@@ -1999,12 +1945,8 @@ async function getMediaInfo(inputPath) {
 
 // Upload asset to session
 async function handleAssetUpload(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   try {
     // Direct-to-destination: the asset's final home, so the move is a same-dir rename.
@@ -2012,8 +1954,7 @@ async function handleAssetUpload(req, res, sessionId) {
     const uploadedFile = files.file?.[0] || files.video?.[0];
 
     if (!uploadedFile) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'Missing file' }));
+      sendJSON(res, { error: 'Missing file' }, 400);
       return;
     }
 
@@ -2074,8 +2015,7 @@ async function handleAssetUpload(req, res, sessionId) {
 
     console.log(`[${sessionId}] Asset uploaded: ${assetId} (${type}, ${(stats.size / 1024 / 1024).toFixed(1)} MB)`);
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       asset: {
         id: asset.id,
@@ -2087,23 +2027,18 @@ async function handleAssetUpload(req, res, sessionId) {
         height: asset.height,
         thumbnailUrl: asset.thumbPath ? `/session/${sessionId}/assets/${assetId}/thumbnail` : null,
       },
-    }));
+    });
 
   } catch (error) {
     console.error(`[${sessionId}] Asset upload error:`, error.message);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
 // List all assets in session
 function handleAssetList(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   const assets = Array.from(session.assets.values()).map(asset => ({
     id: asset.id,
@@ -2117,23 +2052,17 @@ function handleAssetList(req, res, sessionId) {
     aiGenerated: asset.aiGenerated || false, // True for Remotion-generated animations
   }));
 
-  res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-  res.end(JSON.stringify({ assets }));
+  sendJSON(res, { assets });
 }
 
 // Delete asset
 function handleAssetDelete(req, res, sessionId, assetId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   const asset = session.assets.get(assetId);
   if (!asset) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Asset not found' }));
+    sendJSON(res, { error: 'Asset not found' }, 404);
     return;
   }
 
@@ -2154,23 +2083,17 @@ function handleAssetDelete(req, res, sessionId, assetId) {
 
   console.log(`[${sessionId}] Asset deleted: ${assetId}`);
 
-  res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-  res.end(JSON.stringify({ success: true }));
+  sendJSON(res, { success: true });
 }
 
 // Get asset thumbnail
 async function handleAssetThumbnail(req, res, sessionId, assetId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   const asset = session.assets.get(assetId);
   if (!asset || !asset.thumbPath || !existsSync(asset.thumbPath)) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Thumbnail not found' }));
+    sendJSON(res, { error: 'Thumbnail not found' }, 404);
     return;
   }
 
@@ -2189,17 +2112,12 @@ async function handleAssetThumbnail(req, res, sessionId, assetId) {
 
 // Stream asset
 async function handleAssetStream(req, res, sessionId, assetId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   const asset = session.assets.get(assetId);
   if (!asset || !existsSync(asset.path)) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Asset not found' }));
+    sendJSON(res, { error: 'Asset not found' }, 404);
     return;
   }
 
@@ -2283,36 +2201,26 @@ async function handleAssetStream(req, res, sessionId, assetId) {
 
 // Get project state
 function handleProjectGet(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   // Verify the session directory still exists on disk
   if (!existsSync(session.dir)) {
     console.log(`[Session] Directory missing for ${sessionId}, cleaning up`);
     sessions.delete(sessionId);
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session files no longer exist' }));
+    sendJSON(res, { error: 'Session files no longer exist' }, 404);
     return;
   }
 
   session.project = ensureProjectDefaults(session.project);
 
-  res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-  res.end(JSON.stringify(serializeProjectForClient(session.project)));
+  sendJSON(res, serializeProjectForClient(session.project));
 }
 
 // Save project state
 async function handleProjectSave(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   try {
     let body = '';
@@ -2342,12 +2250,10 @@ async function handleProjectSave(req, res, sessionId) {
 
     console.log(`[${sessionId}] Project saved: ${session.project.clips.length} clips`);
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ success: true }));
+    sendJSON(res, { success: true });
 
   } catch (error) {
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
@@ -2389,28 +2295,22 @@ function sendSpecValidationError(res, error) {
     details: Array.isArray(error.issues) ? error.issues : [],
   };
 
-  res.writeHead(422, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-  res.end(JSON.stringify(payload));
+  sendJSON(res, payload, 422);
 }
 
 async function handleGetRemotionSpec(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   try {
     const spec = buildSessionRemotionSpec(session, sessionId);
     const specPath = saveSpecSnapshot(session, `spec-${Date.now()}.json`, spec);
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       spec,
       specPath,
-    }));
+    });
   } catch (error) {
     if (error instanceof RemotionSpecValidationError) {
       sendSpecValidationError(res, error);
@@ -2418,18 +2318,13 @@ async function handleGetRemotionSpec(req, res, sessionId) {
     }
 
     console.error(`[${sessionId}] Failed to build remotion spec:`, error.message);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
 async function handleGenerateRemotionVariants(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   try {
     let body = '';
@@ -2463,15 +2358,14 @@ async function handleGenerateRemotionVariants(req, res, sessionId) {
       return saveSpecSnapshot(session, filename, variant);
     });
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       count: variants.length,
       variants,
       variantPaths,
       migration: specResult.migration,
       warnings: specResult.warnings,
-    }));
+    });
   } catch (error) {
     if (error instanceof RemotionSpecValidationError) {
       sendSpecValidationError(res, error);
@@ -2479,18 +2373,13 @@ async function handleGenerateRemotionVariants(req, res, sessionId) {
     }
 
     console.error(`[${sessionId}] Variant generation failed:`, error.message);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
 async function handleRenderVariants(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   try {
     let body = '';
@@ -2544,8 +2433,7 @@ async function handleRenderVariants(req, res, sessionId) {
       });
     }
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       engine: 'remotion',
       count: results.length,
@@ -2554,7 +2442,7 @@ async function handleRenderVariants(req, res, sessionId) {
       migration: specResult.migration,
       warnings: specResult.warnings,
       scoreReport,
-    }));
+    });
   } catch (error) {
     if (error instanceof RemotionSpecValidationError) {
       sendSpecValidationError(res, error);
@@ -2562,18 +2450,13 @@ async function handleRenderVariants(req, res, sessionId) {
     }
 
     console.error(`[${sessionId}] Render variants failed:`, error.message);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
 async function handleRenderFromSpec(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   try {
     let body = '';
@@ -2581,8 +2464,7 @@ async function handleRenderFromSpec(req, res, sessionId) {
     const options = body ? JSON.parse(body) : {};
 
     if (!options.spec) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'spec is required' }));
+      sendJSON(res, { error: 'spec is required' }, 400);
       return;
     }
 
@@ -2614,8 +2496,7 @@ async function handleRenderFromSpec(req, res, sessionId) {
     const outputStats = await stat(outputPath);
     saveSpecSnapshot(session, `${outputFilename.replace(/\.mp4$/, '')}.spec.json`, spec);
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       engine: 'remotion',
       path: outputPath,
@@ -2625,7 +2506,7 @@ async function handleRenderFromSpec(req, res, sessionId) {
       warnings: specResult.warnings,
       downloadUrl: `/session/${sessionId}/renders/${preview ? 'preview' : 'export'}`,
       duration: renderInfo.durationInFrames / (renderInfo.fps || 30),
-    }));
+    });
   } catch (error) {
     if (error instanceof RemotionSpecValidationError) {
       sendSpecValidationError(res, error);
@@ -2633,20 +2514,15 @@ async function handleRenderFromSpec(req, res, sessionId) {
     }
 
     console.error(`[${sessionId}] Render from spec failed:`, error.message);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
 
 // Render project to video with Remotion-first deterministic core
 async function handleProjectRenderRemotion(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   activeRenders.add(sessionId);
   try {
@@ -2657,8 +2533,7 @@ async function handleProjectRenderRemotion(req, res, sessionId) {
     session.project = ensureProjectDefaults(session.project);
 
     if ((session.project.clips || []).length === 0 && !options.spec) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'No clips in timeline' }));
+      sendJSON(res, { error: 'No clips in timeline' }, 400);
       activeRenders.delete(sessionId);
       return;
     }
@@ -2754,8 +2629,7 @@ async function handleProjectRenderRemotion(req, res, sessionId) {
     }
 
     console.error(`[${sessionId}] Remotion render error:`, error.message);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   } finally {
     activeRenders.delete(sessionId);
   }
@@ -2763,12 +2637,8 @@ async function handleProjectRenderRemotion(req, res, sessionId) {
 
 // Download rendered video
 async function handleRenderDownload(req, res, sessionId, renderType) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   // Find the render file
   const files = readdirSync(session.rendersDir);
@@ -2786,8 +2656,7 @@ async function handleRenderDownload(req, res, sessionId, renderType) {
   }
 
   if (!renderFile) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Render not found' }));
+    sendJSON(res, { error: 'Render not found' }, 404);
     return;
   }
 
@@ -2818,12 +2687,8 @@ const RENDER_FILE_RE = /^export-\d+\.(mp4|webm|mkv|mov)$/;
 const activeRenders = new Set();
 
 async function handleListRenders(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
   const { readdir, stat } = await import('fs/promises');
   const videoExt = /\.(mp4|webm|mkv|mov)$/;
   let files;
@@ -2861,20 +2726,14 @@ async function handleListRenders(req, res, sessionId) {
   }));
 
   renders.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-  res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-  res.end(JSON.stringify({ renders }));
+  sendJSON(res, { renders });
 }
 
 async function handleDeleteRender(req, res, sessionId, stem) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
   if (activeRenders.has(sessionId)) {
-    res.writeHead(409, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Render in progress' }));
+    sendJSON(res, { error: 'Render in progress' }, 409);
     return;
   }
   const { readdir } = await import('fs/promises');
@@ -2884,8 +2743,7 @@ async function handleDeleteRender(req, res, sessionId, stem) {
 
   const videoFile = files.find(f => f.replace(/\.[^.]+$/, '') === stem && videoExt.test(f));
   if (!videoFile) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Render not found' }));
+    sendJSON(res, { error: 'Render not found' }, 404);
     return;
   }
   const toDelete = [
@@ -2895,29 +2753,22 @@ async function handleDeleteRender(req, res, sessionId, stem) {
   ];
   for (const p of toDelete) { try { unlinkSync(p); } catch {} }
 
-  res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-  res.end(JSON.stringify({ success: true }));
+  sendJSON(res, { success: true });
 }
 
 async function handleRenameRender(req, res, sessionId, stem) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
   let body = '';
   for await (const chunk of req) body += chunk;
   const { title } = body ? JSON.parse(body) : {};
   if (!title || !title.trim()) {
-    res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'title is required' }));
+    sendJSON(res, { error: 'title is required' }, 400);
     return;
   }
   const specPath = join(session.rendersDir, `${stem}.spec.json`);
   if (!existsSync(specPath)) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Spec file not found' }));
+    sendJSON(res, { error: 'Spec file not found' }, 404);
     return;
   }
   let spec = {};
@@ -2927,21 +2778,15 @@ async function handleRenameRender(req, res, sessionId, stem) {
   if (spec._renderMeta) spec._renderMeta.title = title.trim();
   writeFileSync(specPath, JSON.stringify(spec, null, 2));
 
-  res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-  res.end(JSON.stringify({ success: true, title: spec.title }));
+  sendJSON(res, { success: true, title: spec.title });
 }
 
 async function handleRenderThumbnail(req, res, sessionId, stem) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
   const thumbPath = join(session.rendersDir, `${stem}_thumb.jpg`);
   if (!existsSync(thumbPath)) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Thumbnail not found' }));
+    sendJSON(res, { error: 'Thumbnail not found' }, 404);
     return;
   }
   const { stat } = await import('fs/promises');
@@ -2956,16 +2801,11 @@ async function handleRenderThumbnail(req, res, sessionId, stem) {
 }
 
 async function handleRenderFileDownload(req, res, sessionId, filename) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
   const renderPath = join(session.rendersDir, filename);
   if (!existsSync(renderPath)) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'File not found' }));
+    sendJSON(res, { error: 'File not found' }, 404);
     return;
   }
   const { stat } = await import('fs/promises');
@@ -2992,12 +2832,8 @@ async function handleRenderFileDownload(req, res, sessionId, filename) {
 
 // Create animated GIF from an image
 async function handleCreateGif(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   try {
     let body = '';
@@ -3015,14 +2851,12 @@ async function handleCreateGif(req, res, sessionId) {
 
     const sourceAsset = session.assets.get(sourceAssetId);
     if (!sourceAsset) {
-      res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'Source asset not found' }));
+      sendJSON(res, { error: 'Source asset not found' }, 404);
       return;
     }
 
     if (sourceAsset.type !== 'image') {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'Source must be an image' }));
+      sendJSON(res, { error: 'Source must be an image' }, 400);
       return;
     }
 
@@ -3130,8 +2964,7 @@ async function handleCreateGif(req, res, sessionId) {
     console.log(`[${jobId}] GIF created: ${(stats.size / 1024).toFixed(1)} KB`);
     console.log(`[${jobId}] === GIF CREATION COMPLETE ===\n`);
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       asset: {
         id: gifAsset.id,
@@ -3143,12 +2976,11 @@ async function handleCreateGif(req, res, sessionId) {
         height: gifAsset.height,
         thumbnailUrl: gifAsset.thumbPath ? `/session/${sessionId}/assets/${gifId}/thumbnail` : null,
       },
-    }));
+    });
 
   } catch (error) {
     console.error(`[${sessionId}] GIF creation error:`, error.message);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
@@ -3398,8 +3230,7 @@ async function searchGiphyTrending(limit = 20) {
 async function handleGiphySearch(req, res, sessionId, url) {
   const session = sessions.get(sessionId);
   if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
+    sendJSON(res, { error: 'Session not found' }, 404);
     return;
   }
 
@@ -3408,8 +3239,7 @@ async function handleGiphySearch(req, res, sessionId, url) {
     const limit = parseInt(url.searchParams.get('limit') || '20', 10);
 
     if (!query.trim()) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Search query (q) is required' }));
+      sendJSON(res, { error: 'Search query (q) is required' }, 400);
       return;
     }
 
@@ -3427,12 +3257,10 @@ async function handleGiphySearch(req, res, sessionId, url) {
       source: 'giphy',
     }));
 
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ gifs: results }));
+    sendJSON(res, { gifs: results });
   } catch (error) {
     console.error('GIPHY search error:', error);
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
@@ -3440,8 +3268,7 @@ async function handleGiphySearch(req, res, sessionId, url) {
 async function handleGiphyTrending(req, res, sessionId, url) {
   const session = sessions.get(sessionId);
   if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
+    sendJSON(res, { error: 'Session not found' }, 404);
     return;
   }
 
@@ -3461,12 +3288,10 @@ async function handleGiphyTrending(req, res, sessionId, url) {
       source: 'giphy',
     }));
 
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ gifs: results }));
+    sendJSON(res, { gifs: results });
   } catch (error) {
     console.error('GIPHY trending error:', error);
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
@@ -3474,8 +3299,7 @@ async function handleGiphyTrending(req, res, sessionId, url) {
 async function handleGiphyAdd(req, res, sessionId) {
   const session = sessions.get(sessionId);
   if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
+    sendJSON(res, { error: 'Session not found' }, 404);
     return;
   }
 
@@ -3496,16 +3320,14 @@ async function handleGiphyAdd(req, res, sessionId) {
 
     const { gifUrl, title } = body;
     if (!gifUrl) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'gifUrl is required' }));
+      sendJSON(res, { error: 'gifUrl is required' }, 400);
       return;
     }
 
     // Download and add to assets
     const asset = await downloadGifAsAsset(session, gifUrl, title || 'GIF', Date.now());
 
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       asset: {
         id: asset.id,
@@ -3517,11 +3339,10 @@ async function handleGiphyAdd(req, res, sessionId) {
         thumbnailUrl: `/session/${sessionId}/assets/${asset.id}/thumbnail`,
         streamUrl: `/session/${sessionId}/assets/${asset.id}/stream`,
       }
-    }));
+    });
   } catch (error) {
     console.error('GIPHY add error:', error);
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
@@ -3820,12 +3641,8 @@ function extractNumericValue(valueStr) {
 }
 
 async function handleTranscribe(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   const jobId = sessionId.substring(0, 8);
   const audioPath = join(TEMP_DIR, `${jobId}-caption-audio.mp3`);
@@ -3840,8 +3657,7 @@ async function handleTranscribe(req, res, sessionId) {
     const geminiKey = process.env.GEMINI_API_KEY;
 
     if (!hasLocalWhisper && !openaiKey && !geminiKey) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'No transcription method available. Install local Whisper (pip3 install openai-whisper) or set GEMINI_API_KEY in .dev.vars' }));
+      sendJSON(res, { error: 'No transcription method available. Install local Whisper (pip3 install openai-whisper) or set GEMINI_API_KEY in .dev.vars' }, 400);
       return;
     }
 
@@ -3892,8 +3708,7 @@ async function handleTranscribe(req, res, sessionId) {
     }
 
     if (!videoAsset) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'No video asset found' }));
+      sendJSON(res, { error: 'No video asset found' }, 400);
       return;
     }
 
@@ -4115,43 +3930,36 @@ Guidelines:
       console.error(`[${jobId}] Empty transcription - Gemini returned no words`);
       console.error(`[${jobId}] This could mean: no speech in video, audio too quiet, or unsupported language`);
 
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({
+      sendJSON(res, {
         error: 'No speech detected. Make sure the video has clear, audible speech.',
         debug: {
           transcriptionText: (transcription.text || '').substring(0, 200),
           wordCount: (transcription.words || []).length
         }
-      }));
+      }, 400);
       return;
     }
 
     console.log(`[${jobId}] === TRANSCRIPTION DONE ===\n`);
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       text: transcription.text || '',
       words: words,
       duration: totalDuration,
-    }));
+    });
 
   } catch (error) {
     console.error(`[${jobId}] Error:`, error.message);
     try { unlinkSync(audioPath); } catch { }
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
 // Handle transcribe and extract keywords endpoint
 async function handleTranscribeAndExtract(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   const jobId = sessionId.substring(0, 8);
 
@@ -4173,8 +3981,7 @@ async function handleTranscribeAndExtract(req, res, sessionId) {
     }
 
     if (!videoAsset) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'No video asset found in session' }));
+      sendJSON(res, { error: 'No video asset found in session' }, 400);
       return;
     }
 
@@ -4220,18 +4027,16 @@ async function handleTranscribeAndExtract(req, res, sessionId) {
     console.log(`[${jobId}] Downloaded ${gifAssets.length} GIFs`);
     console.log(`[${jobId}] === TRANSCRIPTION COMPLETE ===\n`);
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       transcript: transcription.text,
       keywords: keywords,
       gifAssets: gifAssets,
-    }));
+    });
 
   } catch (error) {
     console.error(`[${jobId}] Error:`, error.message);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
@@ -4342,12 +4147,8 @@ Background: clean, uncluttered.`
 
 // Handle B-roll generation endpoint
 async function handleGenerateBroll(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   const jobId = sessionId.substring(0, 8);
 
@@ -4356,8 +4157,7 @@ async function handleGenerateBroll(req, res, sessionId) {
 
     // Check for LLM provider
     if (!hasLLMProvider()) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars' }));
+      sendJSON(res, { error: 'No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars' }, 400);
       return;
     }
 
@@ -4376,8 +4176,7 @@ async function handleGenerateBroll(req, res, sessionId) {
     }
 
     if (!videoAsset) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'No video asset found in session' }));
+      sendJSON(res, { error: 'No video asset found in session' }, 400);
       return;
     }
 
@@ -4574,18 +4373,16 @@ async function handleGenerateBroll(req, res, sessionId) {
     console.log(`[${jobId}] Generated ${brollAssets.length}/${opportunities.length} B-roll images`);
     console.log(`[${jobId}] === B-ROLL GENERATION COMPLETE ===\n`);
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       transcript: transcription.text,
       opportunities: opportunities,
       brollAssets: brollAssets,
-    }));
+    });
 
   } catch (error) {
     console.error(`[${jobId}] Error:`, error.message);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
@@ -4595,12 +4392,8 @@ async function handleGenerateBroll(req, res, sessionId) {
 // NOTE: This is a placeholder that creates a simple text overlay video using FFmpeg
 // For proper Remotion rendering, you'd need to set up @remotion/renderer with bundling
 async function handleRenderMotionGraphic(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   try {
     const body = await parseBody(req);
@@ -4673,35 +4466,28 @@ async function handleRenderMotionGraphic(req, res, sessionId) {
     console.log(`[${jobId}] Motion graphic rendered: ${assetId}`);
     console.log(`[${jobId}] === RENDER COMPLETE ===\n`);
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       assetId,
       filename: asset.filename,
       duration,
       thumbnailUrl: `/session/${sessionId}/assets/${assetId}/thumbnail`,
       streamUrl: `/session/${sessionId}/assets/${assetId}/stream`,
-    }));
+    });
 
   } catch (error) {
     console.error('Motion graphic render error:', error);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
 // AI-generated animation using Gemini + Remotion
 async function handleGenerateAnimation(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   if (!hasLLMProvider()) {
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars' }));
+    sendJSON(res, { error: 'No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars' }, 500);
     return;
   }
 
@@ -4710,8 +4496,7 @@ async function handleGenerateAnimation(req, res, sessionId) {
     const { description, videoAssetId, startTime, endTime, attachedAssetIds, fps = 30, width = 1920, height = 1080, durationSeconds } = body;
 
     if (!description) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'description is required' }));
+      sendJSON(res, { error: 'description is required' }, 400);
       return;
     }
 
@@ -5333,8 +5118,7 @@ ${attachedAssetIds?.length ? `- IMPORTANT: Include media scenes to showcase the 
   } catch (error) {
     console.error('AI animation generation error:', error);
     if (!res.headersSent) {
-      res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: error.message }));
+      sendJSON(res, { error: error.message }, 500);
     }
   }
 }
@@ -5342,16 +5126,11 @@ ${attachedAssetIds?.length ? `- IMPORTANT: Include media scenes to showcase the 
 // Edit an existing animation with a new prompt
 // Takes the original scene data and modifies it based on the prompt
 async function handleEditAnimation(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   if (!hasLLMProvider()) {
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars' }));
+    sendJSON(res, { error: 'No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars' }, 500);
     return;
   }
 
@@ -5360,22 +5139,19 @@ async function handleEditAnimation(req, res, sessionId) {
     const { assetId, editPrompt, assets: availableAssets, v1Context, fps = 30, width = 1920, height = 1080 } = body;
 
     if (!assetId || !editPrompt) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'assetId and editPrompt are required' }));
+      sendJSON(res, { error: 'assetId and editPrompt are required' }, 400);
       return;
     }
 
     // Get the original animation asset
     const originalAsset = session.assets.get(assetId);
     if (!originalAsset) {
-      res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'Animation asset not found' }));
+      sendJSON(res, { error: 'Animation asset not found' }, 404);
       return;
     }
 
     if (!originalAsset.aiGenerated) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'Asset is not an AI-generated animation' }));
+      sendJSON(res, { error: 'Asset is not an AI-generated animation' }, 400);
       return;
     }
 
@@ -5386,8 +5162,7 @@ async function handleEditAnimation(req, res, sessionId) {
     }
 
     if (!originalSceneData) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'Original scene data not found - cannot edit this animation' }));
+      sendJSON(res, { error: 'Original scene data not found - cannot edit this animation' }, 400);
       return;
     }
 
@@ -5702,25 +5477,19 @@ Return ONLY the complete JSON structure with your minimal change applied. No mar
   } catch (error) {
     console.error('Animation edit error:', error);
     if (!res.headersSent) {
-      res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: error.message }));
+      sendJSON(res, { error: error.message }, 500);
     }
   }
 }
 
 // Generate image using fal.ai nano-banana-pro model (Picasso agent)
 async function handleGenerateImage(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   const falApiKey = process.env.FAL_KEY || process.env.FAL_API_KEY;
   if (!falApiKey) {
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'FAL_KEY or FAL_API_KEY not configured in .dev.vars' }));
+    sendJSON(res, { error: 'FAL_KEY or FAL_API_KEY not configured in .dev.vars' }, 500);
     return;
   }
 
@@ -5734,8 +5503,7 @@ async function handleGenerateImage(req, res, sessionId) {
     } = body;
 
     if (!prompt) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'prompt is required' }));
+      sendJSON(res, { error: 'prompt is required' }, 400);
       return;
     }
 
@@ -5877,33 +5645,26 @@ async function handleGenerateImage(req, res, sessionId) {
     saveAssetMetadata(session); // Persist asset metadata to disk
     console.log(`[${jobId}] === PICASSO COMPLETE ===\n`);
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       images: generatedAssets,
       description: falResult.description,
-    }));
+    });
 
   } catch (error) {
     console.error('Image generation error:', error);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
 // Generate video from image using fal.ai (DiCaprio agent)
 async function handleGenerateVideo(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   const falApiKey = process.env.FAL_KEY || process.env.FAL_API_KEY;
   if (!falApiKey) {
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'FAL_KEY or FAL_API_KEY not configured in .dev.vars' }));
+    sendJSON(res, { error: 'FAL_KEY or FAL_API_KEY not configured in .dev.vars' }, 500);
     return;
   }
 
@@ -5912,22 +5673,19 @@ async function handleGenerateVideo(req, res, sessionId) {
     const { prompt, imageAssetId, duration = 5 } = body;
 
     if (!prompt) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'prompt is required' }));
+      sendJSON(res, { error: 'prompt is required' }, 400);
       return;
     }
 
     if (!imageAssetId) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'imageAssetId is required' }));
+      sendJSON(res, { error: 'imageAssetId is required' }, 400);
       return;
     }
 
     // Get the source image asset
     const imageAsset = session.assets.get(imageAssetId);
     if (!imageAsset || imageAsset.type !== 'image') {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'Image asset not found' }));
+      sendJSON(res, { error: 'Image asset not found' }, 400);
       return;
     }
 
@@ -6085,8 +5843,7 @@ Return ONLY the enhanced prompt text. No explanations, no quotes, no markdown.`;
     console.log(`[${jobId}] Saved video: ${asset.filename} (${(stats.size / 1024 / 1024).toFixed(1)} MB)`);
     console.log(`[${jobId}] === DICAPRIO COMPLETE ===\n`);
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       video: {
         id: videoId,
@@ -6095,29 +5852,23 @@ Return ONLY the enhanced prompt text. No explanations, no quotes, no markdown.`;
         streamUrl: `/session/${sessionId}/assets/${videoId}/stream`,
         duration: videoDuration,
       },
-    }));
+    });
 
   } catch (error) {
     console.error('Video generation error:', error);
     console.error('Error stack:', error.stack);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
 // Restyle video using LTX-2 video-to-video (DiCaprio agent)
 async function handleRestyleVideo(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   const falApiKey = process.env.FAL_KEY || process.env.FAL_API_KEY;
   if (!falApiKey) {
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'FAL_KEY or FAL_API_KEY not configured in .dev.vars' }));
+    sendJSON(res, { error: 'FAL_KEY or FAL_API_KEY not configured in .dev.vars' }, 500);
     return;
   }
 
@@ -6126,22 +5877,19 @@ async function handleRestyleVideo(req, res, sessionId) {
     const { prompt, videoAssetId } = body;
 
     if (!prompt) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'prompt is required' }));
+      sendJSON(res, { error: 'prompt is required' }, 400);
       return;
     }
 
     if (!videoAssetId) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'videoAssetId is required' }));
+      sendJSON(res, { error: 'videoAssetId is required' }, 400);
       return;
     }
 
     // Get the source video asset
     const videoAsset = session.assets.get(videoAssetId);
     if (!videoAsset || videoAsset.type !== 'video') {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'Video asset not found' }));
+      sendJSON(res, { error: 'Video asset not found' }, 400);
       return;
     }
 
@@ -6302,8 +6050,7 @@ Return ONLY the enhanced prompt, no explanations.`)).trim();
     console.log(`[${jobId}] Saved restyled video: ${asset.filename}`);
     console.log(`[${jobId}] === DICAPRIO RESTYLE COMPLETE ===\n`);
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       video: {
         id: newVideoId,
@@ -6312,28 +6059,22 @@ Return ONLY the enhanced prompt, no explanations.`)).trim();
         streamUrl: `/session/${sessionId}/assets/${newVideoId}/stream`,
         duration: videoDuration,
       },
-    }));
+    });
 
   } catch (error) {
     console.error('Video restyle error:', error);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
 // Remove video background using Bria (DiCaprio agent)
 async function handleRemoveVideoBg(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   const falApiKey = process.env.FAL_KEY || process.env.FAL_API_KEY;
   if (!falApiKey) {
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'FAL_KEY or FAL_API_KEY not configured in .dev.vars' }));
+    sendJSON(res, { error: 'FAL_KEY or FAL_API_KEY not configured in .dev.vars' }, 500);
     return;
   }
 
@@ -6342,16 +6083,14 @@ async function handleRemoveVideoBg(req, res, sessionId) {
     const { videoAssetId } = body;
 
     if (!videoAssetId) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'videoAssetId is required' }));
+      sendJSON(res, { error: 'videoAssetId is required' }, 400);
       return;
     }
 
     // Get the source video asset
     const videoAsset = session.assets.get(videoAssetId);
     if (!videoAsset || videoAsset.type !== 'video') {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'Video asset not found' }));
+      sendJSON(res, { error: 'Video asset not found' }, 400);
       return;
     }
 
@@ -6482,8 +6221,7 @@ async function handleRemoveVideoBg(req, res, sessionId) {
     console.log(`[${jobId}] Saved video: ${asset.filename}`);
     console.log(`[${jobId}] === DICAPRIO REMOVE BG COMPLETE ===\n`);
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       video: {
         id: newVideoId,
@@ -6492,27 +6230,21 @@ async function handleRemoveVideoBg(req, res, sessionId) {
         streamUrl: `/session/${sessionId}/assets/${newVideoId}/stream`,
         duration: videoDuration,
       },
-    }));
+    });
 
   } catch (error) {
     console.error('Video background removal error:', error);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
 // Generate batch animations across the timeline based on video content analysis
 async function handleGenerateBatchAnimations(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   if (!hasLLMProvider()) {
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars' }));
+    sendJSON(res, { error: 'No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars' }, 500);
     return;
   }
 
@@ -6534,8 +6266,7 @@ async function handleGenerateBatchAnimations(req, res, sessionId) {
     }
 
     if (!videoAsset) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'No video asset found in session' }));
+      sendJSON(res, { error: 'No video asset found in session' }, 400);
       return;
     }
 
@@ -6546,8 +6277,7 @@ async function handleGenerateBatchAnimations(req, res, sessionId) {
     const transcription = await getOrTranscribeVideo(session, videoAsset, jobId);
 
     if (!transcription.text) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'Could not transcribe video' }));
+      sendJSON(res, { error: 'Could not transcribe video' }, 400);
       return;
     }
 
@@ -6753,33 +6483,26 @@ Make it visually engaging with good color choices. Use 2-4 scenes for variety.`;
     console.log(`[${jobId}] === BATCH GENERATION COMPLETE ===`);
     console.log(`[${jobId}] Generated ${generatedAnimations.length} animations\n`);
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       animations: generatedAnimations,
       videoDuration: videoAsset.duration,
-    }));
+    });
 
   } catch (error) {
     console.error('Batch animation generation error:', error);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
 // Analyze video for animation concept (no rendering - for approval workflow)
 // Returns transcript and proposed animation scenes for user approval
 async function handleAnalyzeForAnimation(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   if (!hasLLMProvider()) {
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars' }));
+    sendJSON(res, { error: 'No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars' }, 500);
     return;
   }
   const apiKey = process.env.GEMINI_API_KEY;
@@ -6805,8 +6528,7 @@ async function handleAnalyzeForAnimation(req, res, sessionId) {
     }
 
     if (!videoAsset) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'No video asset found to analyze' }));
+      sendJSON(res, { error: 'No video asset found to analyze' }, 400);
       return;
     }
 
@@ -7075,8 +6797,7 @@ Feel free to add a GIF scene for reactions or emphasis when appropriate!`;
     console.log(`[${jobId}] === ANALYSIS COMPLETE (awaiting approval) ===\n`);
 
     // Return the concept for user approval (NOT rendered yet)
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       concept: {
         type,
@@ -7094,31 +6815,25 @@ Feel free to add a GIF scene for reactions or emphasis when appropriate!`;
         duration: totalDuration,
         assetId: videoAsset.id,
       },
-    }));
+    });
 
   } catch (error) {
     console.error('Animation analysis error:', error);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
 // Render animation from pre-approved concept (skips analysis, uses provided scenes)
 async function handleRenderFromConcept(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   try {
     const body = await parseBody(req);
     const { concept, fps = 30, width = 1920, height = 1080 } = body;
 
     if (!concept || !concept.scenes || concept.scenes.length === 0) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'concept with scenes is required' }));
+      sendJSON(res, { error: 'concept with scenes is required' }, 400);
       return;
     }
 
@@ -7246,8 +6961,7 @@ async function handleRenderFromConcept(req, res, sessionId) {
     console.log(`[${jobId}] Animation rendered: ${assetId} (${durationInSeconds}s)`);
     console.log(`[${jobId}] === RENDER COMPLETE ===\n`);
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       assetId,
       filename: asset.filename,
@@ -7256,28 +6970,22 @@ async function handleRenderFromConcept(req, res, sessionId) {
       sceneCount: concept.scenes.length,
       thumbnailUrl: `/session/${sessionId}/assets/${assetId}/thumbnail`,
       streamUrl: `/session/${sessionId}/assets/${assetId}/stream`,
-    }));
+    });
 
   } catch (error) {
     console.error('Render from concept error:', error);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
 // Generate kinetic typography animation from video transcript
 // Transcribes video, identifies key phrases, creates animated text scenes synced to audio
 async function handleGenerateTranscriptAnimation(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   if (!hasLLMProvider()) {
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars' }));
+    sendJSON(res, { error: 'No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars' }, 500);
     return;
   }
   const apiKey = process.env.GEMINI_API_KEY;
@@ -7296,8 +7004,7 @@ async function handleGenerateTranscriptAnimation(req, res, sessionId) {
     }
 
     if (!videoAsset) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'No video asset found in session' }));
+      sendJSON(res, { error: 'No video asset found in session' }, 400);
       return;
     }
 
@@ -7554,8 +7261,7 @@ Pick phrases that are spread throughout the video. Each phrase should be 2-6 wor
     console.log(`[${jobId}] Transcript animation created: ${assetId}`);
     console.log(`[${jobId}] === TRANSCRIPT ANIMATION COMPLETE ===\n`);
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       assetId,
       filename: asset.filename,
@@ -7564,28 +7270,22 @@ Pick phrases that are spread throughout the video. Each phrase should be 2-6 wor
       phrases: keyPhrases.map(p => p.phrase),
       thumbnailUrl: `/session/${sessionId}/assets/${assetId}/thumbnail`,
       streamUrl: `/session/${sessionId}/assets/${assetId}/stream`,
-    }));
+    });
 
   } catch (error) {
     console.error('Transcript animation error:', error);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
 // Generate contextual animation based on video content
 // This transcribes the video first, understands what it's about, then generates relevant animation
 async function handleGenerateContextualAnimation(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   if (!hasLLMProvider()) {
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars' }));
+    sendJSON(res, { error: 'No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars' }, 500);
     return;
   }
   const apiKey = process.env.GEMINI_API_KEY;
@@ -7609,8 +7309,7 @@ async function handleGenerateContextualAnimation(req, res, sessionId) {
     }
 
     if (!videoAsset) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'No video asset found to analyze' }));
+      sendJSON(res, { error: 'No video asset found to analyze' }, 400);
       return;
     }
 
@@ -7868,8 +7567,7 @@ Use specific terms, concepts, and themes from the transcript.`;
     console.log(`[${jobId}] Contextual ${type} animation rendered: ${outputAssetId} (${durationInSeconds}s)`);
     console.log(`[${jobId}] === CONTEXTUAL ANIMATION COMPLETE ===\n`);
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       assetId: outputAssetId,
       filename: asset.filename,
@@ -7879,23 +7577,18 @@ Use specific terms, concepts, and themes from the transcript.`;
       sceneCount: sceneData.scenes.length,
       thumbnailUrl: `/session/${sessionId}/assets/${outputAssetId}/thumbnail`,
       streamUrl: `/session/${sessionId}/assets/${outputAssetId}/stream`,
-    }));
+    });
 
   } catch (error) {
     console.error('Contextual animation generation error:', error);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
 // Cross-correlate audio from two assets to compute alignment offset
 async function handleAudioSync(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   const jobId = randomUUID().substring(0, 8);
   const pcmPathA = join(TEMP_DIR, `${jobId}-a.pcm`);
@@ -7906,21 +7599,18 @@ async function handleAudioSync(req, res, sessionId) {
     const { assetA, assetB, sampleRate = 16000, correlationSampleSize = 3200, initialGranularity = 16 } = body;
 
     if (!assetA || !assetB) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'assetA and assetB are required' }));
+      sendJSON(res, { error: 'assetA and assetB are required' }, 400);
       return;
     }
 
     const assetObjA = session.assets.get(assetA);
     const assetObjB = session.assets.get(assetB);
     if (!assetObjA) {
-      res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'Asset not found', assetId: assetA }));
+      sendJSON(res, { error: 'Asset not found', assetId: assetA }, 404);
       return;
     }
     if (!assetObjB) {
-      res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'Asset not found', assetId: assetB }));
+      sendJSON(res, { error: 'Asset not found', assetId: assetB }, 404);
       return;
     }
 
@@ -7936,8 +7626,7 @@ async function handleAudioSync(req, res, sessionId) {
       ], jobId);
       const probeData = JSON.parse(probeOut);
       if (!probeData.streams || probeData.streams.length === 0) {
-        res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-        res.end(JSON.stringify({ error: 'Asset has no audio stream', assetId: asset.id }));
+        sendJSON(res, { error: 'Asset has no audio stream', assetId: asset.id }, 400);
         return;
       }
     }
@@ -8032,12 +7721,10 @@ async function handleAudioSync(req, res, sessionId) {
     const response = { offsetSeconds, correlation, confidence };
     if (note) response.note = note;
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify(response));
+    sendJSON(res, response);
   } catch (err) {
     console.error(`[${jobId}] Audio sync failed:`, err);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Correlation failed', details: err.message }));
+    sendJSON(res, { error: 'Correlation failed', details: err.message }, 500);
   } finally {
     try { unlinkSync(pcmPathA); } catch {}
     try { unlinkSync(pcmPathB); } catch {}
@@ -8046,33 +7733,26 @@ async function handleAudioSync(req, res, sessionId) {
 
 // Extract audio from video - creates separate audio asset and mutes the video
 async function handleExtractAudio(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   try {
     const body = await parseBody(req);
     const { assetId } = body;
 
     if (!assetId) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'assetId is required' }));
+      sendJSON(res, { error: 'assetId is required' }, 400);
       return;
     }
 
     const videoAsset = session.assets.get(assetId);
     if (!videoAsset) {
-      res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'Asset not found' }));
+      sendJSON(res, { error: 'Asset not found' }, 404);
       return;
     }
 
     if (videoAsset.type !== 'video') {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'Asset must be a video' }));
+      sendJSON(res, { error: 'Asset must be a video' }, 400);
       return;
     }
 
@@ -8170,8 +7850,7 @@ async function handleExtractAudio(req, res, sessionId) {
     console.log(`[${jobId}] ✓ Muted video created: ${mutedAsset.filename}`);
     console.log(`[${jobId}] === EXTRACT AUDIO COMPLETE ===\n`);
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       audioAsset: {
         id: audioAssetId,
@@ -8189,49 +7868,41 @@ async function handleExtractAudio(req, res, sessionId) {
         thumbnailUrl: `/session/${sessionId}/assets/${mutedVideoAssetId}/thumbnail`,
       },
       originalAssetId: assetId,
-    }));
+    });
 
   } catch (error) {
     console.error('Extract audio error:', error);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
 // Process asset with FFmpeg command (for AI-suggested edits)
 async function handleProcessAsset(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   try {
     const body = await parseBody(req);
     const { assetId, command } = body;
 
     if (!assetId || !command) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'assetId and command are required' }));
+      sendJSON(res, { error: 'assetId and command are required' }, 400);
       return;
     }
 
     const asset = session.assets.get(assetId);
     if (!asset) {
-      res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'Asset not found' }));
+      sendJSON(res, { error: 'Asset not found' }, 404);
       return;
     }
 
     // Verify the asset file actually exists on disk
     if (!existsSync(asset.path)) {
       console.error(`[ProcessAsset] Asset file missing: ${asset.path}`);
-      res.writeHead(410, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({
+      sendJSON(res, {
         error: 'Asset file no longer exists. The session may have expired. Please re-upload your video.',
         code: 'ASSET_FILE_MISSING'
-      }));
+      }, 410);
       return;
     }
 
@@ -8315,20 +7986,18 @@ async function handleProcessAsset(req, res, sessionId) {
     console.log(`[${jobId}] Asset processed: ${newAssetId} (${duration.toFixed(2)}s)`);
     console.log(`[${jobId}] === PROCESSING COMPLETE ===\n`);
 
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({
+    sendJSON(res, {
       success: true,
       assetId: newAssetId,
       filename: newAsset.filename,
       duration,
       thumbnailUrl: `/session/${sessionId}/assets/${newAssetId}/thumbnail`,
       streamUrl: `/session/${sessionId}/assets/${newAssetId}/stream`,
-    }));
+    });
 
   } catch (error) {
     console.error('Process asset error:', error);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
@@ -8410,12 +8079,8 @@ function regenerateBarrelFile() {
 }
 
 async function handleUploadTransition(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   try {
     let code, name;
@@ -8425,8 +8090,7 @@ async function handleUploadTransition(req, res, sessionId) {
       const [fields, files] = await parseMultipartForm(req, { maxFileSize: 1 * 1024 * 1024, uploadDir: TEMP_DIR });
       const uploadedFile = files.file?.[0];
       if (!uploadedFile) {
-        res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-        res.end(JSON.stringify({ error: 'Missing file' }));
+        sendJSON(res, { error: 'Missing file' }, 400);
         return;
       }
       code = readFileSync(uploadedFile.filepath, 'utf-8');
@@ -8439,15 +8103,13 @@ async function handleUploadTransition(req, res, sessionId) {
     }
 
     if (!code) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'No transition code provided' }));
+      sendJSON(res, { error: 'No transition code provided' }, 400);
       return;
     }
 
     const validation = validateTransitionCode(code);
     if (!validation.valid) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'Validation failed', details: validation.errors }));
+      sendJSON(res, { error: 'Validation failed', details: validation.errors }, 400);
       return;
     }
 
@@ -8468,12 +8130,10 @@ async function handleUploadTransition(req, res, sessionId) {
     });
 
     console.log(`[${sessionId}] Custom transition uploaded: ${transitionId}`);
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ success: true, transitionId, name, warnings: validation.warnings || [] }));
+    sendJSON(res, { success: true, transitionId, name, warnings: validation.warnings || [] });
   } catch (error) {
     console.error('Upload transition error:', error);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
@@ -8485,19 +8145,16 @@ async function handleDeleteTransition(req, res, sessionId) {
     const transitionId = data.transitionId;
 
     if (!transitionId) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      return res.end(JSON.stringify({ error: 'Missing transitionId' }));
+      return sendJSON(res, { error: 'Missing transitionId' }, 400);
     }
 
     if (transitionId.startsWith('builtin-')) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      return res.end(JSON.stringify({ error: 'Cannot delete built-in transitions' }));
+      return sendJSON(res, { error: 'Cannot delete built-in transitions' }, 400);
     }
 
     const filePath = join(CUSTOM_TRANSITIONS_DIR, `${transitionId}.tsx`);
     if (!existsSync(filePath)) {
-      res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      return res.end(JSON.stringify({ error: `Transition "${transitionId}" not found` }));
+      return sendJSON(res, { error: `Transition "${transitionId}" not found` }, 404);
     }
 
     unlinkSync(filePath);
@@ -8505,22 +8162,16 @@ async function handleDeleteTransition(req, res, sessionId) {
     invalidateBundleCache();
 
     console.log(`[Transitions] Deleted custom transition: ${transitionId}`);
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ success: true, transitionId }));
+    sendJSON(res, { success: true, transitionId });
   } catch (error) {
     console.error('Delete transition error:', error);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
 async function handleListTransitions(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   // Built-in transitions as flat list entries
   const builtInEntries = [
@@ -8557,8 +8208,7 @@ async function handleListTransitions(req, res, sessionId) {
   const builtIn = ['crossfade', 'slide-left', 'slide-right', 'dip-to-black'];
   const custom = customEntries.map(e => ({ id: e.id, name: e.name, filename: e.filename, installedAt: e.installedAt }));
 
-  res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-  res.end(JSON.stringify({ transitions, builtIn, custom }));
+  sendJSON(res, { transitions, builtIn, custom });
 }
 
 // Extract meta object from transition source code (best-effort static analysis)
@@ -8602,25 +8252,19 @@ function extractTransitionParams(code) {
 }
 
 async function handleGenerateTransition(req, res, sessionId) {
-  const session = getSession(sessionId);
-  if (!session) {
-    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: 'Session not found' }));
-    return;
-  }
+  const session = requireSession(res, sessionId);
+  if (!session) return;
 
   try {
     const body = await parseBody(req);
     const { description } = body;
     if (!description) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'description is required' }));
+      sendJSON(res, { error: 'description is required' }, 400);
       return;
     }
 
     if (!hasLLMProvider()) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'No LLM provider configured (set GEMINI_API_KEY or OPENAI_API_BASE_URL)' }));
+      sendJSON(res, { error: 'No LLM provider configured (set GEMINI_API_KEY or OPENAI_API_BASE_URL)' }, 400);
       return;
     }
 
@@ -8650,8 +8294,7 @@ Return ONLY the .tsx code, no explanation.`;
 
     const validation = validateTransitionCode(code);
     if (!validation.valid) {
-      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ error: 'Generated code failed validation', details: validation.errors, code }));
+      sendJSON(res, { error: 'Generated code failed validation', details: validation.errors, code }, 400);
       return;
     }
 
@@ -8674,12 +8317,10 @@ Return ONLY the .tsx code, no explanation.`;
     });
 
     console.log(`[${sessionId}] Custom transition generated: ${transitionId}`);
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ success: true, transitionId, name: description, code }));
+    sendJSON(res, { success: true, transitionId, name: description, code });
   } catch (error) {
     console.error('Generate transition error:', error);
-    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ error: error.message }));
+    sendJSON(res, { error: error.message }, 500);
   }
 }
 
@@ -8713,8 +8354,7 @@ function serveSpa(res, urlPath) {
   if (!filePath.startsWith(DIST_DIR) || !existsSync(filePath) || !statSync(filePath).isFile()) {
     filePath = join(DIST_DIR, 'index.html');
     if (!existsSync(filePath)) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Not found (run `npm run build` to serve the app from this server)' }));
+      sendJSON(res, { error: 'Not found (run `npm run build` to serve the app from this server)' }, 404);
       return;
     }
   }
@@ -8786,8 +8426,7 @@ const server = http.createServer(async (req, res) => {
       } else if (req.method === 'GET' && subAction === 'stream') {
         await handleAssetStream(req, res, sessionId, assetId);
       } else {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Asset endpoint not found' }));
+        sendJSON(res, { error: 'Asset endpoint not found' }, 404);
       }
     }
     // Project state endpoints
@@ -8919,8 +8558,7 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'GET') {
         await handleListRenders(req, res, sessionId);
       } else {
-        res.writeHead(405, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Method not allowed' }));
+        sendJSON(res, { error: 'Method not allowed' }, 405);
       }
     }
     else if (action.startsWith('renders/')) {
@@ -8931,42 +8569,36 @@ const server = http.createServer(async (req, res) => {
 
       if (subAction === 'thumbnail' && req.method === 'GET') {
         if (!RENDER_STEM_RE.test(stemOrFile)) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Invalid render ID' }));
+          sendJSON(res, { error: 'Invalid render ID' }, 400);
         } else {
           await handleRenderThumbnail(req, res, sessionId, stemOrFile);
         }
       } else if (subAction === 'download' && req.method === 'GET') {
         if (!RENDER_FILE_RE.test(stemOrFile)) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Invalid filename' }));
+          sendJSON(res, { error: 'Invalid filename' }, 400);
         } else {
           await handleRenderFileDownload(req, res, sessionId, stemOrFile);
         }
       } else if (subAction === 'name' && req.method === 'PATCH') {
         if (!RENDER_STEM_RE.test(stemOrFile)) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Invalid render ID' }));
+          sendJSON(res, { error: 'Invalid render ID' }, 400);
         } else {
           await handleRenameRender(req, res, sessionId, stemOrFile);
         }
       } else if (!subAction && req.method === 'DELETE') {
         if (!RENDER_STEM_RE.test(stemOrFile)) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Invalid render ID' }));
+          sendJSON(res, { error: 'Invalid render ID' }, 400);
         } else {
           await handleDeleteRender(req, res, sessionId, stemOrFile);
         }
       } else if (!subAction && req.method === 'GET') {
         await handleRenderDownload(req, res, sessionId, stemOrFile);
       } else {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Render endpoint not found' }));
+        sendJSON(res, { error: 'Render endpoint not found' }, 404);
       }
     }
     else {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Session endpoint not found' }));
+      sendJSON(res, { error: 'Session endpoint not found' }, 404);
     }
     return;
   }
@@ -9000,14 +8632,12 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify(info, null, 2));
   } else if (req.method === 'GET' && path === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', ffmpeg: 'native', sessions: sessions.size }));
+    sendJSON(res, { status: 'ok', ffmpeg: 'native', sessions: sessions.size });
   } else if (req.method === 'GET') {
     // Anything unmatched serves the built SPA (single-page-app routing)
     serveSpa(res, path);
   } else {
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Not found' }));
+    sendJSON(res, { error: 'Not found' }, 404);
   }
 });
 
