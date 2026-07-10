@@ -3,7 +3,6 @@
 ## Module
 
 - [[modules\assets-ui|Assets UI]]
-- [[modules\worker|Cloudflare Worker]]
 - [[modules\ffmpeg-server|Local FFmpeg Server]]
 - [[modules\panels|Panels]]
 - [[modules\react-app-core|React App Core]]

@@ -2,16 +2,21 @@
   "$schema": "https://unpkg.com/knip@5/schema.json",
   "entry": [
     "src/react-app/main.tsx",
-    "src/worker/index.ts"
+    "src/remotion/index.tsx"
   ],
-  "project": ["src/**/*.{ts,tsx}"],
+  "project": ["src/**/*.{ts,tsx}", "scripts/**/*.js"],
   "ignore": [
     ".bun/**",
     "dist/**",
-    "worker-configuration.d.ts",
     "src/react-app/vite-env.d.ts"
   ],
   "ignoreDependencies": [
-    "@getmocha/vite-plugins"
-  ]
+    "@remotion/media",
+    "@remotion/transitions",
+    "hono"
+  ],
+  "rules": {
+    "exports": "warn",
+    "types": "warn"
+  }
 }

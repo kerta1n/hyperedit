@@ -11,7 +11,7 @@ tags: [backend, ffmpeg, remotion, sessions, transcription, rendering, ai, hardwa
 
 ## Overview
 
-The local FFmpeg server is HyperEdit's primary execution engine. It runs as a standalone Node.js `http.createServer` process on **port 3333** — no framework, regex-based route dispatch. All video processing, asset management, Remotion rendering, Whisper transcription, and fal.ai calls flow through it. The Cloudflare Worker generates FFmpeg commands via LLM but never executes them; this server does.
+The local FFmpeg server is HyperEdit's only backend. It runs as a standalone Node.js `http.createServer` process on **port 3333** — no framework, regex-based route dispatch. All video processing, asset management, Remotion rendering, Whisper transcription, fal.ai calls, Director edit-command generation (`POST /ai-edit` via the configured LLM provider), and SPA hosting (built `dist/`) flow through it.
 
 The server depends on two satellite modules:
 
@@ -482,10 +482,9 @@ POST /session/:id/upload-transition  (or generate-transition)
 
 - [[useProject]] — calls every session/asset/project/render endpoint; manages `sessionId` in `localStorage('clipwise-session')`
 - [[Home]] — calls `transcribe`, `generate-animation`, `generate-broll`, `remove-dead-air`, `extract-audio`, `render`
-- [[AIPromptPanel]] (Director) — sends user prompt to [[Cloudflare Worker]] which returns FFmpeg command; panel calls `process-asset` or `process` to execute
+- [[AIPromptPanel]] (Director) — sends user prompt to this server's `POST /ai-edit` (LLM-generated FFmpeg command); panel calls `process-asset` or `process` to execute
 - [[PicassoPanel]] — calls `generate-image`
 - [[DiCaprioPanel]] — calls `generate-video`, `restyle-video`, `remove-video-bg`
-- [[Cloudflare Worker]] — generates FFmpeg commands via Gemini but does NOT execute; this server executes
 - [[DynamicAnimation]] — `handleGenerateAnimation` renders this Remotion composition via `renderDynamicAnimation()`
 - [[remotion-transitions]] — `CUSTOM_TRANSITIONS_DIR` feeds into the Remotion bundle; `invalidateBundleCache()` triggers re-bundle after upload/delete
 

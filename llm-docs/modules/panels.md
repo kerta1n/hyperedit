@@ -994,7 +994,7 @@ No internal functions beyond the render; `onToggleAutoSnap(!autoSnap)` is called
 
 - **`tracks` prop in AIPromptPanel** (line 204): Declared in `AIPromptPanelProps`, destructured (not visible in read portion), but not referenced in any of the workflow handlers or `determineWorkflow`.
 
-- **`pollForResult` / `/api/ai-edit/*` endpoints** (lines 1192–1222, 2261–2281): The FFmpeg-edit workflow posts to `/api/ai-edit/start` and polls `/api/ai-edit/status/{jobId}`. According to the architecture documentation the Cloudflare Worker only generates FFmpeg commands, it does not execute them. Whether these endpoints are functional in local development is unclear — no matching route exists in the `CLAUDE.md` endpoint table for the local FFmpeg server.
+- ~~`pollForResult` / `/api/ai-edit/*` endpoints~~ RESOLVED (2026-07-10): the FFmpeg-edit workflow now posts a single synchronous request to the FFmpeg server's `POST /ai-edit`; `pollForResult` and the Cloudflare worker were deleted.
 
 ### Fragile Patterns
 

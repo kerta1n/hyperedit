@@ -6898,7 +6898,9 @@ async function handleAnalyzeForAnimation(req, res, sessionId) {
       }
     } else if (openaiKey) {
       console.log(`[${jobId}]    Using OpenAI Whisper API...`);
-      const FormData = (await import('node-fetch')).default.FormData || global.FormData;
+      // node-fetch's default export never carried FormData, so this always
+      // resolved to the global (undici) implementation on Node 18+.
+      const FormData = global.FormData;
       const formData = new FormData();
       formData.append('file', createReadStream(audioPath));
       formData.append('model', 'whisper-1');
@@ -7681,7 +7683,9 @@ async function handleGenerateContextualAnimation(req, res, sessionId) {
       }
     } else if (openaiKey) {
       console.log(`[${jobId}]    Using OpenAI Whisper API...`);
-      const FormData = (await import('node-fetch')).default.FormData || global.FormData;
+      // node-fetch's default export never carried FormData, so this always
+      // resolved to the global (undici) implementation on Node 18+.
+      const FormData = global.FormData;
       const formData = new FormData();
       formData.append('file', createReadStream(audioPath));
       formData.append('model', 'whisper-1');
@@ -8679,6 +8683,50 @@ Return ONLY the .tsx code, no explanation.`;
   }
 }
 
+// ============== SPA HOSTING ==============
+// Production hosting moved here from Cloudflare: serve the built SPA out of
+// dist/. Content-hashed bundles cache immutably (tiny, read-mostly); index.html
+// is always revalidated. Media/asset streams are handled by their own routes.
+const DIST_DIR = join(process.cwd(), 'dist');
+const STATIC_MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.ico': 'image/x-icon',
+  '.json': 'application/json',
+  '.woff2': 'font/woff2',
+  '.map': 'application/json',
+};
+
+function serveSpa(res, urlPath) {
+  let rel;
+  try {
+    rel = decodeURIComponent(urlPath).replace(/^\/+/, '') || 'index.html';
+  } catch {
+    rel = 'index.html';
+  }
+  let filePath = join(DIST_DIR, rel);
+  // Guard traversal, and fall back to index.html for SPA routes
+  if (!filePath.startsWith(DIST_DIR) || !existsSync(filePath) || !statSync(filePath).isFile()) {
+    filePath = join(DIST_DIR, 'index.html');
+    if (!existsSync(filePath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Not found (run `npm run build` to serve the app from this server)' }));
+      return;
+    }
+  }
+  const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
+  const hashedAsset = filePath.replace(/\\/g, '/').includes('/assets/');
+  res.writeHead(200, {
+    'Content-Type': STATIC_MIME[ext] || 'application/octet-stream',
+    'Cache-Control': hashedAsset ? 'public, max-age=31536000, immutable' : 'no-cache',
+  });
+  createReadStream(filePath).pipe(res);
+}
+
 // ============== SERVER ==============
 
 const server = http.createServer(async (req, res) => {
@@ -8954,6 +9002,9 @@ const server = http.createServer(async (req, res) => {
   } else if (req.method === 'GET' && path === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'ok', ffmpeg: 'native', sessions: sessions.size }));
+  } else if (req.method === 'GET') {
+    // Anything unmatched serves the built SPA (single-page-app routing)
+    serveSpa(res, path);
   } else {
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Not found' }));

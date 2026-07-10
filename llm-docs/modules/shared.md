@@ -5,13 +5,12 @@ source_files:
   - src/shared/types.ts
   - src/shared/remotion-core.ts
   - src/react-app/utils/ndjson.ts
-  - src/types/env.d.ts
-tags: [types, remotion, captions, rendering, api, worker]
+tags: [types, remotion, captions, rendering, api]
 ---
 
 ## Overview
 
-Single source of truth for types shared across React frontend, Remotion renderer, and Cloudflare Worker. `remotion-core.ts` defines the complete project spec data model. `ndjson.ts` provides streaming render progress reader. `env.d.ts` types Worker bindings.
+Single source of truth for types shared across the React frontend and the Remotion renderer. `remotion-core.ts` defines the complete project spec data model. `ndjson.ts` provides streaming render progress reader.
 
 ## Key Components
 
@@ -125,11 +124,6 @@ Tail buffer: parses remaining buffer after stream close (only result/error handl
 
 ---
 
-### src/types/env.d.ts (13 lines)
-
-Ambient `Env` interface (no export) for Cloudflare Worker bindings:
-`GEMINI_API_KEY`, `R2_BUCKET` (R2Bucket), `DB` (D1Database), `MOCHA_USERS_SERVICE_API_URL`, `MOCHA_USERS_SERVICE_API_KEY`, `LLM_PROVIDER?`, `OPENAI_API_BASE_URL?`, `OPENAI_API_KEY?`, `LLM_MODEL?`
-
 ## Data Flow
 
 ```text
@@ -145,7 +139,6 @@ FFmpeg Server ──streams──► NDJSON {progress} lines ──► readNDJSO
 - [[react-app-core]] — useProject builds RemotionProjectSpec, uses readNDJSONStream
 - [[remotion-core]] — ProjectTimeline receives spec as input props
 - [[remotion-templates]] — DynamicAnimation uses caption types
-- [[worker]] — typed by Env interface
 - [[ffmpeg-server]] — serializes/deserializes RemotionProjectSpec
 
 ## Known Issues

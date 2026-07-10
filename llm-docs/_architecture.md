@@ -34,19 +34,21 @@ tags: [overview, system-design, data-flow]
 │  └─────────────────────────────┼────────────────────────────────┘                │
 │                                │                                                 │
 │           ┌────────────────────┼────────────────────┐                            │
-│           │                    │                    │                            │
-│           ▼                    ▼                    ▼                            │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐                 │
-│  │  FFmpeg Server   │  │ Cloudflare      │  │  fal.ai         │                 │
-│  │  (localhost:3333)│  │ Worker          │  │  (DiCaprio/     │                 │
-│  │                  │  │ (Hono + Gemini) │  │   Picasso)      │                 │
-│  │  • Sessions      │  │                  │  │                  │                 │
-│  │  • Assets        │  │  Generates       │  │  • Animate img  │                 │
-│  │  • Transcription │  │  FFmpeg          │  │  • Restyle vid  │                 │
-│  │  • Rendering     │  │  commands        │  │  • Remove bg    │                 │
-│  │  • AI animations │  │  via LLM         │  │  • Generate img │                 │
-│  │  • fal.ai proxy  │  │                  │  │                  │                 │
-│  └────────┬─────────┘  └──────────────────┘  └──────────────────┘                │
+│           │                                         │                            │
+│           ▼                                         ▼                            │
+│  ┌─────────────────┐                       ┌─────────────────┐                 │
+│  │  FFmpeg Server   │                       │  fal.ai         │                 │
+│  │  (localhost:3333)│                       │  (DiCaprio/     │                 │
+│  │                  │                       │   Picasso)      │                 │
+│  │  • Sessions      │                       │                  │                 │
+│  │  • Assets        │                       │  • Animate img  │                 │
+│  │  • Transcription │                       │  • Restyle vid  │                 │
+│  │  • Rendering     │                       │  • Remove bg    │                 │
+│  │  • AI animations │                       │  • Generate img │                 │
+│  │  • LLM edit cmds │                       │                  │                 │
+│  │  • fal.ai proxy  │                       │                  │                 │
+│  │  • SPA hosting   │                       │                  │                 │
+│  └────────┬─────────┘                       └──────────────────┘                │
 │           │                                                                      │
 │           ▼                                                                      │
 │  ┌─────────────────┐                                                            │
@@ -70,9 +72,8 @@ tags: [overview, system-design, data-flow]
    Frontend: add to assets[], auto-add clip to timeline
 
 2. User requests AI edit (Director panel)
-   Browser ──POST──► Cloudflare Worker /api/ai-edit/start
-   Worker: send to Gemini with system prompt → get FFmpeg command
-   Browser polls /api/ai-edit/status/:jobId
+   Browser ──POST──► FFmpeg Server /ai-edit
+   Server: generateWithLLM (configured provider) with system prompt → {command, explanation}
    Browser ──POST──► FFmpeg Server /session/{id}/process-asset (with command)
 
 3. User adds captions
@@ -110,14 +111,14 @@ Browser ──POST──► FFmpeg Server /session/{id}/generate-animation
 │  remotion-core)│                                             │
 └───────┬────────┘                                             │
         │ imports                                              │
-        ├──────────────────┬─────────────────┬─────────────────┤
-        ▼                  ▼                 ▼                 ▼
-┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│ react-app/   │  │ remotion/    │  │ worker/      │  │ scripts/     │
-│ hooks/       │  │ templates/   │  │ index.ts     │  │ remotion-core│
-│ components/  │  │ transitions/ │  │ llm.ts       │  │ ffmpeg-server│
-│ pages/       │  │ ProjectTL    │  │              │  │              │
-└──────┬───────┘  └──────────────┘  └──────────────┘  └──────────────┘
+        ├──────────────────┬─────────────────────────────────┤
+        ▼                  ▼                                 ▼
+┌──────────────┐  ┌──────────────┐                 ┌──────────────┐
+│ react-app/   │  │ remotion/    │                 │ scripts/     │
+│ hooks/       │  │ templates/   │                 │ remotion-core│
+│ components/  │  │ transitions/ │                 │ ffmpeg-server│
+│ pages/       │  │ ProjectTL    │                 │              │
+└──────┬───────┘  └──────────────┘                 └──────────────┘
        │ imports
        ▼
 ┌──────────────┐
@@ -139,8 +140,7 @@ Browser ──POST──► FFmpeg Server /session/{id}/generate-animation
 | [[remotion-templates]] | Static + dynamic motion graphics | templates/, DynamicAnimation.tsx |
 | [[remotion-transitions]] | Pluggable transition components | registry.ts, builtin/, custom/ |
 | [[remotion-core]] | Timeline→spec→render pipeline | ProjectTimeline.tsx, render.js |
-| [[worker]] | LLM-powered FFmpeg command gen | index.ts, llm.ts |
-| [[ffmpeg-server]] | Video processing, sessions, AI | local-ffmpeg-server.js |
+| [[ffmpeg-server]] | Video processing, sessions, AI, LLM edit commands, SPA hosting | local-ffmpeg-server.js |
 | [[shared]] | Types shared across boundaries | remotion-core.ts, ndjson.ts |
 
 ## Key Architectural Decisions
@@ -148,5 +148,5 @@ Browser ──POST──► FFmpeg Server /session/{id}/generate-animation
 1. **No server-side state for timeline** — all timeline state lives in React (useProject). Server only stores assets and project.json snapshot.
 2. **Two transition systems coexist** — V1 (junction between clip pairs) and V2 (independent timeline entity). No migration path.
 3. **FFmpeg server does everything** — single 7700-line Node.js file handles sessions, assets, transcription, rendering, AI generation, fal.ai proxy.
-4. **Worker only generates commands** — never executes FFmpeg. Separation allows local-only development without Cloudflare.
+4. **One backend** — the Cloudflare worker was torn down (2026-07-10); the FFmpeg server generates Director edit commands via the configured LLM provider (`POST /ai-edit`) and serves the built SPA.
 5. **Remotion for motion graphics only** — base video editing uses native FFmpeg. Remotion renders overlays, animations, and final composite.

@@ -4,19 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-HyperEdit is an AI-powered video editor built with React 19, Remotion for motion graphics, and Cloudflare Workers for the backend. It's a Mocha platform app.
+HyperEdit is an AI-powered video editor built with React 19, Remotion for motion graphics, and a local Node.js FFmpeg server as the only backend (the Cloudflare/Mocha scaffold was torn down 2026-07-10).
 
 ## Commands
 
 ```bash
-npm install --legacy-peer-deps  # Install dependencies (required due to Vite 7 peer dep conflict)
+npm install              # Install dependencies
 npm run dev              # Start Vite dev server
 npm run ffmpeg-server    # Start local FFmpeg server (port 3333) - run in separate terminal
 npm run build            # TypeScript + Vite production build
 npm run lint             # ESLint
-npm run check            # Full validation: type check + build + deploy dry-run
+npm run check            # Full validation: type check + build
 npm run knip             # Check for unused dependencies
-npm run cf-typegen       # Generate Cloudflare worker types
 ```
 
 **Local development** requires both `npm run dev` and `npm run ffmpeg-server` running simultaneously.
@@ -37,7 +36,6 @@ src/
 │   ├── components/      # UI: Timeline, VideoPreview, AssetLibrary, AIPromptPanel, MotionGraphicsPanel
 │   ├── hooks/           # useProject (main state), useVideoSession
 │   └── pages/Home.tsx   # Main editor layout
-├── worker/index.ts      # Hono backend API (AI editing via Gemini)
 ├── remotion/            # Motion graphics system
 │   └── templates/       # 11 templates with registry in index.ts
 scripts/
@@ -48,7 +46,7 @@ scripts/
 - Multi-track timeline with 6 tracks: T1 (captions), V3 (top overlay), V2 (overlay), V1 (base video), A1/A2 (audio)
 - `useProject()` hook manages all project state: assets, clips, playback, captions, rendering
 - Local FFmpeg server (port 3333) handles sessions, asset storage, thumbnail generation, rendering, and Whisper-based transcription for captions
-- Cloudflare Worker with D1 database and R2 bucket for production (configured in wrangler.json)
+- The FFmpeg server also generates Director edit commands (`POST /ai-edit` through the configured LLM provider) and serves the built SPA from `dist/`
 
 ## State Management
 
@@ -73,7 +71,7 @@ The `useProject()` hook in `src/react-app/hooks/useProject.ts` is the central st
 
 ## FFmpeg Server
 
-The local FFmpeg server (`scripts/local-ffmpeg-server.js`, ~7700 lines) is a raw Node.js `http.createServer` with regex-based route matching. It handles all video processing, asset management, Remotion rendering, transcription, and fal.ai calls. The Cloudflare Worker only generates FFmpeg commands via Gemini — it does NOT execute them.
+The local FFmpeg server (`scripts/local-ffmpeg-server.js`, ~9000 lines) is a raw Node.js `http.createServer` with regex-based route matching. It handles all video processing, asset management, Remotion rendering, transcription, fal.ai calls, LLM edit-command generation, and SPA hosting.
 
 Key endpoints on `localhost:3333`:
 - `POST /session/create` - Create new editing session
@@ -98,7 +96,6 @@ Sessions persist to `{HYPEREDIT_SESSIONS_DIR}/{sessionId}/` with assets, renders
 
 Three separate tsconfig files:
 - `tsconfig.app.json` - React app (ES2020, strict)
-- `tsconfig.worker.json` - Cloudflare Worker
 - `tsconfig.node.json` - Build tools
 
 Path alias: `@/` → `./src/`
@@ -119,7 +116,7 @@ Required in `.dev.vars` for local development:
 - `HYPEREDIT_TEMP_DIR` - ramdisk scratch path (e.g. `R:/Temp`); the FFmpeg server **refuses to start** if this or `HYPEREDIT_SESSIONS_DIR` is unset — no silent `os.tmpdir()` fallback
 - `HYPEREDIT_SESSIONS_DIR` - session storage on the HDD
 - `HYPEREDIT_UPLOAD_STAGING_DIR` - optional; upload staging dir, defaults to `{HYPEREDIT_SESSIONS_DIR}/.upload-staging` (must share a volume with sessions)
-- `GEMINI_API_KEY` - Google AI for editing commands (worker uses `gemini-2.5-flash`)
+- `GEMINI_API_KEY` - Google AI provider key (used when `LLM_PROVIDER` resolves to google)
 - `FAL_API_KEY` - fal.ai for Picasso/DiCaprio (note: server aliases this to `FAL_KEY` for the fal.ai SDK)
 - `GIPHY_API_KEY` - GIF search
 - `OPENAI_API_KEY` - Additional AI features
@@ -165,6 +162,7 @@ The segment-based approach (extract + concat) is required — single-pass filter
 
 ## Build & Deployment
 
-- Vite config uses `@cloudflare/vite-plugin` and `@getmocha/vite-plugins`. `chunkSizeWarningLimit: 5000` due to Remotion's size.
-- `wrangler.json` app name is a UUID (Mocha app ID). SPA routing via `not_found_handling: "single-page-application"`.
+- Plain Vite + React build. `chunkSizeWarningLimit: 5000` due to Remotion's size.
+- `knip.json` `ignoreDependencies` carries three deliberate zero-importer keeps: `@remotion/media` (WebCodecs POC core), `@remotion/transitions` (decided transition engine), `hono` (R1 decomposition's HTTP layer). Remove each entry when it gains importers; never park anything else there without a decision note.
+- Production hosting: the FFmpeg server serves `dist/` with SPA fallback routing (unmatched GETs return `index.html`); content-hashed assets cache immutably.
 - No tests exist in the codebase and no testing framework is configured. Only test via `npm run lint` for validation.

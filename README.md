@@ -15,8 +15,7 @@ HyperEdit now runs on a deterministic **Remotion-first** rendering core with a p
 ## Quickstart
 
 ```bash
-npm install --legacy-peer-deps
-npm run cf-typegen   # needed once on clean checkout for worker types
+npm install
 npm run dev
 npm run ffmpeg-server
 ```
