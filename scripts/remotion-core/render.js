@@ -2,10 +2,18 @@ import { link, copyFile, mkdir, rm } from 'fs/promises';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync, mkdirSync } from 'fs';
+import { createRequire } from 'module';
 import { bundle } from '@remotion/bundler';
-import { openBrowser, renderMedia, selectComposition } from '@remotion/renderer';
 import { parseSpecInput } from './spec.js';
 import { getRenderMediaOptions } from '../hwaccel-config.js';
+import { ensureNvencBinariesDir } from './render-binaries-helpers.js';
+
+// CJS build deliberately (not `import`): the Windows NVENC path patches
+// Remotion's internal audio-codec module (see render-binaries-helpers.js),
+// which is only reachable through the CJS module registry — the ESM entry
+// is a single pre-bundled, immutable file.
+const require = createRequire(import.meta.url);
+const { openBrowser, renderMedia, selectComposition } = require('@remotion/renderer');
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -69,6 +77,22 @@ function getDirs() {
 
   _dirs = { outputRoot, tempDir, bundleDir };
   return _dirs;
+}
+
+// Windows NVENC: Remotion's bundled FFmpeg lacks NVENC, so hardware-accelerated
+// renders must spawn from a merged binaries dir (system FFmpeg + compositor).
+// macOS/Linux use the bundled binaries as-is. Mutates and returns the options.
+function withHwBinaries(opts) {
+  if (opts.hardwareAcceleration && process.platform === 'win32') {
+    const binDir = ensureNvencBinariesDir(getDirs().outputRoot);
+    if (binDir) {
+      opts.binariesDirectory = binDir;
+    } else {
+      // No NVENC-capable FFmpeg to spawn — probing the bundled one is pointless
+      delete opts.hardwareAcceleration;
+    }
+  }
+  return opts;
 }
 
 let cachedBundlePromise = null;
@@ -476,6 +500,9 @@ export async function renderSpecWithRemotion({
     }
   }
 
+  // After user overrides so a user-forced hardwareAcceleration also gets binaries
+  withHwBinaries(renderOpts);
+
   renderOpts.onProgress = makeProgressLogger(finalComposition.durationInFrames, onProgress);
 
   await renderMedia(renderOpts);
@@ -556,6 +583,8 @@ export async function renderDynamicAnimation({
   };
   // Ensure puppeteerInstance isn't overwritten by hwOptions spread
   renderOptions.puppeteerInstance = browser;
+
+  withHwBinaries(renderOptions);
 
   renderOptions.onProgress = makeProgressLogger(finalComposition.durationInFrames, onProgress);
 

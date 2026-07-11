@@ -5,10 +5,9 @@
  * Environment variable toggles (set in .dev.vars):
  *
  *   HWACCEL_REMOTION=true|false          (default: true)
- *     Enable Remotion hardware-accelerated encoding. Only effective on macOS
- *     (VideoToolbox). Uses videoBitrate instead of CRF when active.
- *     On Windows/Linux, Remotion's bundled FFmpeg lacks GPU encoders, so this
- *     controls rendering-phase optimizations (concurrency, offthread threads, GL).
+ *     Enable Remotion hardware-accelerated encoding: VideoToolbox on macOS,
+ *     NVENC on Windows / Linux x64 with an NVIDIA GPU (Remotion >= 4.0.484).
+ *     Uses videoBitrate instead of CRF when active.
  *
  *   HWACCEL_FFMPEG=true|false            (default: true)
  *     Enable GPU encoder for direct FFmpeg spawn() calls (dead air removal, etc.).
@@ -67,6 +66,40 @@ const SOFTWARE_ARGS = {
   max: ['-c:v', 'libx264', '-preset', 'medium', '-crf', '18'],
 };
 
+// --------------- remotion HW eligibility ---------------
+
+/**
+ * The encoder Remotion's own render pipeline can use natively, or null.
+ *
+ * Remotion (4.0.484+) supports exactly two hardware paths:
+ *   macOS: VideoToolbox — bundled FFmpeg has it built in
+ *   Windows / Linux x64: NVENC — needs an NVIDIA GPU. On Linux x64 the bundled
+ *     FFmpeg ships with NVENC; on Windows it does NOT, so render.js provisions
+ *     a binariesDirectory merging the system FFmpeg (see render-binaries-helpers.js)
+ *     — hence the win32 check that the system FFmpeg actually has h264_nvenc.
+ * AMF/QSV/VAAPI are not supported by Remotion — those systems stay on libx264.
+ * `ffmpeg -encoders` lists compiled-in encoders even with no GPU installed,
+ * so NVENC additionally requires an NVIDIA adapter in gpuName.
+ *
+ * hardwareAcceleration: 'if-possible' covers both h264 (h264_nvenc) and
+ * h265 (hevc_nvenc); Remotion probes the FFmpeg it spawns and silently falls
+ * back to software when the encoder is missing.
+ */
+function remotionHwEncoder(caps) {
+  if (caps.platform === 'darwin' && caps.preferredEncoder === 'h264_videotoolbox') {
+    return 'h264_videotoolbox';
+  }
+  const hasNvidiaGpu = /nvidia|geforce|rtx|quadro|tesla/i.test(caps.gpuName || '');
+  if (!hasNvidiaGpu) return null;
+  if (caps.platform === 'win32' && caps.ffmpegHwEncoders.includes('h264_nvenc')) {
+    return 'h264_nvenc';
+  }
+  if (caps.platform === 'linux' && caps.arch === 'x64') {
+    return 'h264_nvenc';
+  }
+  return null;
+}
+
 // --------------- public API ---------------
 
 /**
@@ -78,7 +111,6 @@ const SOFTWARE_ARGS = {
 export function getRenderMediaOptions(isPreview = false) {
   const caps = getCapabilities();
   const useRemotionHW = envBool('HWACCEL_REMOTION');
-  const encoder = caps.preferredEncoder;
 
   const userConcurrency = caps.concurrency;
 
@@ -128,25 +160,12 @@ export function getRenderMediaOptions(isPreview = false) {
   result.jpegQuality = isPreview ? 70 : 80;
 
   // ---- ENCODING-PHASE optimizations (GPU offloading) ----
-  //
-  // IMPORTANT: Remotion bundles its own FFmpeg with a LIMITED set of encoders
-  // (libx264, libx265, libvpx, prores_ks, etc.) — NO NVENC, AMF, QSV, or VAAPI.
-  // The ffmpegOverride approach CANNOT inject GPU encoders into Remotion's FFmpeg.
-  //
-  // Native HW acceleration only works on macOS (VideoToolbox is built into FFmpeg).
-  // On Windows/Linux, Remotion encoding stays on software (libx264) but we
-  // compensate with rendering-phase optimizations above.
-  //
-  // Direct FFmpeg calls in local-ffmpeg-server.js use the SYSTEM FFmpeg which
-  // DOES have NVENC/VAAPI/etc — those continue to use GPU encoding.
+  // See remotionHwEncoder() above for the platform/encoder eligibility rules.
 
-  const hasNativeHW = (caps.platform === 'darwin' && encoder === 'h264_videotoolbox');
-
-  if (useRemotionHW && hasNativeHW) {
-    // macOS VideoToolbox — natively supported by Remotion's FFmpeg
+  if (useRemotionHW && remotionHwEncoder(caps)) {
     result.hardwareAcceleration = 'if-possible';
     result.videoBitrate = isPreview ? '6M' : '10M';
-    // Do NOT set crf — it conflicts with hardware acceleration
+    // Do NOT set crf (or x264Preset) — both conflict with hardware acceleration
   } else {
     // Software encoding — use crf + fast preset
     result.crf = isPreview ? 30 : 20;
@@ -191,8 +210,8 @@ export function getAccelSummary() {
       HWACCEL_HEADFUL: envBool('HWACCEL_HEADFUL', caps.platform !== 'linux'),
     },
     effective: {
-      remotionEncoder: envBool('HWACCEL_REMOTION') && caps.preferredEncoder
-        ? caps.preferredEncoder
+      remotionEncoder: envBool('HWACCEL_REMOTION') && remotionHwEncoder(caps)
+        ? remotionHwEncoder(caps)
         : 'libx264 (software)',
       ffmpegEncoder: envBool('HWACCEL_FFMPEG') && caps.preferredEncoder
         ? caps.preferredEncoder
