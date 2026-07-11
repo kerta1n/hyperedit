@@ -135,7 +135,7 @@ const BUILT_IN_PRESETS: Preset[] = [
     id: 'social-vertical',
     label: 'Social Media (Vertical)',
     options: {
-      codec: 'h264', crf: 23, qualityMode: 'crf', outputWidth: 1080, outputHeight: 1920,
+      codec: 'h264', crf: 23, qualityMode: 'crf', hardwareAcceleration: 'disable', outputWidth: 1080, outputHeight: 1920,
       outputFps: 30, audioCodec: 'aac', audioBitrate: '128k', containerFormat: 'mp4',
       sampleRate: 48000, x264Preset: 'fast', scale: 1, muted: false,
     },
@@ -144,7 +144,7 @@ const BUILT_IN_PRESETS: Preset[] = [
     id: 'youtube-hd',
     label: 'YouTube HD',
     options: {
-      codec: 'h264', crf: 18, qualityMode: 'crf', outputWidth: 1920, outputHeight: 1080,
+      codec: 'h264', crf: 18, qualityMode: 'crf', hardwareAcceleration: 'disable', outputWidth: 1920, outputHeight: 1080,
       outputFps: 30, audioCodec: 'aac', audioBitrate: '192k', containerFormat: 'mp4',
       sampleRate: 48000, x264Preset: 'medium', scale: 1, muted: false,
     },
@@ -153,7 +153,7 @@ const BUILT_IN_PRESETS: Preset[] = [
     id: 'youtube-4k',
     label: 'YouTube 4K',
     options: {
-      codec: 'h264', crf: 15, qualityMode: 'crf', outputWidth: 3840, outputHeight: 2160,
+      codec: 'h264', crf: 15, qualityMode: 'crf', hardwareAcceleration: 'disable', outputWidth: 3840, outputHeight: 2160,
       outputFps: 30, audioCodec: 'aac', audioBitrate: '256k', containerFormat: 'mp4',
       sampleRate: 48000, x264Preset: 'medium', scale: 1, muted: false,
     },
@@ -162,7 +162,7 @@ const BUILT_IN_PRESETS: Preset[] = [
     id: 'max-quality',
     label: 'Maximum Quality',
     options: {
-      codec: 'h264', crf: 14, qualityMode: 'crf', outputWidth: 1920, outputHeight: 1080,
+      codec: 'h264', crf: 14, qualityMode: 'crf', hardwareAcceleration: 'disable', outputWidth: 1920, outputHeight: 1080,
       outputFps: 60, audioCodec: 'aac', audioBitrate: '320k', containerFormat: 'mp4',
       sampleRate: 48000, x264Preset: 'slow', scale: 1, muted: false,
     },
@@ -171,7 +171,7 @@ const BUILT_IN_PRESETS: Preset[] = [
     id: 'small-file',
     label: 'Small File',
     options: {
-      codec: 'h264', crf: 28, qualityMode: 'crf', outputWidth: 1280, outputHeight: 720,
+      codec: 'h264', crf: 28, qualityMode: 'crf', hardwareAcceleration: 'disable', outputWidth: 1280, outputHeight: 720,
       outputFps: 30, audioCodec: 'aac', audioBitrate: '96k', containerFormat: 'mp4',
       sampleRate: 44100, x264Preset: 'fast', scale: 1, muted: false,
     },
@@ -180,7 +180,7 @@ const BUILT_IN_PRESETS: Preset[] = [
     id: 'web-optimized',
     label: 'Web Optimized',
     options: {
-      codec: 'vp9', crf: 30, qualityMode: 'crf', outputWidth: 1920, outputHeight: 1080,
+      codec: 'vp9', crf: 30, qualityMode: 'crf', hardwareAcceleration: 'disable', outputWidth: 1920, outputHeight: 1080,
       outputFps: 30, audioCodec: 'opus', audioBitrate: '128k', containerFormat: 'webm',
       sampleRate: 48000, scale: 1, muted: false,
     },
@@ -189,7 +189,7 @@ const BUILT_IN_PRESETS: Preset[] = [
     id: 'prores-master',
     label: 'ProRes Master',
     options: {
-      codec: 'prores', crf: null, qualityMode: 'crf', outputWidth: 1920, outputHeight: 1080,
+      codec: 'prores', crf: null, qualityMode: 'crf', hardwareAcceleration: 'disable', outputWidth: 1920, outputHeight: 1080,
       outputFps: 30, audioCodec: 'pcm-16', audioBitrate: '320k', containerFormat: 'mov',
       proResProfile: 'hq', sampleRate: 48000, scale: 1, muted: false,
     },
@@ -217,7 +217,13 @@ export default function RenderSettingsModal({
   recommendedConcurrency,
   sessionId,
 }: RenderSettingsModalProps) {
-  const [opts, setOpts] = useState<RenderOptions>(renderOptions);
+  // Normalize on open: CRF is incompatible with hardware acceleration (Remotion
+  // constraint) — saved projects from before this rule may carry both.
+  const [opts, setOpts] = useState<RenderOptions>(() =>
+    renderOptions.hardwareAcceleration !== 'disable' && renderOptions.qualityMode === 'crf' && renderOptions.codec !== 'prores'
+      ? { ...renderOptions, qualityMode: 'bitrate' }
+      : renderOptions
+  );
   const [customResolution, setCustomResolution] = useState(false);
   const [crfDrag, setCrfDrag] = useState<number | null>(null);
   const [activeTab, setActiveTab] = useState<'settings' | 'gallery'>('settings');
@@ -275,8 +281,10 @@ export default function RenderSettingsModal({
   const containerOptions = useMemo(() => getValidContainers(opts.codec, opts.audioCodec), [opts.codec, opts.audioCodec]);
   const crfRange = useMemo(() => CRF_RANGES[opts.codec], [opts.codec]);
   const isProRes = opts.codec === 'prores';
-  const showCrf = !isProRes && opts.qualityMode === 'crf';
-  const showBitrate = !isProRes && opts.qualityMode === 'bitrate';
+  // CRF is incompatible with hardware-accelerated encoding (Remotion constraint)
+  const hwAccelActive = opts.hardwareAcceleration !== 'disable';
+  const showCrf = !isProRes && opts.qualityMode === 'crf' && !hwAccelActive;
+  const showBitrate = !isProRes && (opts.qualityMode === 'bitrate' || hwAccelActive);
 
   // When codec changes, cascade audio + container to compatible defaults
   const handleCodecChange = useCallback((codec: VideoCodec) => {
@@ -289,9 +297,10 @@ export default function RenderSettingsModal({
       audioCodec: defaultAudio,
       containerFormat: defaultContainer,
       crf: codec === 'prores' ? null : crf.balanced,
-      qualityMode: codec === 'prores' ? 'crf' : opts.qualityMode,
+      // Leaving ProRes must not resurrect CRF while hardware acceleration is on
+      qualityMode: codec === 'prores' ? 'crf' : (opts.hardwareAcceleration !== 'disable' ? 'bitrate' : opts.qualityMode),
     });
-  }, [update, opts.qualityMode]);
+  }, [update, opts.qualityMode, opts.hardwareAcceleration]);
 
   // When audio codec changes, cascade container to compatible default if needed
   const handleAudioCodecChange = useCallback((audioCodec: AudioCodec) => {
@@ -438,9 +447,20 @@ export default function RenderSettingsModal({
               <>
                 <Field label="Quality Mode">
                   <div className="flex gap-1 bg-zinc-800 rounded-lg p-0.5">
-                    <QualityModeButton active={opts.qualityMode === 'crf'} label="CRF" onClick={() => update({ qualityMode: 'crf' })} />
-                    <QualityModeButton active={opts.qualityMode === 'bitrate'} label="Bitrate" onClick={() => update({ qualityMode: 'bitrate' })} />
+                    <QualityModeButton
+                      active={showCrf}
+                      label="CRF"
+                      onClick={() => update({ qualityMode: 'crf' })}
+                      disabled={hwAccelActive}
+                      title={hwAccelActive ? 'CRF is incompatible with hardware acceleration — set Hardware Acceleration to Disable to use CRF' : undefined}
+                    />
+                    <QualityModeButton active={showBitrate} label="Bitrate" onClick={() => update({ qualityMode: 'bitrate' })} />
                   </div>
+                  {hwAccelActive && (
+                    <span className="text-[10px] text-zinc-500 mt-0.5 block">
+                      Hardware acceleration requires bitrate mode.
+                    </span>
+                  )}
                 </Field>
 
                 {showCrf && (
@@ -580,12 +600,17 @@ export default function RenderSettingsModal({
                   value={opts.hardwareAcceleration}
                   options={['if-possible', 'required', 'disable'] as HwAccelMode[]}
                   labels={['If Possible', 'Required', 'Disable']}
-                  onChange={v => update({ hardwareAcceleration: v as HwAccelMode })}
+                  onChange={v => update(
+                    // CRF can't ride along with hardware acceleration
+                    v === 'disable'
+                      ? { hardwareAcceleration: v as HwAccelMode }
+                      : { hardwareAcceleration: v as HwAccelMode, qualityMode: 'bitrate' }
+                  )}
                 />
                 <div className="flex items-start gap-1.5 mt-1">
                   <Info className="w-3 h-3 text-zinc-500 shrink-0 mt-0.5" />
                   <span className="text-[10px] text-zinc-500 leading-tight">
-                    Currently only works with macOS VideoToolbox. Infrastructure for future NVENC/custom FFmpeg support.
+                    VideoToolbox on macOS, NVENC on Windows/Linux with an NVIDIA GPU. Requires bitrate mode; falls back to software when unavailable ("Required" fails instead).
                   </span>
                 </div>
               </Field>
@@ -820,13 +845,17 @@ function NumberInput({
   );
 }
 
-function QualityModeButton({ active, label, onClick }: { active: boolean; label: string; onClick: () => void }) {
+function QualityModeButton({ active, label, onClick, disabled, title }: { active: boolean; label: string; onClick: () => void; disabled?: boolean; title?: string }) {
   return (
     <button
       onClick={onClick}
-      className={`flex-1 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${active
-          ? 'bg-orange-600/30 text-orange-400 shadow-sm'
-          : 'text-zinc-400 hover:text-zinc-200'
+      disabled={disabled}
+      title={title}
+      className={`flex-1 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${disabled
+          ? 'text-zinc-600 cursor-not-allowed'
+          : active
+            ? 'bg-orange-600/30 text-orange-400 shadow-sm'
+            : 'text-zinc-400 hover:text-zinc-200'
         }`}
     >
       {label}
