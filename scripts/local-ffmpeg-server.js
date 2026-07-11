@@ -14,7 +14,7 @@ import {
   parseSpecInput,
   RemotionSpecValidationError,
 } from './remotion-core/spec.js';
-import { renderSpecWithRemotion, renderDynamicAnimation, renderVariantBatch, invalidateBundleCache, invalidateBrowserCache } from './remotion-core/render.js';
+import { renderSpecWithRemotion, renderDynamicAnimation, renderVariantBatch, invalidateBundleCache, invalidateBrowserCache, getRenderQueueDepth } from './remotion-core/render.js';
 import { scoreVariantBatch, writeCampaignReport } from './remotion-core/ad-intelligence.js';
 import { detectCapabilities } from './hw-detect.js';
 import { getFFmpegEncodeArgs, getAccelSummary } from './hwaccel-config.js';
@@ -830,6 +830,15 @@ async function streamRender(res, renderFn) {
     'Access-Control-Allow-Origin': '*',
     'Cache-Control': 'no-cache',
   });
+
+  // Renders serialize through a global queue; a queued request would otherwise
+  // stream nothing until it reaches the front — tell the client it is waiting.
+  const queueDepth = getRenderQueueDepth();
+  if (queueDepth > 0) {
+    try {
+      res.write(JSON.stringify({ type: 'queued', position: queueDepth }) + '\n');
+    } catch (e) { /* client disconnected */ }
+  }
 
   const onProgress = ({ pct, renderedFrames, totalFrames, elapsed }) => {
     const min = Math.floor(elapsed / 60);

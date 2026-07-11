@@ -237,9 +237,8 @@ export const defaultRenderOptions: RenderOptions = {
   containerFormat: 'mp4',
   outputWidth: 1920,
   outputHeight: 1080,
-  // 60fps is the owner's deliberate output standard — the "Custom" preset is a
-  // true reset-to-defaults, so a 30 here silently halves exports after
-  // preset-hopping
+  // 60fps default: the "Custom" preset is a true reset-to-defaults, so a lower
+  // value here silently halves exports after preset-hopping
   outputFps: 60,
   // bitrate, not crf: the default hardwareAcceleration below is incompatible
   // with CRF (Remotion constraint) — crf 23 is kept for when HW is disabled
@@ -1104,6 +1103,8 @@ export function useProject() {
 
       const result = await readNDJSONStream(response, ({ pct, frames, total, elapsed }) => {
         setStatus(`Rendering: ${pct}% (${frames}/${total} frames) [${elapsed}]`);
+      }, (position) => {
+        setStatus(`Render queued — waiting for ${position} earlier render${position === 1 ? '' : 's'}…`);
       }) as { warnings?: { message: string }[]; downloadUrl: string };
 
       if (result.warnings?.length) {

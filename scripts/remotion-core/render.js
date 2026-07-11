@@ -90,10 +90,21 @@ function getDirs() {
 // serializing loses no throughput. The chain swallows failures so one failed
 // render never blocks the next.
 let renderQueue = Promise.resolve();
+let renderQueueDepth = 0;
+
+/** Active + queued renders — lets the server tell a client it is waiting. */
+export function getRenderQueueDepth() {
+  return renderQueueDepth;
+}
 
 function serializeRender(fn) {
+  renderQueueDepth += 1;
   const run = renderQueue.then(fn, fn);
   renderQueue = run.catch(() => {});
+  const settle = () => {
+    renderQueueDepth -= 1;
+  };
+  run.then(settle, settle);
   return run;
 }
 

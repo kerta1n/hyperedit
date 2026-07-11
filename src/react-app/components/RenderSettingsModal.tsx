@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { X, Download, ChevronDown, Info, Trash2, PenLine } from 'lucide-react';
 import { useDeliverables } from '@/react-app/hooks/useDeliverables';
@@ -250,9 +250,16 @@ export default function RenderSettingsModal({
   // Sync parent state AFTER commit — calling onUpdateOptions inside setOpts
   // updater functions fires Home's setter mid-render (React re-executes
   // updaters during render) and trips the setState-in-render invariant.
+  // The callback goes through a ref: Home passes an inline arrow that ALSO
+  // saves the project, so keying the effect on its identity re-saved on every
+  // Home re-render (= every render-progress tick).
+  const onUpdateOptionsRef = useRef(onUpdateOptions);
   useEffect(() => {
-    onUpdateOptions(opts);
-  }, [opts, onUpdateOptions]);
+    onUpdateOptionsRef.current = onUpdateOptions;
+  });
+  useEffect(() => {
+    onUpdateOptionsRef.current(opts);
+  }, [opts]);
 
   const update = useCallback((partial: Partial<RenderOptions>) => {
     setOpts(prev => ({ ...prev, ...partial, presetId: 'custom' }));

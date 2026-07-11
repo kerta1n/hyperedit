@@ -8,6 +8,7 @@ export interface RenderProgress {
 export async function readNDJSONStream(
   response: Response,
   onProgress: (data: RenderProgress) => void,
+  onQueued?: (position: number) => void,
 ): Promise<Record<string, unknown>> {
   const ct = response.headers.get('content-type') || '';
   if (!ct.includes('ndjson') && !ct.includes('stream')) {
@@ -28,6 +29,7 @@ export async function readNDJSONStream(
       if (!line.trim()) continue;
       const msg = JSON.parse(line);
       if (msg.type === 'progress') onProgress(msg);
+      else if (msg.type === 'queued') onQueued?.(msg.position);
       else if (msg.type === 'result') return msg;
       else if (msg.type === 'error') throw new Error(msg.message);
     }
