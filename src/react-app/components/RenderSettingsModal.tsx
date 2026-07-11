@@ -247,33 +247,27 @@ export default function RenderSettingsModal({
     setCustomResolution(!match || match.label === 'Custom');
   }, [opts.outputWidth, opts.outputHeight]);
 
-  // Sync parent state when local options change
+  // Sync parent state AFTER commit — calling onUpdateOptions inside setOpts
+  // updater functions fires Home's setter mid-render (React re-executes
+  // updaters during render) and trips the setState-in-render invariant.
+  useEffect(() => {
+    onUpdateOptions(opts);
+  }, [opts, onUpdateOptions]);
+
   const update = useCallback((partial: Partial<RenderOptions>) => {
-    setOpts(prev => {
-      const next = { ...prev, ...partial, presetId: 'custom' };
-      onUpdateOptions(next);
-      return next;
-    });
-  }, [onUpdateOptions]);
+    setOpts(prev => ({ ...prev, ...partial, presetId: 'custom' }));
+  }, []);
 
   // Apply a preset
   const applyPreset = useCallback((presetId: string) => {
     if (presetId === 'custom') {
-      setOpts(() => {
-        const next: RenderOptions = { ...defaultRenderOptions, presetId: 'custom' };
-        onUpdateOptions(next);
-        return next;
-      });
+      setOpts({ ...defaultRenderOptions, presetId: 'custom' });
       return;
     }
     const preset = BUILT_IN_PRESETS.find(p => p.id === presetId);
     if (!preset) return;
-    setOpts(() => {
-      const next: RenderOptions = { ...defaultRenderOptions, ...preset.options, presetId: preset.id };
-      onUpdateOptions(next);
-      return next;
-    });
-  }, [onUpdateOptions]);
+    setOpts({ ...defaultRenderOptions, ...preset.options, presetId: preset.id });
+  }, []);
 
   // Available audio codecs for current video codec
   const audioOptions = useMemo(() => CODEC_AUDIO_MAP[opts.codec], [opts.codec]);
@@ -514,8 +508,8 @@ export default function RenderSettingsModal({
               </Field>
             )}
 
-            {/* Encoder Speed — only for h264 */}
-            {opts.codec === 'h264' ? (
+            {/* Encoder Speed — x264-only; hardware encoders use their own presets */}
+            {opts.codec === 'h264' && !hwAccelActive ? (
               <Field label="Encoder Speed">
                 <Select
                   value={opts.x264Preset}
@@ -526,7 +520,9 @@ export default function RenderSettingsModal({
               </Field>
             ) : (
               <span className="text-[10px] text-zinc-500 block">
-                Encoder speed presets are only available for H.264 (x264).
+                {opts.codec === 'h264'
+                  ? 'Encoder speed presets are x264-only — not used with hardware acceleration.'
+                  : 'Encoder speed presets are only available for H.264 (x264).'}
               </span>
             )}
 

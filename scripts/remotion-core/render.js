@@ -106,8 +106,13 @@ function withHwBinaries(opts) {
     if (binDir) {
       opts.binariesDirectory = binDir;
     } else {
-      // No NVENC-capable FFmpeg to spawn — probing the bundled one is pointless
+      // No NVENC-capable FFmpeg to spawn — probing the bundled one is pointless.
+      // Restore the fast preset so the software fallback doesn't run at
+      // ffmpeg's slower default (medium).
       delete opts.hardwareAcceleration;
+      if (!opts.x264Preset && opts.codec === 'h264') {
+        opts.x264Preset = 'fast';
+      }
     }
   }
   return opts;
@@ -503,8 +508,10 @@ async function renderSpecInner({
       renderOpts.hardwareAcceleration = userRenderOptions.hardwareAcceleration;
     }
 
-    // Encoder speed (x264 preset)
-    if (userRenderOptions.x264Preset) {
+    // Encoder speed (x264 preset) — x264-only concept. NVENC merely aliases
+    // fast/medium/slow and ERRORS on the rest (ultrafast, placebo, ...), so
+    // never pass it alongside hardware acceleration.
+    if (userRenderOptions.x264Preset && !renderOpts.hardwareAcceleration) {
       renderOpts.x264Preset = userRenderOptions.x264Preset;
     }
 
@@ -554,6 +561,13 @@ async function renderSpecInner({
         return result;
       };
     }
+  }
+
+  // x264Preset is only valid with the h264 codec — Remotion throws otherwise.
+  // Both the software hwOptions branch and the modal set it unconditionally,
+  // which silently broke every non-h264 software render (vp9/av1/prores/h265).
+  if (resolvedCodec !== 'h264') {
+    delete renderOpts.x264Preset;
   }
 
   // After user overrides so a user-forced hardwareAcceleration also gets binaries

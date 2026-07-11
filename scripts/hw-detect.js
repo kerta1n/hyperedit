@@ -105,8 +105,20 @@ function detectFFmpegHwEncoders() {
   }
 }
 
+// `ffmpeg -encoders` reports what is COMPILED IN, not what the hardware can
+// run — a Gyan/winget build lists h264_nvenc on an AMD-only machine and the
+// encode then fails at runtime. Runtime usability needs the matching GPU
+// vendor, so each encoder is cross-checked against the detected adapter name.
+const ENCODER_GPU_VENDOR = {
+  h264_nvenc: /nvidia|geforce|rtx|gtx|quadro|tesla/i,
+  h264_amf: /amd|radeon/i,
+  h264_qsv: /intel|uhd|iris|arc\s*a/i,
+  h264_vaapi: /nvidia|geforce|amd|radeon|intel|uhd|iris/i,
+  h264_videotoolbox: null, // darwin-only in the priority list — platform gate suffices
+};
+
 /** Pick the best encoder for the current platform from the available list. */
-function pickPreferredEncoder(platform, available) {
+function pickPreferredEncoder(platform, available, gpuName) {
   // Priority order per platform
   const priority = {
     win32:  ['h264_nvenc', 'h264_amf', 'h264_qsv'],
@@ -116,7 +128,10 @@ function pickPreferredEncoder(platform, available) {
 
   const order = priority[platform] || [];
   for (const enc of order) {
-    if (available.includes(enc)) return enc;
+    if (!available.includes(enc)) continue;
+    const vendor = ENCODER_GPU_VENDOR[enc];
+    if (vendor && !vendor.test(gpuName || '')) continue;
+    return enc;
   }
   return null;
 }
@@ -178,7 +193,7 @@ export async function detectCapabilities() {
   const totalMemoryGB = Math.round(os.totalmem() / (1024 ** 3) * 10) / 10;
   const gpuName = detectGpuName();
   const ffmpegHwEncoders = detectFFmpegHwEncoders();
-  const preferredEncoder = pickPreferredEncoder(platform, ffmpegHwEncoders);
+  const preferredEncoder = pickPreferredEncoder(platform, ffmpegHwEncoders, gpuName);
   const concurrency = pickConcurrency(cpuCores);
 
   cached = {

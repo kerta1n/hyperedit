@@ -237,7 +237,10 @@ export const defaultRenderOptions: RenderOptions = {
   containerFormat: 'mp4',
   outputWidth: 1920,
   outputHeight: 1080,
-  outputFps: 30,
+  // 60fps is the owner's deliberate output standard — the "Custom" preset is a
+  // true reset-to-defaults, so a 30 here silently halves exports after
+  // preset-hopping
+  outputFps: 60,
   // bitrate, not crf: the default hardwareAcceleration below is incompatible
   // with CRF (Remotion constraint) — crf 23 is kept for when HW is disabled
   qualityMode: 'bitrate',
