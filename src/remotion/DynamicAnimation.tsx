@@ -929,7 +929,7 @@ const TitleScene: React.FC<{ content: Scene['content'] }> = ({ content }) => {
 
   // Exit animation
   const exitFrames = isShort ? Math.round(durationInFrames * 0.2) : 20;
-  const exitProgress = interpolate(frame, [durationInFrames - exitFrames, durationInFrames], [0, 1], { extrapolateRight: 'clamp' });
+  const exitProgress = interpolate(frame, [durationInFrames - exitFrames, durationInFrames], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
   const exitScale = interpolate(exitProgress, [0, 1], [1, 0.8]);
   const exitOpacity = interpolate(exitProgress, [0, 1], [1, 0]);
 
