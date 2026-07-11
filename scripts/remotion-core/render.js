@@ -7,6 +7,7 @@ import { bundle } from '@remotion/bundler';
 import { parseSpecInput } from './spec.js';
 import { getRenderMediaOptions } from '../hwaccel-config.js';
 import { ensureNvencBinariesDir } from './render-binaries-helpers.js';
+import { installDownloadShim, registerLocalRenderAssets } from './render-download-helpers.js';
 
 // CJS build deliberately (not `import`): the Windows NVENC path patches
 // Remotion's internal audio-codec module (see render-binaries-helpers.js),
@@ -54,6 +55,10 @@ let _dirs = null;
 
 function getDirs() {
   if (_dirs) return _dirs;
+
+  // Every render path passes through here — make sure session-asset URLs are
+  // hard-linked instead of downloaded (animation renders never register a map)
+  installDownloadShim();
 
   const outputRoot = process.env.HYPEREDIT_OUTPUT || join(projectRoot, '.output');
   const tempDir = join(outputRoot, 'cache', 'temp');
@@ -336,7 +341,10 @@ export async function renderSpecWithRemotion({
   // Hard-link assets into the bundle so Remotion's bundle server serves them.
   // The FFmpeg server is blocked during renderMedia(), so Remotion can't fetch
   // from localhost:3333. Bundle is on the same drive → hard links are free.
+  // Also register them with the download shim so Remotion's download-map gets
+  // hard links instead of multi-GB HTTP copies (see render-download-helpers).
   if (assetPathMap) {
+    registerLocalRenderAssets(assetPathMap);
     await copyAssetsToBundle(serveUrl, normalizedSpec, assetPathMap);
   }
 
