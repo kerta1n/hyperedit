@@ -35,8 +35,9 @@ const require = createRequire(import.meta.url);
 
 const COMPOSITOR_PKG = '@remotion/compositor-win32-x64-msvc';
 
-/** undefined = not attempted yet; null = unavailable; string = merged dir */
-let resolved;
+/** true once provisioning has permanently failed (non-win32 / no system FFmpeg) */
+let unavailable = false;
+let aacPatched = false;
 
 function findOnPath(bin) {
   const out = execSync(`where ${bin}`, {
@@ -98,24 +99,31 @@ function patchRemotionAacEncoder() {
 /**
  * Return the merged binaries dir for Windows NVENC, or null when Remotion's
  * bundled binaries should be used as-is (non-Windows) or provisioning failed.
- * Idempotent and cached; the copy runs at most once per process.
+ *
+ * Deliberately NOT memoizing the path: the cache dir can be deleted underneath
+ * a running server (disk cleanup), and a stale path would hang every render
+ * until restart. buildMergedDir is cheap when the dir is complete (three
+ * existsSync calls) and re-merges when it is not.
  *
  * @param {string} outputRoot - HYPEREDIT_OUTPUT root (HDD)
  * @returns {string|null}
  */
 export function ensureNvencBinariesDir(outputRoot) {
-  if (resolved !== undefined) return resolved;
+  if (unavailable) return null;
   if (process.platform !== 'win32') {
-    resolved = null;
-    return resolved;
+    unavailable = true;
+    return null;
   }
   try {
     const binDir = buildMergedDir(outputRoot);
-    patchRemotionAacEncoder();
-    resolved = binDir;
+    if (!aacPatched) {
+      patchRemotionAacEncoder();
+      aacPatched = true;
+    }
+    return binDir;
   } catch (err) {
     console.warn(`[Remotion] NVENC binaries setup failed — falling back to software encoding: ${err.message}`);
-    resolved = null;
+    unavailable = true;
+    return null;
   }
-  return resolved;
 }

@@ -84,6 +84,19 @@ function getDirs() {
   return _dirs;
 }
 
+// Renders must run one at a time: two concurrent renderMedia calls sharing this
+// module's cached browser crash the Rust compositor with an out-of-memory abort
+// (verified with two parallel 5s renders). Frame capture is CPU-bound, so
+// serializing loses no throughput. The chain swallows failures so one failed
+// render never blocks the next.
+let renderQueue = Promise.resolve();
+
+function serializeRender(fn) {
+  const run = renderQueue.then(fn, fn);
+  renderQueue = run.catch(() => {});
+  return run;
+}
+
 // Windows NVENC: Remotion's bundled FFmpeg lacks NVENC, so hardware-accelerated
 // renders must spawn from a merged binaries dir (system FFmpeg + compositor).
 // macOS/Linux use the bundled binaries as-is. Mutates and returns the options.
@@ -123,6 +136,14 @@ async function getBundleUrl(customTransitionIds = []) {
   if (key !== bundledTransitionSet) {
     invalidateBundleCache();
     bundledTransitionSet = key;
+  }
+  // The bundle dir can be deleted underneath a running server (disk cleanup) —
+  // a memoized path would then serve renders from nothing until restart, the
+  // same staleness class as the binaries-dir memo. Revalidate before reuse.
+  if (cachedBundlePath && !existsSync(cachedBundlePath)) {
+    console.warn('[Remotion] Cached bundle is gone from disk — rebundling');
+    cachedBundlePromise = null;
+    cachedBundlePath = null;
   }
   if (!cachedBundlePromise) {
     const hasCustom = customTransitionIds.length > 0;
@@ -172,9 +193,32 @@ function getBrowserConfigKey(hw) {
   });
 }
 
+// A cached browser whose Chrome process died (crash, external kill, GPU reset)
+// leaves a resolved promise wrapping a dead CDP socket — selectComposition then
+// hangs FOREVER (no timeout covers a dead socket; verified by killing Chrome
+// between renders). Probe liveness before reuse with a real CDP roundtrip —
+// browser.pages() is NOT sufficient, it resolves from locally cached targets.
+async function isBrowserAlive(browser) {
+  try {
+    await Promise.race([
+      browser.connection.send('Browser.getVersion'),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('browser liveness probe timed out')), 3000)),
+    ]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function getBrowser(hwOptions) {
   const key = getBrowserConfigKey(hwOptions);
   if (key !== browserConfigKey) {
+    invalidateBrowserCache();
+    browserConfigKey = key;
+  }
+  if (cachedBrowserInstance && !(await isBrowserAlive(cachedBrowserInstance))) {
+    console.warn('[Remotion] Cached browser is dead — relaunching');
     invalidateBrowserCache();
     browserConfigKey = key;
   }
@@ -300,7 +344,11 @@ function withDefaults(spec) {
   };
 }
 
-export async function renderSpecWithRemotion({
+export function renderSpecWithRemotion(args) {
+  return serializeRender(() => renderSpecInner(args));
+}
+
+async function renderSpecInner({
   spec,
   outputPath,
   compositionId = 'ProjectTimeline',
@@ -525,7 +573,11 @@ export async function renderSpecWithRemotion({
   };
 }
 
-export async function renderDynamicAnimation({
+export function renderDynamicAnimation(args) {
+  return serializeRender(() => renderDynamicAnimationInner(args));
+}
+
+async function renderDynamicAnimationInner({
   sceneData,
   outputPath,
   width = 1920,
