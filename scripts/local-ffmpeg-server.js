@@ -1,5 +1,5 @@
 import http from 'http';
-import { spawn, execSync } from 'child_process';
+import { spawn } from 'child_process';
 import { createWriteStream, createReadStream, unlinkSync, rmSync, mkdirSync, existsSync, writeFileSync, readFileSync, readdirSync, statSync, renameSync, copyFileSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
@@ -459,7 +459,17 @@ function restoreSessionsFromDisk() {
         savedAssetsMeta = JSON.parse(readFileSync(assetsMetaPath, 'utf-8'));
         console.log(`[Session] Found saved metadata for ${Object.keys(savedAssetsMeta).length} assets`);
       } catch (e) {
-        console.log(`[Session] Could not read assets-meta.json for ${sessionId}`);
+        console.error(`[Session] CORRUPT assets-meta.json for ${sessionId} (${e.message}) — asset metadata (fps/aiGenerated/duration) at risk, trying backups`);
+        for (let i = 1; i <= 3; i++) {
+          try {
+            savedAssetsMeta = JSON.parse(readFileSync(`${assetsMetaPath}.bak${i}`, 'utf-8'));
+            console.error(`[Session] Recovered asset metadata from assets-meta.json.bak${i} for ${sessionId}`);
+            break;
+          } catch { /* try next backup */ }
+        }
+        if (Object.keys(savedAssetsMeta).length === 0) {
+          console.error(`[Session] No usable backup — session ${sessionId} restores WITHOUT asset metadata`);
+        }
       }
     }
 
@@ -934,10 +944,12 @@ async function detectSilence(inputPath, jobId, options = {}) {
 // Get video/audio duration (returns 0 for images)
 async function getVideoDuration(inputPath) {
   try {
-    const result = execSync(
-      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${inputPath}"`,
-      { encoding: 'utf-8' }
-    );
+    const result = await runFFmpegProbe([
+      '-v', 'error',
+      '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1',
+      inputPath
+    ], 'probe');
     const duration = parseFloat(result.trim());
     return isNaN(duration) ? 0 : duration;
   } catch {
@@ -1978,10 +1990,13 @@ async function generateThumbnail(inputPath, outputPath, isImage = false) {
 // Get video/image dimensions
 async function getMediaInfo(inputPath) {
   try {
-    const result = execSync(
-      `ffprobe -v error -select_streams v:0 -show_entries stream=width,height,duration,r_frame_rate -of json "${inputPath}"`,
-      { encoding: 'utf-8' }
-    );
+    const result = await runFFmpegProbe([
+      '-v', 'error',
+      '-select_streams', 'v:0',
+      '-show_entries', 'stream=width,height,duration,r_frame_rate',
+      '-of', 'json',
+      inputPath
+    ], 'probe');
     const info = JSON.parse(result);
     const stream = info.streams?.[0] || {};
     // r_frame_rate is a rational like "60/1" or "60000/1001"
@@ -3026,6 +3041,7 @@ async function handleCreateGif(req, res, sessionId) {
     };
 
     session.assets.set(gifId, gifAsset);
+    saveAssetMetadata(session); // Persist asset metadata to disk
 
     console.log(`[${jobId}] GIF created: ${(stats.size / 1024).toFixed(1)} KB`);
     console.log(`[${jobId}] === GIF CREATION COMPLETE ===\n`);
@@ -3392,6 +3408,7 @@ async function handleGiphyAdd(req, res, sessionId) {
 
     // Download and add to assets
     const asset = await downloadGifAsAsset(session, gifUrl, title || 'GIF', Date.now());
+    saveAssetMetadata(session); // Persist asset metadata to disk
 
     sendJSON(res, {
       success: true,
@@ -6379,6 +6396,8 @@ Make it visually engaging with good color choices. Use 2-4 scenes for variety.`;
       console.log(`[${jobId}] ✓ Animation ${i + 1} complete: ${asset.filename}`);
     }
 
+    saveAssetMetadata(session); // Persist asset metadata to disk
+
     console.log(`[${jobId}] === BATCH GENERATION COMPLETE ===`);
     console.log(`[${jobId}] Generated ${generatedAnimations.length} animations\n`);
 
@@ -7003,7 +7022,9 @@ Pick phrases that are spread throughout the video. Each phrase should be 2-6 wor
       console.error(`[${jobId}] Failed to parse key phrases:`, e.message);
     }
 
-    if (keyPhrases.length === 0) {
+    const keyPhraseFallback = keyPhrases.length === 0;
+    if (keyPhraseFallback) {
+      console.warn(`[${jobId}] LLM key-phrase extraction unusable — falling back to transcript chunking (emphasis/styling degraded)`);
       // Fallback: create basic phrases from transcript chunks
       const words = transcription.words || [];
       const chunkSize = Math.ceil(words.length / 6);
@@ -7133,6 +7154,7 @@ Pick phrases that are spread throughout the video. Each phrase should be 2-6 wor
       filename: asset.filename,
       duration: durationInSeconds,
       phraseCount: keyPhrases.length,
+      keyPhraseFallback,
       phrases: keyPhrases.map(p => p.phrase),
       thumbnailUrl: `/session/${sessionId}/assets/${assetId}/thumbnail`,
       streamUrl: `/session/${sessionId}/assets/${assetId}/stream`,
@@ -7416,6 +7438,7 @@ Use specific terms, concepts, and themes from the transcript.`;
     };
 
     session.assets.set(outputAssetId, asset);
+    saveAssetMetadata(session); // Persist AI-generated flag to disk
 
     console.log(`[${jobId}] Contextual ${type} animation rendered: ${outputAssetId} (${durationInSeconds}s)`);
     console.log(`[${jobId}] === CONTEXTUAL ANIMATION COMPLETE ===\n`);
@@ -7659,10 +7682,12 @@ async function handleExtractAudio(req, res, sessionId) {
     // Get audio duration
     let audioDuration = videoAsset.duration;
     try {
-      const durationStr = execSync(
-        `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${audioPath}"`,
-        { encoding: 'utf-8' }
-      ).trim();
+      const durationStr = (await runFFmpegProbe([
+        '-v', 'error',
+        '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1',
+        audioPath
+      ], jobId)).trim();
       audioDuration = parseFloat(durationStr) || videoAsset.duration;
     } catch (e) {
       console.warn(`[${jobId}] Could not get audio duration:`, e.message);
@@ -7698,6 +7723,7 @@ async function handleExtractAudio(req, res, sessionId) {
       isMuted: true,
     };
     session.assets.set(mutedVideoAssetId, mutedAsset);
+    saveAssetMetadata(session); // Persist asset metadata to disk
 
     console.log(`[${jobId}] ✓ Audio extracted: ${audioAsset.filename} (${audioDuration.toFixed(2)}s)`);
     console.log(`[${jobId}] ✓ Muted video created: ${mutedAsset.filename}`);
@@ -7807,10 +7833,12 @@ async function handleProcessAsset(req, res, sessionId) {
     // Get duration with ffprobe
     let duration = asset.duration;
     try {
-      const durationStr = execSync(
-        `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${outputPath}"`,
-        { encoding: 'utf-8' }
-      ).trim();
+      const durationStr = (await runFFmpegProbe([
+        '-v', 'error',
+        '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1',
+        outputPath
+      ], jobId)).trim();
       duration = parseFloat(durationStr) || asset.duration;
     } catch (e) {
       console.warn(`[${jobId}] Could not get duration:`, e.message);
@@ -7834,6 +7862,7 @@ async function handleProcessAsset(req, res, sessionId) {
     };
 
     session.assets.set(newAssetId, newAsset);
+    saveAssetMetadata(session); // Persist asset metadata to disk
 
     console.log(`[${jobId}] Asset processed: ${newAssetId} (${duration.toFixed(2)}s)`);
     console.log(`[${jobId}] === PROCESSING COMPLETE ===\n`);
