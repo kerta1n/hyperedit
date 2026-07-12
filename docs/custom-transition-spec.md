@@ -68,6 +68,7 @@ export const MyTransition: React.FC = () => { ... };
 - **No custom hooks**: Only `useCurrentFrame()` and `useVideoConfig()` from remotion
 - **No HyperEdit imports**: The file must work in any Remotion 4.x project
 - **No Tailwind**: CSS-in-JS inline styles only (Tailwind is not available in Remotion components)
+- **Canvas independence**: never hardcode pixel dimensions — read `width`/`height` from `useVideoConfig()`. Projects render at landscape (1920×1080) or portrait (1080×1920); the transition must work on both. If the effect is inherently orientation-specific, declare `canvas: 'landscape' | 'portrait'` in the `meta` export (defaults to `'any'`). Spatial position/size parameters in a `params` schema must be canvas fractions 0–1 (multiply by `useVideoConfig()` dims in the component), never pixel values — pixel-scale param ranges trigger an upload warning.
 
 ## Starter Template
 

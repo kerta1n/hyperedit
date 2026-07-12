@@ -17,6 +17,10 @@ export type TransitionParamSchema = Record<string, TransitionParamDef>;
 export interface TransitionMeta {
   name: string;
   description?: string;
+  /** Orientation compatibility. Declare only when the effect is inherently
+   *  orientation-specific (e.g. a corner box tuned for landscape); omit for
+   *  canvas-independent transitions. Defaults to 'any'. */
+  canvas?: 'any' | 'landscape' | 'portrait';
 }
 
 // --- Props passed to every custom transition .tsx component ---

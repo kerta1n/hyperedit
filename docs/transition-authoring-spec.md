@@ -94,6 +94,16 @@ export const meta: TransitionMeta = {
 };
 ```
 
+If the effect is inherently orientation-specific (e.g. a corner box tuned for a landscape frame), declare it — HyperEdit surfaces this when the project canvas doesn't match:
+
+```tsx
+export const meta: TransitionMeta = {
+  name: 'Facecam Corner Box',
+  description: 'Shrinks the from-clip into a corner box',
+  canvas: 'landscape', // 'any' (default) | 'landscape' | 'portrait'
+};
+```
+
 ## The CustomTransitionProps Interface
 
 ```typescript
@@ -139,6 +149,8 @@ const progress = interpolate(frame, [0, durationInFrames - 1], [0, 1], {
 - Use `useVideoConfig()` for `width` and `height` — never hardcode pixel values
 - Wrap everything in `<AbsoluteFill>` for full-viewport coverage
 - Use relative positioning (percentages, viewport fractions) not absolute pixels
+- **Projects render at landscape (1920×1080) or portrait (1080×1920)** — the transition must work on both unless `meta.canvas` declares otherwise
+- **Spatial params are canvas fractions**: any `params` entry describing position or size must be a 0–1 fraction of canvas width/height (`min: 0, max: 1`), multiplied by `useVideoConfig()` dims inside the component. Pixel-valued params (e.g. `max: 1920`) break on other orientations and trigger an upload warning
 
 ## Rendering Media
 
@@ -233,7 +245,7 @@ import { AbsoluteFill, Img, OffthreadVideo, useCurrentFrame, useVideoConfig, int
 interface TransitionParamSchema {
   [key: string]: { type: string; default: any; label: string; options?: string[]; min?: number; max?: number; step?: number };
 }
-interface TransitionMeta { name: string; description?: string; }
+interface TransitionMeta { name: string; description?: string; canvas?: 'any' | 'landscape' | 'portrait'; }
 interface CustomTransitionProps {
   fromSrc?: string; toSrc?: string;
   fromAssetType?: 'video' | 'image'; toAssetType?: 'video' | 'image';
