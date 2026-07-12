@@ -503,6 +503,7 @@ function restoreSessionsFromDisk() {
           duration: savedMeta.duration,
           width: savedMeta.width,
           height: savedMeta.height,
+          fps: savedMeta.fps,
         });
 
         if (savedMeta.aiGenerated) {
@@ -592,6 +593,9 @@ function saveAssetMetadata(session) {
       sceneCount: asset.sceneCount,
       sceneDataPath: asset.sceneDataPath,
       editCount: asset.editCount || 0,
+      // fps the animation was rendered at — scene frame counts are anchored to
+      // it, so edits must re-render at this fps to preserve wall-clock length
+      fps: asset.fps,
     };
   }
 
@@ -661,6 +665,23 @@ function ensureProjectDefaults(project = {}) {
     adTemplate: project.adTemplate || null,
     renderOptions: project.renderOptions || null,
   };
+}
+
+// Composition values (fps/width/height) are owned by the project's settings
+// (spec.settings source of truth). Request-body values remain honored as an
+// explicit override for API callers, but the UI no longer sends them.
+function resolveCompositionSettings(session, body = {}) {
+  const settings = ensureProjectDefaults(session.project).settings;
+  return {
+    fps: body.fps || settings.fps,
+    width: body.width || settings.width,
+    height: body.height || settings.height,
+  };
+}
+
+function orientationOf(width, height) {
+  if (width === height) return 'square';
+  return width > height ? 'landscape' : 'portrait';
 }
 
 function serializeProjectForClient(project = {}) {
@@ -1958,18 +1979,25 @@ async function generateThumbnail(inputPath, outputPath, isImage = false) {
 async function getMediaInfo(inputPath) {
   try {
     const result = execSync(
-      `ffprobe -v error -select_streams v:0 -show_entries stream=width,height,duration -of json "${inputPath}"`,
+      `ffprobe -v error -select_streams v:0 -show_entries stream=width,height,duration,r_frame_rate -of json "${inputPath}"`,
       { encoding: 'utf-8' }
     );
     const info = JSON.parse(result);
     const stream = info.streams?.[0] || {};
+    // r_frame_rate is a rational like "60/1" or "60000/1001"
+    let fps = 0;
+    if (stream.r_frame_rate) {
+      const [num, den] = stream.r_frame_rate.split('/').map(Number);
+      if (num && den) fps = num / den;
+    }
     return {
       width: stream.width || 0,
       height: stream.height || 0,
       duration: parseFloat(stream.duration) || 0,
+      fps,
     };
   } catch {
-    return { width: 0, height: 0, duration: 0 };
+    return { width: 0, height: 0, duration: 0, fps: 0 };
   }
 }
 
@@ -2006,12 +2034,15 @@ async function handleAssetUpload(req, res, sessionId) {
     let duration = 0;
     let width = 0;
     let height = 0;
+    let fps = 0;
 
     if (!isAudio) {
       const info = await getMediaInfo(assetPath);
       duration = info.duration;
       width = info.width;
       height = info.height;
+      // Source frame rate only meaningful for videos (images report a bogus rate)
+      if (type === 'video' && info.fps) fps = Math.round(info.fps);
     } else {
       duration = await getVideoDuration(assetPath);
     }
@@ -2037,6 +2068,7 @@ async function handleAssetUpload(req, res, sessionId) {
       size: stats.size,
       width,
       height,
+      fps: fps || undefined,
       createdAt: Date.now(),
     };
 
@@ -2055,6 +2087,7 @@ async function handleAssetUpload(req, res, sessionId) {
         size: asset.size,
         width: asset.width,
         height: asset.height,
+        fps: asset.fps,
         thumbnailUrl: asset.thumbPath ? `/session/${sessionId}/assets/${assetId}/thumbnail` : null,
       },
     });
@@ -2078,6 +2111,7 @@ function handleAssetList(req, res, sessionId) {
     size: asset.size,
     width: asset.width,
     height: asset.height,
+    fps: asset.fps,
     thumbnailUrl: asset.thumbPath ? `/session/${sessionId}/assets/${asset.id}/thumbnail` : null,
     aiGenerated: asset.aiGenerated || false, // True for Remotion-generated animations
   }));
@@ -4333,7 +4367,8 @@ async function handleRenderMotionGraphic(req, res, sessionId) {
 
   try {
     const body = await parseBody(req);
-    const { templateId, props, duration, fps = 30, width = 1920, height = 1080 } = body;
+    const { templateId, props, duration } = body;
+    const { fps, width, height } = resolveCompositionSettings(session, body);
 
     const jobId = randomUUID();
     const assetId = randomUUID();
@@ -4390,6 +4425,7 @@ async function handleRenderMotionGraphic(req, res, sessionId) {
       size: stats.size,
       width,
       height,
+      fps,
       createdAt: Date.now(),
       // Metadata
       templateId,
@@ -4429,7 +4465,8 @@ async function handleGenerateAnimation(req, res, sessionId) {
 
   try {
     const body = await parseBody(req);
-    const { description, videoAssetId, startTime, endTime, attachedAssetIds, fps = 30, width = 1920, height = 1080, durationSeconds } = body;
+    const { description, videoAssetId, startTime, endTime, attachedAssetIds, durationSeconds } = body;
+    const { fps, width, height } = resolveCompositionSettings(session, body);
 
     if (!description) {
       sendJSON(res, { error: 'description is required' }, 400);
@@ -4583,7 +4620,7 @@ CRITICAL REQUIREMENTS:
    {
      "id": "show-image",
      "type": "media",
-     "duration": 90,
+     "duration": ${3 * fps},
      "content": {
        "title": "Optional title over the image",
        "mediaAssetId": "${attachedAssetInfo[0].id}",
@@ -4608,7 +4645,7 @@ Return ONLY valid JSON (no markdown, no code blocks) with this structure:
     {
       "id": "unique-id",
       "type": "title" | "steps" | "features" | "stats" | "text" | "transition" | "media" | "chart" | "comparison" | "countdown" | "shapes" | "emoji" | "gif" | "lottie",
-      "duration": <number of frames at 30fps, typically 45-90 (1.5-3 seconds per scene). Keep scenes SHORT and punchy!>,
+      "duration": <number of frames at ${fps}fps, typically ${Math.round(1.5 * fps)}-${3 * fps} (1.5-3 seconds per scene). Keep scenes SHORT and punchy!>,
       "content": {
         "title": "optional title text",
         "subtitle": "optional subtitle",
@@ -4621,7 +4658,7 @@ Return ONLY valid JSON (no markdown, no code blocks) with this structure:
         "mediaStyle": "fullscreen" | "framed" | "pip" | "background" | "split-left" | "split-right" | "circle" | "phone-frame",
         // VIDEO CONTROLS (for video assets):
         "videoStartFrom": 0,  // frame to start playing from
-        "videoEndAt": 90,     // frame to stop at (for trimming)
+        "videoEndAt": ${3 * fps},     // frame to stop at (for trimming)
         "videoVolume": 1,     // 0-1
         "videoPlaybackRate": 1, // 0.5 = slow-mo, 2 = fast forward
         "videoLoop": false,
@@ -4668,7 +4705,7 @@ Return ONLY valid JSON (no markdown, no code blocks) with this structure:
         "countFrom": 3, "countTo": 0,
         "camera": {"type": "zoom-in" | "zoom-out" | "pan-left" | "pan-right" | "ken-burns" | "shake", "intensity": 0.3}
       },
-      "transition": {"type": "swipe-left" | "swipe-right" | "swipe-up" | "swipe-down" | "fade" | "zoom-in" | "zoom-out" | "wipe-left" | "wipe-right" | "blur" | "flip", "duration": 15}
+      "transition": {"type": "swipe-left" | "swipe-right" | "swipe-up" | "swipe-down" | "fade" | "zoom-in" | "zoom-out" | "wipe-left" | "wipe-right" | "blur" | "flip", "duration": ${Math.round(fps / 2)}}
     }
   ],
   "backgroundColor": "#0a0a0a",
@@ -4736,13 +4773,14 @@ Scene transitions (add to scene to animate entry/exit):
 - "wipe-left" / "wipe-right": Reveal effect (like a curtain)
 - "blur": Blur transition (dreamy effect)
 - "flip": 3D flip effect (dramatic)
-- "duration": frames for transition (default 15, use 20-30 for dramatic)
+- "duration": frames for transition (default ${Math.round(fps / 2)}, use ${Math.round(2 * fps / 3)}-${fps} for dramatic)
 
 Guidelines:
-- Use MORE scenes with SHORTER durations (1.5-3 seconds each, 45-90 frames). Fast cuts feel dynamic and engaging!
+- Canvas: ${width}x${height} (${orientationOf(width, height)}) — compose all layouts for this orientation
+- Use MORE scenes with SHORTER durations (1.5-3 seconds each, ${Math.round(1.5 * fps)}-${3 * fps} frames). Fast cuts feel dynamic and engaging!
 - For a 5s animation use 3-4 scenes, for 10s use 5-7 scenes, for 15s use 7-10 scenes, for 30s use 12-18 scenes. Scale up proportionally.
-- NO scene should exceed 120 frames (4 seconds) unless it's a countdown or media showcase.
-- Total duration: ${durationSeconds ? `EXACTLY ${durationSeconds} seconds (${Math.round(durationSeconds * fps)} frames) - the user specifically requested this duration!` : '5-15 seconds (150-450 frames)'}
+- NO scene should exceed ${4 * fps} frames (4 seconds) unless it's a countdown or media showcase.
+- Total duration: ${durationSeconds ? `EXACTLY ${durationSeconds} seconds (${Math.round(durationSeconds * fps)} frames) - the user specifically requested this duration!` : `5-15 seconds (${5 * fps}-${15 * fps} frames)`}
 - Use vibrant colors: #f97316 (orange), #3b82f6 (blue), #22c55e (green), #8b5cf6 (purple), #ec4899 (pink)
 - Make it visually engaging with good pacing
 
@@ -4812,6 +4850,9 @@ ${attachedAssetIds?.length ? `- IMPORTANT: Include media scenes to showcase the 
 
     const durationInSeconds = totalDuration / fps;
 
+    // Annotate the fps the scene frame counts are anchored to (edits re-render at it)
+    sceneData.fps = fps;
+
     // Inject actual asset file paths for attached media (use absolute file paths for Remotion CLI)
     if (attachedAssetPaths.length > 0) {
       sceneData.attachedAssets = attachedAssetPaths;
@@ -4855,7 +4896,7 @@ ${attachedAssetIds?.length ? `- IMPORTANT: Include media scenes to showcase the 
         const mediaScene = {
           id: `media-${firstAsset.id}`,
           type: 'media',
-          duration: 90, // 3 seconds at 30fps
+          duration: 3 * fps, // 3 seconds
           content: {
             title: firstAsset.filename.replace(/\.[^/.]+$/, ''), // filename without extension
             mediaAssetId: firstAsset.id,
@@ -5025,6 +5066,7 @@ ${attachedAssetIds?.length ? `- IMPORTANT: Include media scenes to showcase the 
         size: stats.size,
         width,
         height,
+        fps,
         createdAt: Date.now(),
         // Metadata for AI animations
         aiGenerated: true,
@@ -5072,7 +5114,7 @@ async function handleEditAnimation(req, res, sessionId) {
 
   try {
     const body = await parseBody(req);
-    const { assetId, editPrompt, assets: availableAssets, v1Context, fps = 30, width = 1920, height = 1080 } = body;
+    const { assetId, editPrompt, assets: availableAssets, v1Context } = body;
 
     if (!assetId || !editPrompt) {
       sendJSON(res, { error: 'assetId and editPrompt are required' }, 400);
@@ -5101,6 +5143,13 @@ async function handleEditAnimation(req, res, sessionId) {
       sendJSON(res, { error: 'Original scene data not found - cannot edit this animation' }, 400);
       return;
     }
+
+    // Re-render at the fps/dimensions the animation was authored with — scene
+    // frame counts are fps-anchored, so a different fps rescales the animation's
+    // wall-clock length. Legacy animations (no stored fps) were all rendered at 30.
+    const fps = originalAsset.fps || originalSceneData.fps || 30;
+    const width = originalAsset.width || 1920;
+    const height = originalAsset.height || 1080;
 
     const jobId = randomUUID();
     // IMPORTANT: Reuse the same asset ID to replace in-place (no asset creep)
@@ -5207,6 +5256,7 @@ To include an asset in a scene, use:
 
 ## YOUR TASK
 Make ONLY the change the user requested. Do NOT change anything else.
+Canvas: ${width}x${height} (${orientationOf(width, height)}) — any new scenes must suit this orientation.
 
 ## EXISTING ANIMATION (copy this exactly, then apply ONLY the requested change):
 ${JSON.stringify(originalSceneData, null, 2)}
@@ -5227,7 +5277,7 @@ Scene types and their content properties:
 To add emojis or icons, use scene types that support "items" array:
 {
   "type": "features",
-  "duration": 90,
+  "duration": ${3 * fps},
   "content": {
     "title": "Optional heading",
     "items": [
@@ -5241,7 +5291,7 @@ To add emojis or icons, use scene types that support "items" array:
 To add a SINGLE large emoji/icon, use a "title" scene with the emoji IN the title:
 {
   "type": "title",
-  "duration": 60,
+  "duration": ${2 * fps},
   "content": {
     "title": "💯",
     "subtitle": "Perfect Score"
@@ -5263,7 +5313,7 @@ EXAMPLE - Complete scene with camera movement:
 {
   "id": "intro-scene",
   "type": "title",
-  "duration": 90,
+  "duration": ${3 * fps},
   "content": {
     "title": "Welcome",
     "subtitle": "Let's get started",
@@ -5340,6 +5390,9 @@ Return ONLY the complete JSON structure with your minimal change applied. No mar
     const totalDuration = newSceneData.totalDuration || newSceneData.scenes.reduce((sum, s) => sum + s.duration, 0);
     const durationInSeconds = totalDuration / fps;
 
+    // Preserve the fps anchor across edits (the LLM response won't carry it)
+    newSceneData.fps = fps;
+
     // Store scene data for future editing (overwrite existing)
     writeJsonAtomic(existingSceneDataPath, newSceneData);
 
@@ -5384,6 +5437,7 @@ Return ONLY the complete JSON structure with your minimal change applied. No mar
       originalAsset.sceneCount = newSceneData.scenes.length;
       originalAsset.sceneDataPath = existingSceneDataPath;
       originalAsset.sceneData = newSceneData;
+      originalAsset.fps = fps;
       originalAsset.lastEditedAt = Date.now();
       originalAsset.lastEditPrompt = editPrompt;
       originalAsset.editCount = (originalAsset.editCount || 0) + 1;
@@ -5700,12 +5754,18 @@ Return ONLY the enhanced prompt text. No explanations, no quotes, no markdown.`;
     const mimeType = imageAsset.filename.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
     const uploadedImageUrl = await falUpload(imageAsset.path, mimeType, jobId);
 
-    console.log(`[${jobId}] Calling video-gen provider...`);
+    // Match the project's canvas orientation so generated video fits the composition
+    const genSettings = ensureProjectDefaults(session.project).settings;
+    const genAspect = genSettings.width === genSettings.height
+      ? '1:1'
+      : (genSettings.width > genSettings.height ? '16:9' : '9:16');
+
+    console.log(`[${jobId}] Calling video-gen provider (${genAspect})...`);
     const falResult = await callFal('fal-ai/kling-video/v1.5/pro/image-to-video', {
       prompt: enhancedPrompt,
       image_url: uploadedImageUrl,
       duration: duration === 10 ? '10' : '5',
-      aspect_ratio: '16:9',
+      aspect_ratio: genAspect,
     }, jobId);
 
     console.log(`[${jobId}] Video generation complete!`);
@@ -6085,7 +6145,8 @@ async function handleGenerateBatchAnimations(req, res, sessionId) {
 
   try {
     const body = await parseBody(req);
-    const { count = 5, fps = 30, width = 1920, height = 1080 } = body;
+    const { count = 5 } = body;
+    const { fps, width, height } = resolveCompositionSettings(session, body);
 
     const jobId = sessionId.substring(0, 8);
     console.log(`\n[${jobId}] === GENERATE BATCH ANIMATIONS ===`);
@@ -6193,6 +6254,7 @@ TITLE: ${plan.title}
 DESCRIPTION: ${plan.description}
 CONTEXT: ${plan.relevantContent}
 DURATION: ${plan.duration} seconds (${plan.duration * fps} frames)
+CANVAS: ${width}x${height} (${orientationOf(width, height)}) — compose layouts for this orientation
 
 Generate a scene-based animation. Return ONLY valid JSON:
 {
@@ -6246,7 +6308,8 @@ Make it visually engaging with good color choices. Use 2-4 scenes for variety.`;
         };
       }
 
-      // Save scene data
+      // Save scene data (fps-annotated so edits re-render at the authoring fps)
+      sceneData.fps = fps;
       writeJsonAtomic(sceneDataPath, sceneData);
       writeFileSync(propsPath, JSON.stringify(sceneData, null, 2));
 
@@ -6292,6 +6355,7 @@ Make it visually engaging with good color choices. Use 2-4 scenes for variety.`;
         size: stats.size,
         width,
         height,
+        fps,
         createdAt: Date.now(),
         aiGenerated: true,
         sceneData,
@@ -6345,6 +6409,7 @@ async function handleAnalyzeForAnimation(req, res, sessionId) {
   try {
     const body = await parseBody(req);
     const { assetId, type = 'intro', description, startTime, endTime } = body;
+    const { fps, width, height } = resolveCompositionSettings(session, body);
 
     // Debug: log received time range values
     console.log(`[DEBUG] Received analyze request - startTime: ${startTime} (${typeof startTime}), endTime: ${endTime} (${typeof endTime})`);
@@ -6474,26 +6539,26 @@ The intro should:
 - Start with an attention-grabbing title or hook
 - Tease what viewers will learn/see
 - Build excitement for the content
-- Be 4-8 seconds (120-240 frames at 30fps)`,
+- Be 4-8 seconds (${4 * fps}-${8 * fps} frames at ${fps}fps)`,
 
       outro: `Create a compelling OUTRO animation that wraps up the video.
 The outro should:
 - Summarize key takeaways
 - Include a call-to-action (subscribe, like, etc.)
 - Thank viewers
-- Be 5-10 seconds (150-300 frames at 30fps)`,
+- Be 5-10 seconds (${5 * fps}-${10 * fps} frames at ${fps}fps)`,
 
       transition: `Create a smooth TRANSITION animation between sections.
 The transition should:
 - Be brief and visually interesting
 - Match the video's tone
-- Be 2-4 seconds (60-120 frames at 30fps)`,
+- Be 2-4 seconds (${2 * fps}-${4 * fps} frames at ${fps}fps)`,
 
       highlight: `Create a HIGHLIGHT animation that emphasizes a key moment.
 The highlight should:
 - Draw attention to an important point
 - Use dynamic motion and colors
-- Be 3-6 seconds (90-180 frames at 30fps)`,
+- Be 3-6 seconds (${3 * fps}-${6 * fps} frames at ${fps}fps)`,
     };
 
     // Build time context for the prompt
@@ -6511,13 +6576,15 @@ ${description ? `USER HINT: "${description}"` : ''}
 
 ${typePrompts[type] || typePrompts.intro}
 
+CANVAS: ${width}x${height} (${orientationOf(width, height)}) — compose all layouts for this orientation.
+
 Based on the video content above, return ONLY valid JSON (no markdown) with this structure:
 {
   "scenes": [
     {
       "id": "unique-id",
       "type": "title" | "steps" | "features" | "stats" | "text" | "transition" | "gif" | "emoji",
-      "duration": <frames at 30fps>,
+      "duration": <frames at ${fps}fps>,
       "content": {
         "title": "text derived from video content",
         "subtitle": "optional",
@@ -6598,7 +6665,7 @@ Feel free to add a GIF scene for reactions or emphasis when appropriate!`;
     }
 
     const animationTotalDuration = sceneData.totalDuration || sceneData.scenes.reduce((sum, s) => sum + s.duration, 0);
-    const durationInSeconds = animationTotalDuration / 30; // 30 fps
+    const durationInSeconds = animationTotalDuration / fps;
 
     console.log(`[${jobId}] Analysis complete: ${sceneData.scenes.length} scenes, ${durationInSeconds}s total`);
     console.log(`[${jobId}] === ANALYSIS COMPLETE (awaiting approval) ===\n`);
@@ -6608,6 +6675,9 @@ Feel free to add a GIF scene for reactions or emphasis when appropriate!`;
       success: true,
       concept: {
         type,
+        // fps the scene frame counts were authored for; render-from-concept
+        // must render at this fps or the approved duration won't hold
+        fps,
         transcript: transcription.text,
         transcriptPreview: transcription.text.substring(0, 500) + (transcription.text.length > 500 ? '...' : ''),
         contentSummary: sceneData.contentSummary,
@@ -6637,12 +6707,17 @@ async function handleRenderFromConcept(req, res, sessionId) {
 
   try {
     const body = await parseBody(req);
-    const { concept, fps = 30, width = 1920, height = 1080 } = body;
+    const { concept } = body;
 
     if (!concept || !concept.scenes || concept.scenes.length === 0) {
       sendJSON(res, { error: 'concept with scenes is required' }, 400);
       return;
     }
+
+    const { width, height, fps: projectFps } = resolveCompositionSettings(session, body);
+    // Scene frame counts were authored at the fps embedded in the concept at
+    // analyze time; render at that fps so the approved duration holds.
+    const fps = concept.fps || projectFps;
 
     const jobId = randomUUID();
     const assetId = randomUUID();
@@ -6659,6 +6734,7 @@ async function handleRenderFromConcept(req, res, sessionId) {
       totalDuration: concept.totalDuration,
       contentSummary: concept.contentSummary,
       keyTopics: concept.keyTopics,
+      fps,
     };
 
     // Post-process GIF scenes - search GIPHY for any unresolved gif searches
@@ -6752,6 +6828,7 @@ async function handleRenderFromConcept(req, res, sessionId) {
       size: stats.size,
       width,
       height,
+      fps,
       createdAt: Date.now(),
       aiGenerated: true,
       contextual: true,
@@ -6799,7 +6876,7 @@ async function handleGenerateTranscriptAnimation(req, res, sessionId) {
 
   try {
     const body = await parseBody(req);
-    const { fps = 30, width = 1920, height = 1080 } = body;
+    const { fps, width, height } = resolveCompositionSettings(session, body);
 
     // Find the first video asset
     let videoAsset = null;
@@ -6949,7 +7026,7 @@ Pick phrases that are spread throughout the video. Each phrase should be 2-6 wor
     // Step 3: Generate Remotion scenes for each phrase
     console.log(`[${jobId}] Step 3: Generating animation scenes...`);
     const scenes = keyPhrases.map((phrase, index) => {
-      const duration = Math.max(60, Math.round((phrase.endTime - phrase.startTime + 1) * fps)); // At least 2 seconds
+      const duration = Math.max(2 * fps, Math.round((phrase.endTime - phrase.startTime + 1) * fps)); // At least 2 seconds
 
       // Map emphasis to visual style
       const colors = {
@@ -6992,6 +7069,7 @@ Pick phrases that are spread throughout the video. Each phrase should be 2-6 wor
       totalDuration: animationTotalDuration,
       contentSummary: `Kinetic typography animation from transcript: "${transcription.text.substring(0, 100)}..."`,
       keyTopics: keyPhrases.map(p => p.phrase),
+      fps,
     };
 
     // Save scene data for future editing (persistent path based on asset ID)
@@ -7033,6 +7111,7 @@ Pick phrases that are spread throughout the video. Each phrase should be 2-6 wor
       size: stats.size,
       width,
       height,
+      fps,
       createdAt: Date.now(),
       aiGenerated: true,
       transcriptAnimation: true,
@@ -7079,7 +7158,8 @@ async function handleGenerateContextualAnimation(req, res, sessionId) {
 
   try {
     const body = await parseBody(req);
-    const { assetId, type = 'intro', description, fps = 30, width = 1920, height = 1080 } = body;
+    const { assetId, type = 'intro', description } = body;
+    const { fps, width, height } = resolveCompositionSettings(session, body);
 
     // Get the video asset to analyze
     let videoAsset;
@@ -7195,26 +7275,26 @@ The intro should:
 - Start with an attention-grabbing title or hook
 - Tease what viewers will learn/see
 - Build excitement for the content
-- Be 4-8 seconds (120-240 frames at 30fps)`,
+- Be 4-8 seconds (${4 * fps}-${8 * fps} frames at ${fps}fps)`,
 
       outro: `Create a compelling OUTRO animation that wraps up the video.
 The outro should:
 - Summarize key takeaways
 - Include a call-to-action (subscribe, like, etc.)
 - Thank viewers
-- Be 5-10 seconds (150-300 frames at 30fps)`,
+- Be 5-10 seconds (${5 * fps}-${10 * fps} frames at ${fps}fps)`,
 
       transition: `Create a smooth TRANSITION animation between sections.
 The transition should:
 - Be brief and visually interesting
 - Match the video's tone
-- Be 2-4 seconds (60-120 frames at 30fps)`,
+- Be 2-4 seconds (${2 * fps}-${4 * fps} frames at ${fps}fps)`,
 
       highlight: `Create a HIGHLIGHT animation that emphasizes a key moment.
 The highlight should:
 - Draw attention to an important point
 - Use dynamic motion and colors
-- Be 3-6 seconds (90-180 frames at 30fps)`,
+- Be 3-6 seconds (${3 * fps}-${6 * fps} frames at ${fps}fps)`,
     };
 
     const scenePrompt = `You are a motion graphics designer. Analyze this video transcript and create a contextual ${type} animation.
@@ -7226,13 +7306,15 @@ ${description ? `USER HINT: "${description}"` : ''}
 
 ${typePrompts[type] || typePrompts.intro}
 
+CANVAS: ${width}x${height} (${orientationOf(width, height)}) — compose all layouts for this orientation.
+
 Based on the video content above, return ONLY valid JSON (no markdown) with this structure:
 {
   "scenes": [
     {
       "id": "unique-id",
       "type": "title" | "steps" | "features" | "stats" | "text" | "transition",
-      "duration": <frames at 30fps>,
+      "duration": <frames at ${fps}fps>,
       "content": {
         "title": "text derived from video content",
         "subtitle": "optional",
@@ -7273,6 +7355,9 @@ Use specific terms, concepts, and themes from the transcript.`;
 
     const animationTotalDuration = sceneData.totalDuration || sceneData.scenes.reduce((sum, s) => sum + s.duration, 0);
     const durationInSeconds = animationTotalDuration / fps;
+
+    // Annotate the fps the scene frame counts are anchored to (edits re-render at it)
+    sceneData.fps = fps;
 
     // Save scene data for future editing (persistent path based on asset ID)
     const sceneDataPath = join(session.dir, `${outputAssetId}-scenes.json`);
@@ -7317,6 +7402,7 @@ Use specific terms, concepts, and themes from the transcript.`;
       size: stats.size,
       width,
       height,
+      fps,
       createdAt: Date.now(),
       // Metadata
       aiGenerated: true,
@@ -7812,6 +7898,11 @@ function validateTransitionCode(code) {
     && !code.includes('startFrom') && !code.includes('fromStartFrom')) {
     warnings.push('Transition renders video but does not use fromStartFrom/toStartFrom — video clips may start from frame 0 instead of the correct position. See the transition authoring spec.');
   }
+  // Spatial params must be canvas fractions, not pixels — px-scale ranges break on other orientations
+  const paramsSchemaMatch = code.match(/export\s+(?:const|let|var)\s+params\s*(?::\s*\w+)?\s*=\s*(\{[\s\S]*?\});/);
+  if (paramsSchemaMatch && /max\s*:\s*\d{4,}/.test(paramsSchemaMatch[1])) {
+    warnings.push('A number param has a pixel-scale max (1000+) — spatial params should be canvas fractions (0-1) multiplied by useVideoConfig() width/height so the transition works on any orientation. See the transition authoring spec.');
+  }
   return { valid: errors.length === 0, errors, warnings, exportInfo };
 }
 
@@ -7941,10 +8032,10 @@ async function handleListTransitions(req, res, sessionId) {
 
   // Built-in transitions as flat list entries
   const builtInEntries = [
-    { id: 'builtin-crossfade', name: 'Crossfade', description: 'Simple opacity crossfade between two clips', source: 'builtin', params: {} },
-    { id: 'builtin-slide-left', name: 'Slide Left', description: 'From clip slides left, to clip slides in from right', source: 'builtin', params: {} },
-    { id: 'builtin-slide-right', name: 'Slide Right', description: 'From clip slides right, to clip slides in from left', source: 'builtin', params: {} },
-    { id: 'builtin-dip-to-black', name: 'Dip to Black', description: 'Dip through black between clips', source: 'builtin', params: {} },
+    { id: 'builtin-crossfade', name: 'Crossfade', description: 'Simple opacity crossfade between two clips', canvas: 'any', source: 'builtin', params: {} },
+    { id: 'builtin-slide-left', name: 'Slide Left', description: 'From clip slides left, to clip slides in from right', canvas: 'any', source: 'builtin', params: {} },
+    { id: 'builtin-slide-right', name: 'Slide Right', description: 'From clip slides right, to clip slides in from left', canvas: 'any', source: 'builtin', params: {} },
+    { id: 'builtin-dip-to-black', name: 'Dip to Black', description: 'Dip through black between clips', canvas: 'any', source: 'builtin', params: {} },
   ];
 
   const customEntries = [];
@@ -7961,6 +8052,8 @@ async function handleListTransitions(req, res, sessionId) {
         id,
         name: extractedMeta?.name || sessionMeta?.name || id,
         description: extractedMeta?.description || null,
+        // Orientation compatibility declared by the transition author ('any' when unspecified)
+        canvas: extractedMeta?.canvas || 'any',
         source: 'custom',
         filename: file,
         params: extractedParams || {},
@@ -7986,7 +8079,8 @@ function extractTransitionMeta(code) {
     const block = metaMatch[1];
     const nameMatch = block.match(/name\s*:\s*['"]([^'"]+)['"]/);
     const descMatch = block.match(/description\s*:\s*['"]([^'"]+)['"]/);
-    return { name: nameMatch?.[1] || null, description: descMatch?.[1] || null };
+    const canvasMatch = block.match(/canvas\s*:\s*['"](any|landscape|portrait)['"]/);
+    return { name: nameMatch?.[1] || null, description: descMatch?.[1] || null, canvas: canvasMatch?.[1] || 'any' };
   } catch { return null; }
 }
 
@@ -8046,6 +8140,9 @@ RULES:
 - Export the component as either "export default" or a named export.
 - The component receives optional props: { fromSrc?: string, toSrc?: string, fromAssetType?: 'video' | 'image', toAssetType?: 'video' | 'image' }
 - But it can ignore all props and just use useCurrentFrame() directly.
+- CANVAS INDEPENDENCE: never hardcode pixel dimensions — read width/height from useVideoConfig(). The transition must render correctly on landscape (e.g. 1920x1080) AND portrait (e.g. 1080x1920) canvases.
+- If you export a "params" schema, spatial position/size params MUST be canvas fractions 0-1 (the component multiplies by useVideoConfig() width/height) — never pixel values.
+- If the effect is inherently orientation-specific, declare it in the meta export: canvas: 'landscape' | 'portrait'. Otherwise omit (defaults to 'any').
 
 Return ONLY the .tsx code, no explanation.`;
 
