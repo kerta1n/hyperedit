@@ -200,6 +200,8 @@ const BUILT_IN_PRESETS: Preset[] = [
 
 interface RenderSettingsModalProps {
   renderOptions: RenderOptions;
+  // Composition settings — seed resolution/fps defaults until the user customizes
+  projectSettings: { width: number; height: number; fps: number };
   onClose: () => void;
   onExport: (options: RenderOptions) => void;
   onUpdateOptions: (options: RenderOptions) => void;
@@ -210,6 +212,7 @@ interface RenderSettingsModalProps {
 
 export default function RenderSettingsModal({
   renderOptions,
+  projectSettings,
   onClose,
   onExport,
   onUpdateOptions,
@@ -268,13 +271,22 @@ export default function RenderSettingsModal({
   // Apply a preset
   const applyPreset = useCallback((presetId: string) => {
     if (presetId === 'custom') {
-      setOpts({ ...defaultRenderOptions, presetId: 'custom' });
+      // True reset: back to defaults with resolution/fps re-seeded from the project
+      setOpts({
+        ...defaultRenderOptions,
+        presetId: 'custom',
+        outputWidth: projectSettings.width,
+        outputHeight: projectSettings.height,
+        outputFps: projectSettings.fps,
+        outputCustomized: false,
+      });
       return;
     }
     const preset = BUILT_IN_PRESETS.find(p => p.id === presetId);
     if (!preset) return;
-    setOpts({ ...defaultRenderOptions, ...preset.options, presetId: preset.id });
-  }, []);
+    // Picking a preset is an explicit resolution/fps decision
+    setOpts({ ...defaultRenderOptions, ...preset.options, presetId: preset.id, outputCustomized: true });
+  }, [projectSettings]);
 
   // Available audio codecs for current video codec
   const audioOptions = useMemo(() => CODEC_AUDIO_MAP[opts.codec], [opts.codec]);
@@ -321,7 +333,7 @@ export default function RenderSettingsModal({
       setCustomResolution(true);
     } else {
       setCustomResolution(false);
-      update({ outputWidth: preset.w, outputHeight: preset.h });
+      update({ outputWidth: preset.w, outputHeight: preset.h, outputCustomized: true });
     }
   }, [update]);
 
@@ -406,9 +418,9 @@ export default function RenderSettingsModal({
               />
               {customResolution && (
                 <div className="flex items-center gap-2 mt-1">
-                  <NumberInput value={opts.outputWidth} min={16} max={7680} onChange={v => update({ outputWidth: v })} suffix="px" />
+                  <NumberInput value={opts.outputWidth} min={16} max={7680} onChange={v => update({ outputWidth: v, outputCustomized: true })} suffix="px" />
                   <span className="text-zinc-500 text-xs">×</span>
-                  <NumberInput value={opts.outputHeight} min={16} max={4320} onChange={v => update({ outputHeight: v })} suffix="px" />
+                  <NumberInput value={opts.outputHeight} min={16} max={4320} onChange={v => update({ outputHeight: v, outputCustomized: true })} suffix="px" />
                 </div>
               )}
             </Field>
@@ -420,7 +432,7 @@ export default function RenderSettingsModal({
                   value={String(opts.outputFps)}
                   options={FPS_OPTIONS.map(String)}
                   labels={FPS_OPTIONS.map(f => `${f} fps`)}
-                  onChange={v => update({ outputFps: Number(v) })}
+                  onChange={v => update({ outputFps: Number(v), outputCustomized: true })}
                 />
               </Field>
               <Field label="Container">

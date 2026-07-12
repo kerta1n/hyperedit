@@ -23,6 +23,8 @@ import {
 
 interface MotionGraphicsPanelProps {
   onAddToTimeline?: (templateId: TemplateId, props: Record<string, unknown>, duration: number) => void;
+  // Composition settings so the Player preview matches what the server renders
+  projectSettings?: { width: number; height: number; fps: number };
 }
 
 const templateIcons: Record<TemplateId, React.ComponentType<{ className?: string }>> = {
@@ -53,7 +55,7 @@ const componentMap: Record<TemplateId, React.ComponentType<Record<string, unknow
   'data-chart': DataChart as unknown as React.ComponentType<Record<string, unknown>>,
 };
 
-export default function MotionGraphicsPanel({ onAddToTimeline }: MotionGraphicsPanelProps) {
+export default function MotionGraphicsPanel({ onAddToTimeline, projectSettings }: MotionGraphicsPanelProps) {
   const [selectedTemplate, setSelectedTemplate] = useState<TemplateId | null>(null);
   const [templateProps, setTemplateProps] = useState<Record<string, unknown>>({});
   const [duration, setDuration] = useState(3);
@@ -86,8 +88,10 @@ export default function MotionGraphicsPanel({ onAddToTimeline }: MotionGraphicsP
   const renderPreview = () => {
     if (!selectedTemplate) return null;
 
-    const fps = 30;
-    const durationInFrames = duration * fps;
+    const fps = projectSettings?.fps || 30;
+    const width = projectSettings?.width || 1920;
+    const height = projectSettings?.height || 1080;
+    const durationInFrames = Math.round(duration * fps);
     const Component = componentMap[selectedTemplate];
     if (!Component) return null;
 
@@ -98,11 +102,11 @@ export default function MotionGraphicsPanel({ onAddToTimeline }: MotionGraphicsP
         inputProps={templateProps}
         durationInFrames={durationInFrames}
         fps={fps}
-        compositionWidth={1920}
-        compositionHeight={1080}
+        compositionWidth={width}
+        compositionHeight={height}
         style={{
           width: '100%',
-          aspectRatio: '16/9',
+          aspectRatio: `${width}/${height}`,
           borderRadius: 8,
           overflow: 'hidden',
           backgroundColor: '#18181b',

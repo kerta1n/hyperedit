@@ -102,6 +102,7 @@ export default function Home() {
     updateTabClips,
     updateTabAsset,
     // Settings
+    settings,
     setSettings,
     setStatus,
     // Render options
@@ -425,18 +426,26 @@ export default function Home() {
       try {
         const newAsset = await uploadAsset(file);
 
-        // Auto-detect aspect ratio from video dimensions
-        if (newAsset && newAsset.type === 'video' && newAsset.width && newAsset.height) {
+        // Auto-determine project settings from the uploaded video: orientation
+        // maps to the canonical HD pair, fps comes from the source probe.
+        // aspectRatio derives from settings via the sync effect below.
+        // Only while the timeline is unshaped — once clips are placed, a b-roll
+        // upload must not silently flip the whole project's canvas/fps.
+        if (clips.length === 0 && newAsset && newAsset.type === 'video' && newAsset.width && newAsset.height) {
           const isPortrait = newAsset.height > newAsset.width;
-          setAspectRatio(isPortrait ? '9:16' : '16:9');
-          console.log(`Auto-detected aspect ratio: ${isPortrait ? '9:16 (portrait)' : '16:9 (landscape)'} from ${newAsset.width}x${newAsset.height}`);
+          setSettings(s => ({
+            width: isPortrait ? 1080 : 1920,
+            height: isPortrait ? 1920 : 1080,
+            fps: newAsset.fps || s.fps,
+          }));
+          console.log(`Auto-detected project settings: ${isPortrait ? '9:16 (portrait)' : '16:9 (landscape)'} from ${newAsset.width}x${newAsset.height}${newAsset.fps ? ` @ ${newAsset.fps}fps` : ''}`);
         }
       } catch (error) {
         console.error('Upload failed:', error);
         alert(`Upload failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
     }
-  }, [uploadAsset]);
+  }, [uploadAsset, setSettings, clips.length]);
 
   // Handle GIF added from search panel
   const handleGifAdded = useCallback(async () => {
@@ -619,6 +628,24 @@ export default function Home() {
 
     saveProject();
   }, [currentTime, addCaptionClip, activeTabId, timelineTabs, updateTabClips, saveProject]);
+
+  // Keep the preview aspect toggle in sync with project settings — aspectRatio
+  // isn't persisted, so loading a portrait project would otherwise leave the
+  // preview in 16:9 while the settings (and renders) are 9:16
+  useEffect(() => {
+    setAspectRatio(settings.height > settings.width ? '9:16' : '16:9');
+  }, [settings.width, settings.height]);
+
+  // Project settings seed the render dialog's resolution/fps until the user
+  // explicitly customizes them there — the dialog keeps the final say
+  useEffect(() => {
+    setRenderOptions(prev => prev.outputCustomized ? prev : ({
+      ...prev,
+      outputWidth: settings.width,
+      outputHeight: settings.height,
+      outputFps: settings.fps,
+    }));
+  }, [settings.width, settings.height, settings.fps, renderOptions.outputCustomized, setRenderOptions]);
 
   // Handle toggling aspect ratio
   const handleToggleAspectRatio = useCallback(() => {
@@ -1341,6 +1368,9 @@ export default function Home() {
     }
 
     try {
+      // Persist settings first — the server resolves fps/width/height from the saved project
+      await saveProjectImmediate();
+
       // Call the server to render the motion graphic
       const response = await fetch(`http://localhost:3333/session/${session.sessionId}/render-motion-graphic`, {
         method: 'POST',
@@ -1349,9 +1379,6 @@ export default function Home() {
           templateId: config.templateId,
           props: config.props,
           duration: config.duration,
-          fps: 30,
-          width: 1920,
-          height: 1080,
         }),
       });
 
@@ -1378,7 +1405,7 @@ export default function Home() {
       console.error('Failed to add motion graphic:', error);
       throw error; // Re-throw so AIPromptPanel can show error
     }
-  }, [session, currentTime, addClip, saveProject, refreshAssets, switchTimelineTab]);
+  }, [session, currentTime, addClip, saveProject, saveProjectImmediate, refreshAssets, switchTimelineTab]);
 
   // Handle custom AI-generated animation creation
   const handleCreateCustomAnimation = useCallback(async (description: string, startTime?: number, endTime?: number, attachedAssetIds?: string[], durationSeconds?: number) => {
@@ -1408,6 +1435,9 @@ export default function Home() {
 
       console.log(`[Animation] Creating with video context: ${videoAssetId || 'none'}, time range: ${startTime !== undefined ? `${startTime}s` : 'auto'}${endTime !== undefined ? ` - ${endTime}s` : ''}${attachedAssetIds?.length ? `, attached assets: ${attachedAssetIds.length}` : ''}${durationSeconds ? `, duration: ${durationSeconds}s` : ''}`);
 
+      // Persist settings first — the server resolves fps/width/height from the saved project
+      await saveProjectImmediate();
+
       // Call the server to generate AI animation with video context
       const response = await fetch(`http://localhost:3333/session/${session.sessionId}/generate-animation`, {
         method: 'POST',
@@ -1419,9 +1449,6 @@ export default function Home() {
           endTime,      // Optional: specific time range
           attachedAssetIds, // Optional: images/videos to include in animation
           durationSeconds, // Optional: user-specified duration
-          fps: 30,
-          width: 1920,
-          height: 1080,
         }),
       });
 
@@ -1484,7 +1511,7 @@ export default function Home() {
       console.error('Failed to create custom animation:', error);
       throw error;
     }
-  }, [session, currentTime, addClip, saveProject, refreshAssets, getDuration, switchTimelineTab, clips, assets, setStatus]);
+  }, [session, currentTime, addClip, saveProject, saveProjectImmediate, refreshAssets, getDuration, switchTimelineTab, clips, assets, setStatus]);
 
   // Handle analyzing video for animation (returns concept for approval)
   const handleAnalyzeForAnimation = useCallback(async (request: {
@@ -1503,6 +1530,9 @@ export default function Home() {
 
     // Debug: log the time range being sent to server
     console.log('[DEBUG] Sending analyze-for-animation with timeRange:', JSON.stringify(request.timeRange));
+
+    // Persist settings first — the server authors scene frame counts at the project fps
+    await saveProjectImmediate();
 
     const response = await fetch(`http://localhost:3333/session/${session.sessionId}/analyze-for-animation`, {
       method: 'POST',
@@ -1523,11 +1553,12 @@ export default function Home() {
     }
 
     return await response.json();
-  }, [session, assets]);
+  }, [session, assets, saveProjectImmediate]);
 
   // Handle rendering from pre-approved concept (skips analysis, uses provided scenes)
   const handleRenderFromConcept = useCallback(async (concept: {
     type: 'intro' | 'outro' | 'transition' | 'highlight';
+    fps?: number; // fps the scene frame counts were authored at (render honors it)
     scenes: Array<{
       id: string;
       type: string;
@@ -1544,14 +1575,15 @@ export default function Home() {
       throw new Error('Please upload a video first to start a session');
     }
 
+    // Persist settings first — the server resolves width/height from the saved project
+    // (fps comes from the concept, which embeds the fps its scenes were authored at)
+    await saveProjectImmediate();
+
     const response = await fetch(`http://localhost:3333/session/${session.sessionId}/render-from-concept`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         concept,
-        fps: 30,
-        width: 1920,
-        height: 1080,
       }),
     });
 
@@ -1599,7 +1631,7 @@ export default function Home() {
       assetId: data.assetId,
       duration: data.duration,
     };
-  }, [session, currentTime, refreshAssets, addClip, saveProject, getDuration, switchTimelineTab]);
+  }, [session, currentTime, refreshAssets, addClip, saveProject, saveProjectImmediate, getDuration, switchTimelineTab]);
 
   // Handle generating transcript animation (kinetic typography from speech)
   const handleGenerateTranscriptAnimation = useCallback(async () => {
@@ -1607,14 +1639,13 @@ export default function Home() {
       throw new Error('Please upload a video first to start a session');
     }
 
+    // Persist settings first — the server resolves fps/width/height from the saved project
+    await saveProjectImmediate();
+
     const response = await fetch(`http://localhost:3333/session/${session.sessionId}/generate-transcript-animation`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        fps: 30,
-        width: 1920,
-        height: 1080,
-      }),
+      body: JSON.stringify({}),
     });
 
     if (!response.ok) {
@@ -1638,7 +1669,7 @@ export default function Home() {
       assetId: data.assetId,
       duration: data.duration,
     };
-  }, [session, currentTime, refreshAssets, addClip, saveProject]);
+  }, [session, currentTime, refreshAssets, addClip, saveProject, saveProjectImmediate]);
 
   // Handle batch animation generation (multiple animations across the video)
   const handleGenerateBatchAnimations = useCallback(async (count: number) => {
@@ -1646,14 +1677,14 @@ export default function Home() {
       throw new Error('Please upload a video first to start a session');
     }
 
+    // Persist settings first — the server resolves fps/width/height from the saved project
+    await saveProjectImmediate();
+
     const response = await fetch(`http://localhost:3333/session/${session.sessionId}/generate-batch-animations`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         count,
-        fps: 30,
-        width: 1920,
-        height: 1080,
       }),
     });
 
@@ -1680,7 +1711,7 @@ export default function Home() {
       animations: data.animations,
       videoDuration: data.videoDuration,
     };
-  }, [session, refreshAssets, addClip, saveProject]);
+  }, [session, refreshAssets, addClip, saveProject, saveProjectImmediate]);
 
   // Handle extract audio (separates audio to A1 track, replaces video with muted version)
   const handleExtractAudio = useCallback(async () => {
@@ -1812,6 +1843,9 @@ export default function Home() {
       // 2. Analyze the content with AI
       // 3. Generate Remotion code based on the content
       // 4. Render the animation
+      // Persist settings first — the server resolves fps/width/height from the saved project
+      await saveProjectImmediate();
+
       const response = await fetch(`http://localhost:3333/session/${session.sessionId}/generate-contextual-animation`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1819,9 +1853,6 @@ export default function Home() {
           assetId: videoAsset.id,
           type: request.type,
           description: request.description,
-          fps: 30,
-          width: 1920,
-          height: 1080,
         }),
       });
 
@@ -1853,7 +1884,7 @@ export default function Home() {
       console.error('Failed to create contextual animation:', error);
       throw error;
     }
-  }, [session, assets, addClip, saveProject, getDuration, refreshAssets]);
+  }, [session, assets, addClip, saveProject, saveProjectImmediate, getDuration, refreshAssets]);
 
   // Handle render/export
   const handleExport = useCallback(async (exportOpts?: RenderOptions) => {
@@ -1909,9 +1940,6 @@ export default function Home() {
         editPrompt,
         assets: availableAssets,
         v1Context, // Pass V1 clip context for hybrid approach
-        fps: 30,
-        width: 1920,
-        height: 1080,
       }),
     });
 
@@ -2145,6 +2173,7 @@ export default function Home() {
       {showRenderSettings && (
         <RenderSettingsModal
           renderOptions={renderOptions}
+          projectSettings={settings}
           onClose={() => setShowRenderSettings(false)}
           onExport={(opts) => handleExport(opts)}
           onUpdateOptions={(opts) => {
@@ -2389,6 +2418,7 @@ export default function Home() {
             <div className="flex-1 overflow-hidden relative">
               <div className={`absolute inset-0 ${activeAgent === 'director' ? '' : 'hidden'}`}>
                 <AIPromptPanel
+                  projectSettings={settings}
                   onApplyEdit={handleApplyEdit}
                   onExtractKeywordsAndAddGifs={handleExtractKeywordsAndAddGifs}
                   onTranscribeAndAddCaptions={handleTranscribeAndAddCaptions}

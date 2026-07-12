@@ -13,6 +13,7 @@ export interface Asset {
   size: number;
   width?: number;
   height?: number;
+  fps?: number; // Source frame rate (probed for uploads, render fps for animations)
   thumbnailUrl: string | null;
   streamUrl?: string; // URL with cache-busting timestamp
   aiGenerated?: boolean; // True if this is a Remotion-generated animation
@@ -228,6 +229,9 @@ export interface RenderOptions {
   enableCustomFfmpegFlags: boolean;
   customFfmpegFlags: string;
   concurrency: number;
+  // False until the user explicitly picks resolution/fps in the render dialog;
+  // while false, project settings seed outputWidth/outputHeight/outputFps
+  outputCustomized: boolean;
 }
 
 export const defaultRenderOptions: RenderOptions = {
@@ -256,6 +260,7 @@ export const defaultRenderOptions: RenderOptions = {
   enableCustomFfmpegFlags: false,
   customFfmpegFlags: '',
   concurrency: 4,
+  outputCustomized: false,
 };
 
 export function useProject() {
@@ -440,6 +445,7 @@ export function useProject() {
         size: result.asset.size,
         width: result.asset.width,
         height: result.asset.height,
+        fps: result.asset.fps,
         thumbnailUrl: result.asset.thumbnailUrl
           ? `${LOCAL_FFMPEG_URL}${result.asset.thumbnailUrl}`
           : null,
@@ -490,6 +496,7 @@ export function useProject() {
       size: number;
       width?: number;
       height?: number;
+      fps?: number;
       thumbnailUrl?: string | null;
       aiGenerated?: boolean;
     }) => ({
@@ -500,6 +507,7 @@ export function useProject() {
       size: a.size,
       width: a.width,
       height: a.height,
+      fps: a.fps,
       thumbnailUrl: a.thumbnailUrl
         ? `${LOCAL_FFMPEG_URL}${a.thumbnailUrl}`
         : null,
@@ -1017,6 +1025,7 @@ export function useProject() {
           size: number;
           width?: number;
           height?: number;
+          fps?: number;
           thumbnailUrl?: string | null;
           aiGenerated?: boolean;
         }) => ({
@@ -1027,6 +1036,7 @@ export function useProject() {
           size: a.size,
           width: a.width,
           height: a.height,
+          fps: a.fps,
           thumbnailUrl: a.thumbnailUrl
             ? `${LOCAL_FFMPEG_URL}${a.thumbnailUrl}`
             : null,
@@ -1167,6 +1177,7 @@ export function useProject() {
         size: result.asset.size,
         width: result.asset.width,
         height: result.asset.height,
+        fps: result.asset.fps,
         thumbnailUrl: result.asset.thumbnailUrl
           ? `${LOCAL_FFMPEG_URL}${result.asset.thumbnailUrl}`
           : null,

@@ -147,6 +147,7 @@ interface ContextualAnimationRequest {
 // Animation concept returned from analysis (for approval workflow)
 interface AnimationConcept {
   type: 'intro' | 'outro' | 'transition' | 'highlight';
+  fps?: number; // fps the scene frame counts were authored at (render honors it)
   transcript: string;
   transcriptPreview: string;
   contentSummary: string;
@@ -236,6 +237,8 @@ interface AIPromptPanelProps {
   editTabClips?: TimelineClip[]; // Clips in the edit tab's timeline
   onAudioSync?: (params: { assetA: string; assetB: string; sampleRate: number; correlationSampleSize: number; initialGranularity: number; analysisRegion?: string; analysisDuration?: number }) => Promise<AudioSyncResult>;
   onApplyAudioSync?: (result: AudioSyncState) => void;
+  // Composition settings so previews match render output
+  projectSettings?: { width: number; height: number; fps: number };
 }
 
 export default function AIPromptPanel({
@@ -256,6 +259,7 @@ export default function AIPromptPanel({
   onExtractAudio,
   onOpenAnimationInTab,
   onEditAnimation,
+  projectSettings,
   isApplying,
   applyProgress,
   applyStatus,
@@ -816,7 +820,7 @@ export default function AIPromptPanel({
         if (updated[lastIdx]?.isProcessingGifs) {
           updated[lastIdx] = {
             ...updated[lastIdx],
-            text: `📋 Animation Concept Ready for Review\n\nType: ${typeLabels[type]}\nDuration: ${concept.durationInSeconds.toFixed(1)}s (${concept.totalDuration} frames)\n\nVideo Summary:\n${concept.contentSummary}\n\nKey Topics: ${concept.keyTopics.join(', ') || 'N/A'}\n\nProposed Scenes (${concept.scenes.length}):\n${concept.scenes.map((s, i) => `${i + 1}. ${s.type} (${(s.duration / 30).toFixed(1)}s): ${s.content.title || s.content.items?.map(item => item.label).join(', ') || 'Transition'}`).join('\n')}\n\n👆 Review the concept above and click Approve to render, or Edit to modify.`,
+            text: `📋 Animation Concept Ready for Review\n\nType: ${typeLabels[type]}\nDuration: ${concept.durationInSeconds.toFixed(1)}s (${concept.totalDuration} frames)\n\nVideo Summary:\n${concept.contentSummary}\n\nKey Topics: ${concept.keyTopics.join(', ') || 'N/A'}\n\nProposed Scenes (${concept.scenes.length}):\n${concept.scenes.map((s, i) => `${i + 1}. ${s.type} (${(s.duration / (concept.fps || 30)).toFixed(1)}s): ${s.content.title || s.content.items?.map(item => item.label).join(', ') || 'Transition'}`).join('\n')}\n\n👆 Review the concept above and click Approve to render, or Edit to modify.`,
             isProcessingGifs: false,
           };
         }
@@ -1548,7 +1552,7 @@ export default function AIPromptPanel({
           if (updated[lastIdx]?.isProcessingGifs) {
             updated[lastIdx] = {
               ...updated[lastIdx],
-              text: `📋 Animation Concept Ready (for ${rangeStr})\n\nContent Summary: ${concept.contentSummary}\n\nKey Topics: ${concept.keyTopics.join(', ')}\n\nProposed Scenes (${concept.scenes.length}):\n${concept.scenes.map((s, i) => `${i + 1}. ${s.type}: ${s.content.title || s.content.subtitle || 'Visual'} (${s.duration}s)`).join('\n')}\n\nTotal Duration: ${concept.totalDuration}s\n\n👇 Review and approve below, or cancel to modify your request.`,
+              text: `📋 Animation Concept Ready (for ${rangeStr})\n\nContent Summary: ${concept.contentSummary}\n\nKey Topics: ${concept.keyTopics.join(', ')}\n\nProposed Scenes (${concept.scenes.length}):\n${concept.scenes.map((s, i) => `${i + 1}. ${s.type}: ${s.content.title || s.content.subtitle || 'Visual'} (${(s.duration / (concept.fps || 30)).toFixed(1)}s)`).join('\n')}\n\nTotal Duration: ${concept.durationInSeconds.toFixed(1)}s\n\n👇 Review and approve below, or cancel to modify your request.`,
               isProcessingGifs: false,
             };
           }
@@ -3693,6 +3697,7 @@ export default function AIPromptPanel({
             </button>
             <div className="h-[70vh] overflow-y-auto">
               <MotionGraphicsPanel
+                projectSettings={projectSettings}
                 onAddToTimeline={(templateId, props, duration) => {
                   if (onAddMotionGraphic) {
                     onAddMotionGraphic({ templateId, props, duration, startTime: currentTime });
