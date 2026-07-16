@@ -87,11 +87,17 @@ export interface CaptionData {
   generated?: boolean;
 }
 
+// How a word straddling a caption cut is distributed between the two halves
+// ('both' shows it in both clips with clamped timing; 'left'/'right' keep it
+// whole in one clip). Set per-project via the T1 track properties dropdown.
+export type CaptionSplitMode = 'both' | 'left' | 'right';
+
 // Project settings
 export interface ProjectSettings {
   width: number;
   height: number;
   fps: number;
+  captionSplitMode?: CaptionSplitMode;
 }
 
 // Junction transition between two clips (V2 spec)
@@ -694,11 +700,15 @@ export function useProject() {
     setCaptionData(prev => {
       const data = prev[clipId];
       if (!data) return prev;
+      // Distribute the word straddling the cut per the project's split mode:
+      // 'both' keeps it in both halves (ends clamped), 'left' keeps it whole
+      // in the first clip only, 'right' moves it whole to the second clip
+      const mode = settingsRef.current.captionSplitMode ?? 'both';
       const firstWords = data.words
-        .filter(w => w.start < timeInClip)
+        .filter(w => (mode === 'right' ? w.end <= timeInClip : w.start < timeInClip))
         .map(w => (w.end > timeInClip ? { ...w, end: timeInClip } : w));
       const secondWords = data.words
-        .filter(w => w.end > timeInClip)
+        .filter(w => (mode === 'left' ? w.start >= timeInClip : w.end > timeInClip))
         .map(w => ({
           ...w,
           start: Math.max(0, w.start - timeInClip),

@@ -31,6 +31,12 @@ interface ChapterData {
 
 const PREMOUNT_SECS = 2;
 
+// The facecam pair (animated shrink-into-box + static continuation) is one
+// visual box spread across two transition entities. Their box geometry params
+// must stay in sync or the static portion silently falls back to defaults.
+const FACECAM_PAIR = ['facecamtransitionbox', 'staticfacecam'];
+const FACECAM_BOX_PARAM_KEYS = ['scale', 'xOffset', 'yOffset', 'sourceZoom', 'sourcePanX', 'sourcePanY'];
+
 export default function Home() {
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
@@ -802,9 +808,30 @@ export default function Home() {
     }
     startTime = Math.max(0, startTime);
 
-    addTransition(fromClipId, toClipId, transitionFileId, startTime, durationSec, params);
+    // Facecam pair: a new member created without box params inherits the box
+    // geometry from its sibling on the same clip pair, so the static box
+    // continues the animated one instead of resetting to defaults
+    let seededParams = params;
+    if (FACECAM_PAIR.includes(transitionFileId) && !FACECAM_BOX_PARAM_KEYS.some(k => k in seededParams)) {
+      const currentTransitions = activeTabId === 'main'
+        ? timelineTransitions
+        : (timelineTabs.find(t => t.id === activeTabId)?.timelineTransitions || []);
+      const sibling = currentTransitions.find(t =>
+        FACECAM_PAIR.includes(t.transitionFileId) &&
+        t.fromClipId === fromClipId && t.toClipId === toClipId
+      );
+      if (sibling?.params) {
+        const inherited: Record<string, number | string | boolean> = {};
+        for (const k of FACECAM_BOX_PARAM_KEYS) {
+          if (k in sibling.params) inherited[k] = sibling.params[k];
+        }
+        seededParams = { ...inherited, ...seededParams };
+      }
+    }
+
+    addTransition(fromClipId, toClipId, transitionFileId, startTime, durationSec, seededParams);
     saveProject();
-  }, [addTransition, saveProject, clips, activeTabId, timelineTabs]);
+  }, [addTransition, saveProject, clips, activeTabId, timelineTabs, timelineTransitions]);
 
   // Bridge: legacy AIPromptPanel calls old signature, we map to v2
   const handleApplyTransition = useCallback((
@@ -2339,6 +2366,25 @@ export default function Home() {
                     clips={activeClips}
                     onUpdate={(id, updates) => {
                       updateTransition(id, updates);
+                      // Facecam pair: box-geometry edits propagate to the
+                      // sibling entity on the same clip pair, so the static
+                      // box always matches the animated one
+                      if (updates.params && FACECAM_PAIR.includes(selectedTransition.transitionFileId)) {
+                        const boxUpdates: Record<string, number | string | boolean> = {};
+                        for (const k of FACECAM_BOX_PARAM_KEYS) {
+                          if (k in updates.params) boxUpdates[k] = updates.params[k];
+                        }
+                        if (Object.keys(boxUpdates).length > 0) {
+                          activeTransitions
+                            .filter(t =>
+                              t.id !== id &&
+                              FACECAM_PAIR.includes(t.transitionFileId) &&
+                              t.fromClipId === selectedTransition.fromClipId &&
+                              t.toClipId === selectedTransition.toClipId
+                            )
+                            .forEach(t => updateTransition(t.id, { params: { ...t.params, ...boxUpdates } }));
+                        }
+                      }
                       saveProject();
                     }}
                     onRemove={(id) => {
@@ -2360,6 +2406,11 @@ export default function Home() {
                   trackName={tracks.find(t => t.id === selectedTrackId)?.name ?? selectedTrackId}
                   autoSnap={trackAutoSnap[selectedTrackId] ?? false}
                   onToggleAutoSnap={(enabled) => setTrackAutoSnap(prev => ({ ...prev, [selectedTrackId]: enabled }))}
+                  captionSplitMode={settings.captionSplitMode ?? 'both'}
+                  onChangeCaptionSplitMode={(mode) => {
+                    setSettings(prev => ({ ...prev, captionSplitMode: mode }));
+                    saveProject();
+                  }}
                   onClose={() => setSelectedTrackId(null)}
                 />
               </div>

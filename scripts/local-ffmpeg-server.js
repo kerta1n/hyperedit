@@ -660,7 +660,10 @@ function ensureProjectDefaults(project = {}) {
       ? project.tracks
       : [...DEFAULT_PROJECT_TRACKS],
     clips: Array.isArray(project.clips) ? project.clips : [],
+    // Spread first so client-owned settings fields (e.g. captionSplitMode)
+    // survive the defaults pass instead of being rebuilt away
     settings: {
+      ...(project.settings || {}),
       width: project.settings?.width || 1920,
       height: project.settings?.height || 1080,
       fps: project.settings?.fps || 30,

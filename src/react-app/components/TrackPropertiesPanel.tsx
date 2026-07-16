@@ -1,17 +1,29 @@
 import { X } from 'lucide-react';
+import type { CaptionSplitMode } from '@/react-app/hooks/useProject';
+
+const CAPTION_SPLIT_OPTIONS: Array<{ value: CaptionSplitMode; label: string }> = [
+  { value: 'both', label: 'Show in both clips' },
+  { value: 'left', label: 'Keep in left clip' },
+  { value: 'right', label: 'Keep in right clip' },
+];
 
 interface TrackPropertiesPanelProps {
   trackId: string;
   trackName: string;
   autoSnap: boolean;
   onToggleAutoSnap: (enabled: boolean) => void;
+  captionSplitMode?: CaptionSplitMode;
+  onChangeCaptionSplitMode?: (mode: CaptionSplitMode) => void;
   onClose: () => void;
 }
 
 export default function TrackPropertiesPanel({
+  trackId,
   trackName,
   autoSnap,
   onToggleAutoSnap,
+  captionSplitMode = 'both',
+  onChangeCaptionSplitMode,
   onClose,
 }: TrackPropertiesPanelProps) {
   return (
@@ -50,6 +62,27 @@ export default function TrackPropertiesPanel({
             />
           </button>
         </div>
+
+        {/* Subtitles-track-only: what happens to a word the cut lands in */}
+        {trackId === 'T1' && onChangeCaptionSplitMode && (
+          <div>
+            <span
+              className="text-xs font-medium text-zinc-300 block mb-2 cursor-default"
+              title="When you cut a caption in the middle of a word, choose which clip keeps that word."
+            >
+              Cutting through a word
+            </span>
+            <select
+              value={captionSplitMode}
+              onChange={(e) => onChangeCaptionSplitMode(e.target.value as CaptionSplitMode)}
+              className="w-full px-2 py-1.5 bg-zinc-800 border border-zinc-700 rounded text-xs text-white"
+            >
+              {CAPTION_SPLIT_OPTIONS.map(opt => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
+        )}
       </div>
     </div>
   );
