@@ -82,6 +82,9 @@ export interface CaptionStyle {
 export interface CaptionData {
   words: CaptionWord[];
   style: CaptionStyle;
+  // true = created by transcription (Generate Captions); absent/false = manual
+  // text clip. Regeneration replaces only generated captions, never manual text.
+  generated?: boolean;
 }
 
 // Project settings
@@ -470,6 +473,14 @@ export function useProject() {
 
     setAssets(prev => prev.filter(a => a.id !== assetId));
     setClips(prev => prev.filter(c => c.assetId !== assetId));
+    // Tab timelines reference assets too — leaving their clips dangling breaks
+    // tab previews after the file is gone (caption clips have assetId '' and
+    // are unaffected)
+    setTimelineTabs(prev => prev.map(tab =>
+      tab.clips.some(c => c.assetId === assetId)
+        ? { ...tab, clips: tab.clips.filter(c => c.assetId !== assetId) }
+        : tab
+    ));
   }, [session]);
 
   // Get asset stream URL
@@ -600,6 +611,13 @@ export function useProject() {
     setTimelineTransitions(prev => prev.filter(
       t => t.fromClipId !== clipId && t.toClipId !== clipId
     ));
+    // Clean up the clip's caption data (no-op for non-caption clips)
+    setCaptionData(prev => {
+      if (!(clipId in prev)) return prev;
+      const next = { ...prev };
+      delete next[clipId];
+      return next;
+    });
   }, []);
 
   // Move clip
@@ -669,6 +687,30 @@ export function useProject() {
       secondClip,
     ]);
 
+    // Split caption words across the two halves: words are clip-relative, so
+    // the first half keeps words starting before the cut (ends clamped to it)
+    // and the second half gets the rest re-offset to its own clip start.
+    // Without this the second clip's id has no captionData (wordless captions).
+    setCaptionData(prev => {
+      const data = prev[clipId];
+      if (!data) return prev;
+      const firstWords = data.words
+        .filter(w => w.start < timeInClip)
+        .map(w => (w.end > timeInClip ? { ...w, end: timeInClip } : w));
+      const secondWords = data.words
+        .filter(w => w.end > timeInClip)
+        .map(w => ({
+          ...w,
+          start: Math.max(0, w.start - timeInClip),
+          end: w.end - timeInClip,
+        }));
+      return {
+        ...prev,
+        [clipId]: { ...data, words: firstWords },
+        [secondClip.id]: { ...data, style: { ...data.style }, words: secondWords },
+      };
+    });
+
     // Re-wire legacy transitions: any transition where the original clip was the "from" clip
     // should now reference the second clip (which ends where the original ended)
     setTransitions(prev => prev.map(t => {
@@ -715,6 +757,22 @@ export function useProject() {
   const closeTimelineTab = useCallback((tabId: string): void => {
     if (tabId === 'main') return; // Cannot close main tab
 
+    // Prune caption data for the tab's clips (tab text clips write into the
+    // global captionData map; tabs aren't persisted, so entries left behind
+    // become permanent orphans in project.json)
+    const closingTab = timelineTabs.find(tab => tab.id === tabId);
+    if (closingTab && closingTab.clips.length > 0) {
+      const ids = new Set(closingTab.clips.map(c => c.id));
+      setCaptionData(prev => {
+        const next = { ...prev };
+        let changed = false;
+        for (const id of ids) {
+          if (id in next) { delete next[id]; changed = true; }
+        }
+        return changed ? next : prev;
+      });
+    }
+
     setTimelineTabs(prev => prev.filter(tab => tab.id !== tabId));
 
     // If closing the active tab, switch to main
@@ -722,7 +780,7 @@ export function useProject() {
       if (currentId === tabId) return 'main';
       return currentId;
     });
-  }, []);
+  }, [timelineTabs]);
 
   // Update clips in a specific tab
   const updateTabClips = useCallback((tabId: string, clips: TimelineClip[]): void => {
@@ -803,6 +861,7 @@ export function useProject() {
       start: number;
       duration: number;
       style?: Partial<CaptionStyle>;
+      generated?: boolean;
     }>
   ): TimelineClip[] => {
     const newClips: TimelineClip[] = [];
@@ -824,6 +883,7 @@ export function useProject() {
       newCaptionData[clipId] = {
         words: caption.words,
         style: { ...defaultCaptionStyle, ...caption.style },
+        ...(caption.generated ? { generated: true } : {}),
       };
     }
 
@@ -832,6 +892,23 @@ export function useProject() {
     setCaptionData(prev => ({ ...prev, ...newCaptionData }));
 
     return newClips;
+  }, []);
+
+  // Bulk-remove caption clips and their caption data (used by regeneration
+  // replace; caption clips are never referenced by transitions, so no
+  // transition cleanup is needed here)
+  const deleteCaptionClips = useCallback((clipIds: string[]): void => {
+    if (clipIds.length === 0) return;
+    const ids = new Set(clipIds);
+    setClips(prev => prev.filter(c => !ids.has(c.id)));
+    setCaptionData(prev => {
+      const next = { ...prev };
+      let changed = false;
+      for (const id of clipIds) {
+        if (id in next) { delete next[id]; changed = true; }
+      }
+      return changed ? next : prev;
+    });
   }, []);
 
   // Update caption style
@@ -1056,7 +1133,17 @@ export function useProject() {
         // Server tracks may be outdated (e.g., missing T1, V3, A2)
         if (data.clips) setClips(data.clips);
         if (data.settings) setSettings(data.settings);
-        if (data.captionData) setCaptionData(data.captionData);
+        if (data.captionData) {
+          // Orphan sweep: drop caption entries whose clip no longer exists.
+          // Tabs are not persisted, so main clips are the full live set here;
+          // pre-sweep projects accumulated orphans from deletes/regenerations.
+          const liveClipIds = new Set(((data.clips || []) as TimelineClip[]).map(c => c.id));
+          const swept = Object.fromEntries(
+            Object.entries(data.captionData as Record<string, CaptionData>)
+              .filter(([clipId]) => liveClipIds.has(clipId))
+          );
+          setCaptionData(swept);
+        }
         if (data.transitions) setTransitions(data.transitions);
         if (data.timelineTransitions) setTimelineTransitions(data.timelineTransitions);
         if (data.renderOptions) setRenderOptions({ ...defaultRenderOptions, ...data.renderOptions });
@@ -1254,8 +1341,12 @@ export function useProject() {
     captionData,
     addCaptionClip,
     addCaptionClipsBatch,
+    deleteCaptionClips,
     updateCaptionStyle,
     getCaptionData,
+
+    // Live-state refs for async flows (read-only)
+    clipsRef,
 
     // Transitions (legacy v1)
     transitions,

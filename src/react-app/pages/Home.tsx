@@ -82,8 +82,10 @@ export default function Home() {
     // Captions
     addCaptionClip,
     addCaptionClipsBatch,
+    deleteCaptionClips,
     updateCaptionStyle,
     getCaptionData,
+    clipsRef,
     // Transitions (legacy v1)
     transitions,
     setTransitions,
@@ -93,6 +95,7 @@ export default function Home() {
     addTransition,
     updateTransition,
     removeTransition,
+    updateTabTransitions,
     // Timeline tabs
     timelineTabs,
     activeTabId,
@@ -579,6 +582,15 @@ export default function Home() {
       if (activeTab) {
         const updatedClips = activeTab.clips.filter(c => c.id !== clipId);
         updateTabClips(activeTabId, updatedClips);
+        // Mirror main-path cleanup: caption data and the tab's transitions
+        // referencing the removed clip would otherwise be orphaned
+        deleteCaptionClips([clipId]);
+        updateTabTransitions(
+          activeTabId,
+          activeTab.timelineTransitions.filter(
+            t => t.fromClipId !== clipId && t.toClipId !== clipId
+          )
+        );
       }
     } else {
       const clip = clips.find(c => c.id === clipId);
@@ -589,10 +601,17 @@ export default function Home() {
     if (selectedClipId === clipId) {
       setSelectedClipId(null);
     }
-  }, [deleteClip, selectedClipId, trackAutoSnap, clips, activeTabId, timelineTabs, updateTabClips]);
+  }, [deleteClip, deleteCaptionClips, updateTabTransitions, selectedClipId, trackAutoSnap, clips, activeTabId, timelineTabs, updateTabClips]);
 
   // Handle cutting clips at the playhead position
   const handleCutAtPlayhead = useCallback(() => {
+    // splitClip operates on main clips only — cutting while a tab is active
+    // would silently edit the main timeline the user isn't looking at
+    if (activeTabId !== 'main') {
+      alert('Cut at playhead works on the main timeline only — switch back to Main first.');
+      return;
+    }
+
     // Find all clips that are under the playhead
     const clipsAtPlayhead = clips.filter(clip =>
       currentTime > clip.start && currentTime < clip.start + clip.duration
@@ -608,7 +627,7 @@ export default function Home() {
     }
 
     saveProject();
-  }, [clips, currentTime, splitClip, saveProject]);
+  }, [clips, currentTime, splitClip, saveProject, activeTabId]);
 
   // Handle adding text overlay at playhead
   const handleAddText = useCallback(() => {
@@ -1243,21 +1262,59 @@ export default function Home() {
     };
   }, [session, assets, clips, refreshAssets, updateClip, saveProject]);
 
+  // Guards against concurrent transcriptions (double-click = two whisper runs
+  // racing two caption batches in)
+  const transcribeInFlightRef = useRef(false);
+
   // Handle transcribing video and adding captions
   const handleTranscribeAndAddCaptions = useCallback(async (options?: Partial<CaptionStyle>) => {
     if (!session) {
       throw new Error('No session available');
     }
+    if (transcribeInFlightRef.current) {
+      throw new Error('A transcription is already running — wait for it to finish');
+    }
 
-    // Find the original (non-AI-generated) video asset to transcribe
-    const videoAsset = assets.find(a => a.type === 'video' && !a.aiGenerated) || assets.find(a => a.type === 'video');
+    // Pick the transcription target from the MAIN timeline: the earliest V1
+    // clip that references a video asset. Picking "first video asset in the
+    // library" is wrong with multiple sources — the library's order even
+    // changes across server restarts (assets are restored in disk order), which
+    // silently switches the transcribed asset and loses the trim window with
+    // it (observed: full-length captions for an asset that wasn't on V1).
+    // Captions always land on the main timeline (addCaptionClipsBatch), so the
+    // lookup must use main clips — activeClips may be a tab's clips.
+    const v1Candidates = clips
+      .filter(c => c.trackId === 'V1' && c.assetId)
+      .sort((a, b) => a.start - b.start);
+    let v1Clip: TimelineClip | undefined;
+    let videoAsset: (typeof assets)[number] | undefined;
+    for (const candidate of v1Candidates) {
+      const asset = assets.find(a => a.id === candidate.assetId && a.type === 'video');
+      if (asset) {
+        v1Clip = candidate;
+        videoAsset = asset;
+        break;
+      }
+    }
+    // Fallback (no video clip on V1): previous behavior — first non-AI video
+    if (!videoAsset) {
+      videoAsset = assets.find(a => a.type === 'video' && !a.aiGenerated) || assets.find(a => a.type === 'video');
+    }
 
     if (!videoAsset || videoAsset.type !== 'video') {
       throw new Error('Please upload a video first');
     }
 
-    // Find the V1 clip for this asset to respect trim (inPoint/outPoint)
-    const v1Clip = activeClips.find(c => c.trackId === 'V1' && c.assetId === videoAsset.id);
+    // Regeneration replaces previously GENERATED captions outright — no
+    // prompt (owner decision 2026-07-16): the last saved generation is simply
+    // whatever loads with the project, and a new run supersedes it. Manual
+    // text clips carry no `generated` flag and are never touched.
+    const generatedClipIds = clips
+      .filter(c => c.trackId === 'T1' && getCaptionData(c.id)?.generated)
+      .map(c => c.id);
+
+    transcribeInFlightRef.current = true;
+    try {
 
     // Call the transcribe endpoint with trim bounds
     const response = await fetch(`http://localhost:3333/session/${session.sessionId}/transcribe`, {
@@ -1278,18 +1335,47 @@ export default function Home() {
     const data = await response.json();
     console.log('Transcription result:', data);
 
+    // The transcript matches the trim window that was sent. If the clip was
+    // edited while whisper ran we can't tell whether the edit invalidated it
+    // (a move elsewhere is harmless, a re-trim isn't — classifying edit types
+    // isn't worth the code), so the user decides (owner decision 2026-07-16).
+    // A pure move re-anchors to the live start either way.
+    const v1Now = v1Clip ? clipsRef.current.find(c => c.id === v1Clip.id) : undefined;
+    if (v1Clip && (!v1Now || v1Now.inPoint !== v1Clip.inPoint || v1Now.outPoint !== v1Clip.outPoint)) {
+      const applyAnyway = confirm(
+        'The clip was edited while captions were generating.\n\n' +
+        'OK = add the captions anyway (they may be misaligned if the trim changed)\n' +
+        'Cancel = discard this generation'
+      );
+      if (!applyAnyway) {
+        throw new Error('Captions discarded — the clip was edited during generation.');
+      }
+    }
+    const anchorClip = v1Now ?? v1Clip;
+
     if (data.words && data.words.length > 0) {
+      // Word timestamps are relative to the trimmed audio the server extracted
+      // for the [inPoint, outPoint] window. Whisper can overrun the audio's end
+      // slightly, so clamp words to the window — caption clips must never
+      // extend past the source clip's span on the timeline.
+      const windowDuration = v1Clip ? v1Clip.outPoint - v1Clip.inPoint : Infinity;
+      const words: Array<{ text: string; start: number; end: number }> = data.words
+        .filter((w: { start: number }) => w.start < windowDuration)
+        .map((w: { text: string; start: number; end: number }) =>
+          w.end > windowDuration ? { ...w, end: windowDuration } : w
+        );
+
       // Split words into chunks based on natural speech pauses
       // A pause of 0.7+ seconds indicates a new caption segment
       const PAUSE_THRESHOLD = 0.7; // seconds
       const MAX_WORDS_PER_CHUNK = 5; // Cap at 5 words max
-      const chunks: Array<{ words: typeof data.words; start: number; end: number }> = [];
+      const chunks: Array<{ words: typeof words; start: number; end: number }> = [];
 
-      let currentChunk: typeof data.words = [];
+      let currentChunk: typeof words = [];
 
-      for (let i = 0; i < data.words.length; i++) {
-        const word = data.words[i];
-        const prevWord = data.words[i - 1];
+      for (let i = 0; i < words.length; i++) {
+        const word = words[i];
+        const prevWord = words[i - 1];
 
         // Start a new chunk if:
         // 1. There's a significant pause between words
@@ -1321,7 +1407,10 @@ export default function Home() {
 
       // Create all caption clips at once (batched for performance)
       const captionsToAdd = chunks.map(chunk => {
-        const duration = chunk.end - chunk.start;
+        // Floor degenerate whisper timestamps (start==end would make an
+        // invisible 0-duration clip) but never extend past the clip window
+        const maxDuration = Number.isFinite(windowDuration) ? windowDuration - chunk.start : Infinity;
+        const duration = Math.min(Math.max(0.2, chunk.end - chunk.start), maxDuration);
         // Adjust word timestamps to be relative to chunk start
         const relativeWords = chunk.words.map((w: { text: string; start: number; end: number }) => ({
           ...w,
@@ -1330,21 +1419,30 @@ export default function Home() {
         }));
         return {
           words: relativeWords,
-          start: chunk.start + (v1Clip?.start ?? 0),
+          start: chunk.start + (anchorClip?.start ?? 0),
           duration,
           style: options ? { ...options } : {},
+          generated: true,
         };
       });
 
       addCaptionClipsBatch(captionsToAdd);
+      if (generatedClipIds.length > 0) {
+        deleteCaptionClips(generatedClipIds);
+      }
       await saveProject();
-      console.log(`Created ${chunks.length} caption clips`);
+      console.log(`Created ${chunks.length} caption clips${generatedClipIds.length > 0 ? `, replaced ${generatedClipIds.length}` : ''}`);
     } else {
-      throw new Error('No speech detected in video. Make sure your video has audible speech.');
+      throw new Error(v1Clip
+        ? 'No speech detected in the selected clip range. Make sure the clip covers audible speech.'
+        : 'No speech detected in video. Make sure your video has audible speech.');
     }
 
     return data;
-  }, [session, assets, activeClips, addCaptionClipsBatch, saveProject]);
+    } finally {
+      transcribeInFlightRef.current = false;
+    }
+  }, [session, assets, clips, clipsRef, getCaptionData, addCaptionClipsBatch, deleteCaptionClips, saveProject]);
 
   // Handle updating caption style
   const handleUpdateCaptionStyle = useCallback((clipId: string, styleUpdates: Partial<CaptionStyle>) => {

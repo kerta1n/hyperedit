@@ -3779,6 +3779,19 @@ async function handleTranscribe(req, res, sessionId) {
     const totalDuration = await getVideoDuration(videoAsset.path);
     console.log(`[${jobId}] Video duration: ${totalDuration.toFixed(2)}s`);
 
+    // Duration of the audio actually transcribed — the trim window when
+    // startTime/endTime were sent. Every downstream consumer (LLM prompt
+    // duration hints, plain-text fallback spacing, the response) must use
+    // THIS, not the asset length, or fallback timestamps get stretched
+    // across the full asset.
+    const transcribedDuration = Math.max(
+      0,
+      (endTime !== undefined ? Math.min(endTime, totalDuration) : totalDuration) - (startTime || 0)
+    );
+    if (startTime !== undefined || endTime !== undefined) {
+      console.log(`[${jobId}] Transcribing window: ${(startTime || 0).toFixed(2)}s → +${transcribedDuration.toFixed(2)}s`);
+    }
+
     // Extract audio as MP3 (with optional trim for resized clips)
     console.log(`[${jobId}] Extracting audio...`);
     const ffmpegArgs = ['-y'];
@@ -3810,7 +3823,7 @@ async function handleTranscribe(req, res, sessionId) {
         console.log(`[${jobId}] Local Whisper failed: ${whisperError.message}`);
         if (geminiKey) {
           console.log(`[${jobId}] Falling back to LLM transcription...`);
-          transcription = await transcribeAudioWithLLM(audioPath, totalDuration.toFixed(1), jobId);
+          transcription = await transcribeAudioWithLLM(audioPath, transcribedDuration.toFixed(1), jobId);
         } else {
           throw whisperError;
         }
@@ -3869,7 +3882,7 @@ async function handleTranscribe(req, res, sessionId) {
           parts: [
             { inlineData: { mimeType: 'audio/mp3', data: audioBase64 } },
             {
-              text: `Transcribe this audio with word-level timestamps. The audio is ${totalDuration.toFixed(1)} seconds long.
+              text: `Transcribe this audio with word-level timestamps. The audio is ${transcribedDuration.toFixed(1)} seconds long.
 
 IMPORTANT: Return ONLY valid JSON, no markdown, no explanation. The response must be parseable JSON.
 
@@ -3924,7 +3937,7 @@ Guidelines:
             console.log(`[${jobId}] Falling back to plain text transcription`);
             const plainText = responseText.replace(/```[\s\S]*?```/g, '').trim();
             const wordsArray = plainText.split(/\s+/).filter(w => w.length > 0);
-            const avgWordDuration = totalDuration / wordsArray.length;
+            const avgWordDuration = transcribedDuration / wordsArray.length;
 
             transcription = {
               text: plainText,
@@ -3974,7 +3987,10 @@ Guidelines:
       success: true,
       text: transcription.text || '',
       words: words,
-      duration: totalDuration,
+      // Duration of the transcribed window (word times are relative to it),
+      // not the asset length — assetDuration carries that separately
+      duration: transcribedDuration,
+      assetDuration: totalDuration,
     });
 
   } catch (error) {
