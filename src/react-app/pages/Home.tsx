@@ -542,7 +542,9 @@ export default function Home() {
       // Cross-track transitions are now valid in v2 — no need to remove transitions on track change
       moveClip(clipId, newStart, newTrackId);
     }
-  }, [moveClip, activeTabId, timelineTabs, updateTabClips]);
+    // Debounced — drag streams collapse into one save after the last movement
+    saveProject();
+  }, [moveClip, activeTabId, timelineTabs, updateTabClips, saveProject]);
 
   // Handle resizing clip
   const handleResizeClip = useCallback((clipId: string, newInPoint: number, newOutPoint: number, newStart?: number) => {
@@ -580,7 +582,9 @@ export default function Home() {
         start: newStart ?? clip.start,
       });
     }
-  }, [clips, updateClip, activeTabId, timelineTabs, updateTabClips]);
+    // Debounced — resize-handle drags collapse into one save
+    saveProject();
+  }, [clips, updateClip, activeTabId, timelineTabs, updateTabClips, saveProject]);
 
   // Handle deleting clip from timeline (with per-track auto-snap ripple)
   const handleDeleteClip = useCallback((clipId: string) => {
@@ -609,7 +613,10 @@ export default function Home() {
     if (selectedClipId === clipId) {
       setSelectedClipId(null);
     }
-  }, [deleteClip, deleteCaptionClips, updateTabTransitions, selectedClipId, trackAutoSnap, clips, activeTabId, timelineTabs, updateTabClips]);
+    // Deletes never persisted until some later action saved — a deleted clip
+    // came back on reload
+    saveProject();
+  }, [deleteClip, deleteCaptionClips, updateTabTransitions, selectedClipId, trackAutoSnap, clips, activeTabId, timelineTabs, updateTabClips, saveProject]);
 
   // Handle cutting clips at the playhead position
   const handleCutAtPlayhead = useCallback(() => {
@@ -655,6 +662,16 @@ export default function Home() {
 
     saveProject();
   }, [currentTime, addCaptionClip, activeTabId, timelineTabs, updateTabClips, saveProject]);
+
+  // Flush any pending debounced save when the page is being closed — closes
+  // the ≤500ms edit-loss window on tab close. Best-effort: the browser may
+  // kill the request mid-flight; acceptable, worst case equals the debounce
+  // window and regeneration/redo covers it.
+  useEffect(() => {
+    const flush = () => { saveProjectImmediate(); };
+    window.addEventListener('beforeunload', flush);
+    return () => window.removeEventListener('beforeunload', flush);
+  }, [saveProjectImmediate]);
 
   // Keep the preview aspect toggle in sync with project settings — aspectRatio
   // isn't persisted, so loading a portrait project would otherwise leave the
