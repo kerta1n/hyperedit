@@ -1264,15 +1264,21 @@ export default function AIPromptPanel({
       console.error('Caption workflow error:', error);
       const message = error instanceof Error ? error.message : 'Unknown error';
       // User-driven outcomes (cancel/discard/guard) aren't server failures —
-      // show them plainly instead of tacking on the server hint (which also
-      // doubled the punctuation)
-      const isUserOutcome = /canceled|discarded|already running/i.test(message);
-      setChatHistory(prev => [...prev, {
-        type: 'assistant',
-        text: isUserOutcome
-          ? message
-          : `Error: ${message.replace(/\.$/, '')}. Make sure the ffmpeg server is running.`,
-      }]);
+      // show them plainly instead of tacking on the server hint. Classified by
+      // the error's marker name (set by useCaptionGeneration's userNotice),
+      // not by matching message text, so rewording can't silently break it.
+      const isUserOutcome = error instanceof Error && error.name === 'UserNotice';
+      setChatHistory(prev => {
+        // Clear the pending "Transcribing..." spinner message (the success
+        // path does the same) — otherwise a cancel leaves it spinning forever
+        const updated = prev.map(m => (m.isProcessingGifs ? { ...m, isProcessingGifs: false } : m));
+        return [...updated, {
+          type: 'assistant' as const,
+          text: isUserOutcome
+            ? message
+            : `Error: ${message.replace(/\.$/, '')}. Make sure the ffmpeg server is running.`,
+        }];
+      });
     } finally {
       setIsProcessing(false);
       setProcessingStatus('');

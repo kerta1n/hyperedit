@@ -32,12 +32,6 @@ interface ChapterData {
 
 const PREMOUNT_SECS = 2;
 
-// The facecam pair (animated shrink-into-box + static continuation) is one
-// visual box spread across two transition entities. Their box geometry params
-// must stay in sync or the static portion silently falls back to defaults.
-const FACECAM_PAIR = ['facecamtransitionbox', 'staticfacecam'];
-const FACECAM_BOX_PARAM_KEYS = ['scale', 'xOffset', 'yOffset', 'sourceZoom', 'sourcePanX', 'sourcePanY'];
-
 export default function Home() {
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
@@ -595,8 +589,12 @@ export default function Home() {
         const updatedClips = activeTab.clips.filter(c => c.id !== clipId);
         updateTabClips(activeTabId, updatedClips);
         // Mirror main-path cleanup: caption data and the tab's transitions
-        // referencing the removed clip would otherwise be orphaned
-        deleteCaptionClips([clipId]);
+        // referencing the removed clip would otherwise be orphaned. Prune only
+        // ids absent from main — a dual-listed clip (Add Text while on a tab)
+        // keeps its main copy and words, mirroring the closeTimelineTab guard
+        if (!clipsRef.current.some(c => c.id === clipId)) {
+          deleteCaptionClips([clipId]);
+        }
         updateTabTransitions(
           activeTabId,
           activeTab.timelineTransitions.filter(
@@ -616,7 +614,7 @@ export default function Home() {
     // Deletes never persisted until some later action saved — a deleted clip
     // came back on reload
     saveProject();
-  }, [deleteClip, deleteCaptionClips, updateTabTransitions, selectedClipId, trackAutoSnap, clips, activeTabId, timelineTabs, updateTabClips, saveProject]);
+  }, [deleteClip, deleteCaptionClips, clipsRef, updateTabTransitions, selectedClipId, trackAutoSnap, clips, activeTabId, timelineTabs, updateTabClips, saveProject]);
 
   // Handle cutting clips at the playhead position
   const handleCutAtPlayhead = useCallback(() => {
@@ -827,30 +825,9 @@ export default function Home() {
     }
     startTime = Math.max(0, startTime);
 
-    // Facecam pair: a new member created without box params inherits the box
-    // geometry from its sibling on the same clip pair, so the static box
-    // continues the animated one instead of resetting to defaults
-    let seededParams = params;
-    if (FACECAM_PAIR.includes(transitionFileId) && !FACECAM_BOX_PARAM_KEYS.some(k => k in seededParams)) {
-      const currentTransitions = activeTabId === 'main'
-        ? timelineTransitions
-        : (timelineTabs.find(t => t.id === activeTabId)?.timelineTransitions || []);
-      const sibling = currentTransitions.find(t =>
-        FACECAM_PAIR.includes(t.transitionFileId) &&
-        t.fromClipId === fromClipId && t.toClipId === toClipId
-      );
-      if (sibling?.params) {
-        const inherited: Record<string, number | string | boolean> = {};
-        for (const k of FACECAM_BOX_PARAM_KEYS) {
-          if (k in sibling.params) inherited[k] = sibling.params[k];
-        }
-        seededParams = { ...inherited, ...seededParams };
-      }
-    }
-
-    addTransition(fromClipId, toClipId, transitionFileId, startTime, durationSec, seededParams);
+    addTransition(fromClipId, toClipId, transitionFileId, startTime, durationSec, params, undefined, activeTabId);
     saveProject();
-  }, [addTransition, saveProject, clips, activeTabId, timelineTabs, timelineTransitions]);
+  }, [addTransition, saveProject, clips, activeTabId, timelineTabs]);
 
   // Bridge: legacy AIPromptPanel calls old signature, we map to v2
   const handleApplyTransition = useCallback((
@@ -2218,30 +2195,11 @@ export default function Home() {
                     transition={selectedTransition}
                     clips={activeClips}
                     onUpdate={(id, updates) => {
-                      updateTransition(id, updates);
-                      // Facecam pair: box-geometry edits propagate to the
-                      // sibling entity on the same clip pair, so the static
-                      // box always matches the animated one
-                      if (updates.params && FACECAM_PAIR.includes(selectedTransition.transitionFileId)) {
-                        const boxUpdates: Record<string, number | string | boolean> = {};
-                        for (const k of FACECAM_BOX_PARAM_KEYS) {
-                          if (k in updates.params) boxUpdates[k] = updates.params[k];
-                        }
-                        if (Object.keys(boxUpdates).length > 0) {
-                          activeTransitions
-                            .filter(t =>
-                              t.id !== id &&
-                              FACECAM_PAIR.includes(t.transitionFileId) &&
-                              t.fromClipId === selectedTransition.fromClipId &&
-                              t.toClipId === selectedTransition.toClipId
-                            )
-                            .forEach(t => updateTransition(t.id, { params: { ...t.params, ...boxUpdates } }));
-                        }
-                      }
+                      updateTransition(id, updates, activeTabId);
                       saveProject();
                     }}
                     onRemove={(id) => {
-                      removeTransition(id);
+                      removeTransition(id, activeTabId);
                       setSelectedTransitionId(null);
                       saveProject();
                     }}
@@ -2364,10 +2322,10 @@ export default function Home() {
                 }
               }}
               onUpdateTimelineTransition={(id, updates) => {
-                updateTransition(id, updates);
+                updateTransition(id, updates, activeTabId);
               }}
               onRemoveTimelineTransition={(id) => {
-                removeTransition(id);
+                removeTransition(id, activeTabId);
                 if (selectedTransitionId === id) setSelectedTransitionId(null);
               }}
             />

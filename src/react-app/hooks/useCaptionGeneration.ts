@@ -47,6 +47,15 @@ function chunkWords(words: TranscribedWord[]): TranscriptionChunk[] {
   return chunks;
 }
 
+// User-driven outcomes (guards, cancellations) carry a marker name so the
+// chat can show them plainly instead of treating them as server failures —
+// classifying by message text would break on any reword
+function userNotice(message: string): Error {
+  const err = new Error(message);
+  err.name = 'UserNotice';
+  return err;
+}
+
 interface UseCaptionGenerationDeps {
   session: SessionInfo | null;
   assets: Asset[];
@@ -90,7 +99,7 @@ export function useCaptionGeneration({
       throw new Error('No session available');
     }
     if (inFlightRef.current) {
-      throw new Error('A transcription is already running — wait for it to finish');
+      throw userNotice('A transcription is already running — wait for it to finish');
     }
 
     // Pick the transcription target from the MAIN timeline: the earliest V1
@@ -120,7 +129,7 @@ export function useCaptionGeneration({
     }
 
     if (!videoAsset || videoAsset.type !== 'video') {
-      throw new Error('Please upload a video first');
+      throw userNotice('Please upload a video first');
     }
 
     // Regeneration replaces previously GENERATED captions outright — no
@@ -141,7 +150,7 @@ export function useCaptionGeneration({
         'OK = continue and replace\nCancel = keep what you have'
       );
       if (!proceed) {
-        throw new Error('Caption generation canceled — existing captions kept.');
+        throw userNotice('Caption generation canceled — existing captions kept.');
       }
     }
 
@@ -160,7 +169,15 @@ export function useCaptionGeneration({
 
       if (!response.ok) {
         const error = await response.json();
-        throw new Error(error.error || 'Failed to transcribe video');
+        const message = error.error || 'Failed to transcribe video';
+        // 4xx = request/content-level outcomes the server explains itself
+        // (e.g. "No speech detected" comes back as a 400, so the local
+        // no-speech branch below never fires for it) — user-addressable,
+        // not server failures
+        if (response.status >= 400 && response.status < 500) {
+          throw userNotice(message);
+        }
+        throw new Error(message);
       }
 
       const data = await response.json();
@@ -174,18 +191,18 @@ export function useCaptionGeneration({
       const v1Now = v1Clip ? clipsRef.current.find(c => c.id === v1Clip.id) : undefined;
       if (v1Clip && (!v1Now || v1Now.inPoint !== v1Clip.inPoint || v1Now.outPoint !== v1Clip.outPoint)) {
         const applyAnyway = confirm(
-          'The clip was edited while captions were generating.\n\n' +
+          'The clip was edited or removed while captions were generating.\n\n' +
           'OK = add the captions anyway (they may be misaligned if the trim changed)\n' +
           'Cancel = discard this generation'
         );
         if (!applyAnyway) {
-          throw new Error('Captions discarded — the clip was edited during generation.');
+          throw userNotice('Captions discarded — the clip was edited during generation.');
         }
       }
       const anchorClip = v1Now ?? v1Clip;
 
       if (!data.words || data.words.length === 0) {
-        throw new Error(v1Clip
+        throw userNotice(v1Clip
           ? 'No speech detected in the selected clip range. Make sure the clip covers audible speech.'
           : 'No speech detected in video. Make sure your video has audible speech.');
       }
@@ -194,7 +211,12 @@ export function useCaptionGeneration({
       // for the [inPoint, outPoint] window. Whisper can overrun the audio's
       // end slightly, so clamp words to the window — caption clips must never
       // extend past the source clip's span on the timeline.
-      const windowDuration = v1Clip ? v1Clip.outPoint - v1Clip.inPoint : Infinity;
+      // Legacy projects can lack in/out on persisted clips — NaN here would
+      // silently filter out every word and "succeed" with zero captions.
+      // Window comes from the same clip the anchor resolves to: a mid-run
+      // retrim must not let captions overrun the clip's live end
+      const rawWindow = anchorClip ? anchorClip.outPoint - anchorClip.inPoint : Infinity;
+      const windowDuration = Number.isFinite(rawWindow) ? rawWindow : Infinity;
       const words: TranscribedWord[] = (data.words as TranscribedWord[])
         .filter(w => w.start < windowDuration)
         .map(w => (w.end > windowDuration ? { ...w, end: windowDuration } : w));

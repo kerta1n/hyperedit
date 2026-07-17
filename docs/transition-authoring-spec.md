@@ -199,6 +199,41 @@ Your `.tsx` file may ONLY import from these packages:
 - **No Tailwind**: CSS-in-JS inline styles only (Tailwind is not available in Remotion)
 - **No hardcoded frames**: All timing must be relative to `durationInFrames`
 
+## Multi-Entity Looks (Paired Transitions)
+
+HyperEdit's core is transition-agnostic: every timeline transition is an
+independent entity (`transitionFileId` + its own `params`), and the app never
+inspects file ids or coordinates params across entities. There is no
+engine-level "pair" concept — do not design a look that relies on the app
+keeping two entities visually in sync.
+
+If a look needs multiple phases (e.g. an animated shrink-into-box followed by a
+static hold of the same box):
+
+1. **Preferred — one file, one entity.** Implement all phases inside a single
+   component driven by frame/progress. One entity means one param set and
+   nothing to sync. Divide `durationInFrames` into internal phases the same way
+   the wipe example splits its timing. This is the only pattern guaranteed to
+   survive engine changes: the planned @remotion/transitions engine treats a
+   transition as one presentation, and a single-component look ports directly.
+
+2. **If two files must exist** (e.g. the second phase spans a different clip
+   boundary than the first): link them at the FILE level, inside the custom
+   directory — e.g. a `facecam-shared.ts` module exporting the shared box
+   geometry defaults and math helpers, imported by both components. Declare the
+   shared params with identical names, defaults, and ranges in both files'
+   `params` schemas so the properties panels match. Runtime edits still apply
+   per-entity: a user changing one entity's params must mirror the edit on the
+   sibling — the shared module links defaults and math, not live state. Note
+   the shared module counts against the "no HyperEdit imports" constraint's
+   spirit: it may import only from within the custom directory.
+
+3. **Never** request app-side coordination — hardcoded file ids, param
+   mirroring, or seed-inheritance in HyperEdit itself. Custom transitions are
+   per-user plugins the app must accept with zero app changes; any app-side
+   knowledge of a specific transition file breaks that contract for every
+   generated transition after it.
+
 ## Placeholder Conventions for Authoring
 
 When developing transitions in a standalone Remotion project, use red and blue placeholders for the from/to clips:

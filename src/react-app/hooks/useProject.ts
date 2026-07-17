@@ -587,6 +587,29 @@ export function useProject() {
     ));
   }, []);
 
+  // Remove clips and their caption data in one pass — the single canonical
+  // captionData pruner; every clip-removal path funnels through it (missing
+  // ids are no-ops, so callers may pass ids that only exist in tab timelines)
+  const deleteCaptionClips = useCallback((clipIds: string[]): void => {
+    if (clipIds.length === 0) return;
+    const ids = new Set(clipIds);
+    // Identity-stable: callers like deleteClip/tab paths pass ids that are
+    // often already gone from main clips — returning prev avoids a pointless
+    // re-render of the whole tree per delete
+    setClips(prev => {
+      const next = prev.filter(c => !ids.has(c.id));
+      return next.length === prev.length ? prev : next;
+    });
+    setCaptionData(prev => {
+      const next = { ...prev };
+      let changed = false;
+      for (const id of clipIds) {
+        if (id in next) { delete next[id]; changed = true; }
+      }
+      return changed ? next : prev;
+    });
+  }, []);
+
   // Delete clip (with optional ripple/autosnap to shift subsequent clips)
   const deleteClip = useCallback((clipId: string, ripple: boolean = false): void => {
     setClips(prev => {
@@ -621,14 +644,11 @@ export function useProject() {
     setTimelineTransitions(prev => prev.filter(
       t => t.fromClipId !== clipId && t.toClipId !== clipId
     ));
-    // Clean up the clip's caption data (no-op for non-caption clips)
-    setCaptionData(prev => {
-      if (!(clipId in prev)) return prev;
-      const next = { ...prev };
-      delete next[clipId];
-      return next;
-    });
-  }, []);
+    // Clean up the clip's caption data (no-op for non-caption clips). The
+    // clips-filter inside is redundant here (already removed above) but keeps
+    // one canonical pruner.
+    deleteCaptionClips([clipId]);
+  }, [deleteCaptionClips]);
 
   // Move clip
   const moveClip = useCallback((clipId: string, newStart: number, newTrackId?: string): void => {
@@ -709,7 +729,10 @@ export function useProject() {
       // in the first clip only, 'right' moves it whole to the second clip
       const mode = settingsRef.current.captionSplitMode ?? 'both';
       const firstWords = data.words
-        .filter(w => (mode === 'right' ? w.end <= timeInClip : w.start < timeInClip))
+        // A zero-duration word sitting exactly at the cut matches neither
+        // half's predicate in 'both' mode — keep it in the first half
+        .filter(w => (mode === 'right' ? w.end <= timeInClip : w.start < timeInClip)
+          || (mode === 'both' && w.start === timeInClip && w.end === timeInClip))
         .map(w => (w.end > timeInClip ? { ...w, end: timeInClip } : w));
       const secondWords = data.words
         .filter(w => (mode === 'left' ? w.start >= timeInClip : w.end > timeInClip))
@@ -776,15 +799,10 @@ export function useProject() {
     // become permanent orphans in project.json)
     const closingTab = timelineTabs.find(tab => tab.id === tabId);
     if (closingTab && closingTab.clips.length > 0) {
-      const ids = new Set(closingTab.clips.map(c => c.id));
-      setCaptionData(prev => {
-        const next = { ...prev };
-        let changed = false;
-        for (const id of ids) {
-          if (id in next) { delete next[id]; changed = true; }
-        }
-        return changed ? next : prev;
-      });
+      // handleAddText dual-lists tab text clips in MAIN clips too — those must
+      // survive the tab closing; prune only ids that live solely in the tab
+      const mainIds = new Set(clipsRef.current.map(c => c.id));
+      deleteCaptionClips(closingTab.clips.filter(c => !mainIds.has(c.id)).map(c => c.id));
     }
 
     setTimelineTabs(prev => prev.filter(tab => tab.id !== tabId));
@@ -794,7 +812,7 @@ export function useProject() {
       if (currentId === tabId) return 'main';
       return currentId;
     });
-  }, [timelineTabs]);
+  }, [timelineTabs, deleteCaptionClips]);
 
   // Update clips in a specific tab
   const updateTabClips = useCallback((tabId: string, clips: TimelineClip[]): void => {
@@ -908,23 +926,6 @@ export function useProject() {
     return newClips;
   }, []);
 
-  // Bulk-remove caption clips and their caption data (used by regeneration
-  // replace; caption clips are never referenced by transitions, so no
-  // transition cleanup is needed here)
-  const deleteCaptionClips = useCallback((clipIds: string[]): void => {
-    if (clipIds.length === 0) return;
-    const ids = new Set(clipIds);
-    setClips(prev => prev.filter(c => !ids.has(c.id)));
-    setCaptionData(prev => {
-      const next = { ...prev };
-      let changed = false;
-      for (const id of clipIds) {
-        if (id in next) { delete next[id]; changed = true; }
-      }
-      return changed ? next : prev;
-    });
-  }, []);
-
   // Update a caption clip's word list (in-place text fixes; per-word timing
   // edits are a future extension of the same surface)
   const updateCaptionWords = useCallback((clipId: string, words: CaptionWord[]): void => {
@@ -983,6 +984,9 @@ export function useProject() {
   }, []);
 
   // --- V2 Timeline Transition CRUD ---
+  // Each op takes an optional tabId: when a timeline tab is active its
+  // transitions live in tab.timelineTransitions, not the main array — writing
+  // main state while a tab is active silently no-ops against what the user sees
   const addTransition = useCallback((
     fromClipId: string | null,
     toClipId: string | null,
@@ -990,7 +994,8 @@ export function useProject() {
     startTime: number,
     durationSec: number = 0.5,
     params: Record<string, number | string | boolean> = {},
-    easing?: string
+    easing?: string,
+    tabId?: string
   ): TimelineTransition => {
     const transition: TimelineTransition = {
       id: crypto.randomUUID(),
@@ -1002,23 +1007,51 @@ export function useProject() {
       easing: easing ?? 'ease-in-out',
       params,
     };
-    setTimelineTransitions(prev => [...prev, transition]);
+    if (tabId && tabId !== 'main') {
+      setTimelineTabs(prev => prev.map(tab =>
+        tab.id === tabId
+          ? { ...tab, timelineTransitions: [...tab.timelineTransitions, transition] }
+          : tab
+      ));
+    } else {
+      setTimelineTransitions(prev => [...prev, transition]);
+    }
     return transition;
   }, []);
 
-  // Update an existing v2 transition
+  // Update an existing v2 transition. Transition-agnostic by design: custom
+  // transitions are per-user plugins — the core never inspects transitionFileId
+  // or coordinates entities (multi-entity looks belong inside one transition
+  // component; see docs/transition-authoring-spec.md)
   const updateTransition = useCallback((
     transitionId: string,
-    updates: Partial<Omit<TimelineTransition, 'id'>>
+    updates: Partial<Omit<TimelineTransition, 'id'>>,
+    tabId?: string
   ): void => {
-    setTimelineTransitions(prev => prev.map(t =>
-      t.id === transitionId ? { ...t, ...updates } : t
-    ));
+    const apply = (prev: TimelineTransition[]) =>
+      prev.map(t => (t.id === transitionId ? { ...t, ...updates } : t));
+    if (tabId && tabId !== 'main') {
+      setTimelineTabs(prev => prev.map(tab =>
+        tab.id === tabId
+          ? { ...tab, timelineTransitions: apply(tab.timelineTransitions) }
+          : tab
+      ));
+    } else {
+      setTimelineTransitions(apply);
+    }
   }, []);
 
   // Remove a v2 transition
-  const removeTransition = useCallback((transitionId: string): void => {
-    setTimelineTransitions(prev => prev.filter(t => t.id !== transitionId));
+  const removeTransition = useCallback((transitionId: string, tabId?: string): void => {
+    if (tabId && tabId !== 'main') {
+      setTimelineTabs(prev => prev.map(tab =>
+        tab.id === tabId
+          ? { ...tab, timelineTransitions: tab.timelineTransitions.filter(t => t.id !== transitionId) }
+          : tab
+      ));
+    } else {
+      setTimelineTransitions(prev => prev.filter(t => t.id !== transitionId));
+    }
   }, []);
 
   // Update transitions for a specific tab
