@@ -241,10 +241,26 @@ const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(({
     });
   }, [layers, isPlaying]);
 
-  // Seek on load
+  // Seek on load, then start playback if the timeline is playing. The base
+  // element (re)mounts whenever the playhead enters V1 from outside the clip
+  // (conditional render), and an element mount does NOT re-run the [isPlaying]
+  // play effect — without the play() here the fresh element sits paused forever
+  // (no audio, frame only stepped forward by boundary drift-seeks). Seek from
+  // the live playhead ref: baseLayerClipTime only updates at clip boundaries
+  // and is stale by up to a boundary interval by the time loading finishes.
   const handleLoaded = () => {
-    if (videoRef.current && baseLayerClipTime !== undefined) {
-      videoRef.current.currentTime = baseLayerClipTime;
+    const video = videoRef.current;
+    if (!video || !foundBaseLayer) return;
+    const clipTime = currentTimeRef
+      ? currentTimeRef.current - foundBaseLayer.clipStart + foundBaseLayer.inPoint
+      : baseLayerClipTime;
+    if (clipTime !== undefined) {
+      video.currentTime = clipTime;
+    }
+    if (isPlaying && video.paused) {
+      video.play().catch((err) => {
+        console.error('[VideoPreview] Play failed:', err.name, err.message);
+      });
     }
   };
 

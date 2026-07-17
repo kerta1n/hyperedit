@@ -189,7 +189,11 @@ export default function CaptionRenderer({ words, style, currentTime, isPlaying, 
   }
 
   return (
-    <div style={positionStyles} className="pointer-events-none z-40">
+    // z-[60] keeps captions above the transition compositor canvas (zIndex 50
+    // in VideoPreview) — mirrors the render, where captions (5000) sit above
+    // transitions (3500). At z-40 a long-running transition like staticfacecam
+    // hid captions for its whole active window.
+    <div style={positionStyles} className="pointer-events-none z-[60]">
       <div style={textStyles}>
         {visibleWords.map(({ word, index }, i) => (
           <span

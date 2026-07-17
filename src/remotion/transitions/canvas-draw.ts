@@ -24,6 +24,28 @@ function drawCover(
   ctx.drawImage(el, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
 }
 
+// Draw the facecam box exactly as the render components do (staticfacecam.tsx /
+// facecamtransitionbox.tsx): the FROM source covers the FULL canvas, then gets
+// `scale(sourceZoom) translate(sourcePanX%, sourcePanY%)` about the canvas
+// center, and the box rect clips a WINDOW out of that fullscreen result. The
+// box is a crop of the fullscreen video — NOT a miniature of the whole frame.
+// Canvas equivalent of the CSS transform: p' = C + S·(p + t − C).
+function drawFacecamBox(
+  ctx: CanvasRenderingContext2D,
+  el: CanvasImageSource,
+  w: number, h: number,
+  boxX: number, boxY: number, boxW: number, boxH: number,
+  zoom: number, panX: number, panY: number,
+) {
+  ctx.save();
+  ctx.beginPath(); ctx.rect(boxX, boxY, boxW, boxH); ctx.clip();
+  ctx.translate(w / 2, h / 2);
+  ctx.scale(zoom, zoom);
+  ctx.translate(-w / 2 + (panX / 100) * w, -h / 2 + (panY / 100) * h);
+  drawCover(ctx, el, 0, 0, w, h);
+  ctx.restore();
+}
+
 const draws: Record<string, CanvasDrawFn> = {
   // Draw from at full opacity first so canvas is fully opaque (covers underlying video
   // elements). Then draw to at progress alpha on top → clean linear blend. Null sources
@@ -81,13 +103,14 @@ const draws: Record<string, CanvasDrawFn> = {
     }
   },
 
-  // Note: sourceZoom/sourcePanX/sourcePanY params are not applied in canvas preview.
-  // Canvas draw matches Remotion render for default param values (zoom=1, pan=0,0).
   'facecamtransitionbox': (ctx, from, to, progress, w, h, params) => {
     const scale    = (params.scale     as number) ?? 500;
     const xOff     = (params.xOffset   as number) ?? 350;
     const yOff     = (params.yOffset   as number) ?? 350;
     const color    = (params.wipeColor as string)  || '#c3b091';
+    const zoom     = (params.sourceZoom as number) ?? 1;
+    const panX     = (params.sourcePanX as number) ?? 0;
+    const panY     = (params.sourcePanY as number) ?? 0;
     const boxW     = scale;
     const boxH     = scale * (9 / 16);
     const cx       = xOff;
@@ -113,29 +136,25 @@ const draws: Record<string, CanvasDrawFn> = {
       ctx.save();
       ctx.beginPath(); ctx.arc(cx, cy, r2, 0, Math.PI * 2); ctx.clip();
       if (to) { drawCover(ctx, to, 0, 0, w, h); }
-      ctx.save();
-      ctx.beginPath(); ctx.rect(cx - boxW / 2, cy - boxH / 2, boxW, boxH); ctx.clip();
-      if (from) { drawCover(ctx, from, cx - boxW / 2, cy - boxH / 2, boxW, boxH); }
-      ctx.restore();
+      if (from) { drawFacecamBox(ctx, from, w, h, cx - boxW / 2, cy - boxH / 2, boxW, boxH, zoom, panX, panY); }
       ctx.restore();
     }
   },
 
-  // Note: sourceZoom/sourcePanX/sourcePanY params not applied in canvas preview.
   'staticfacecam': (ctx, from, to, _progress, w, h, params) => {
     const scale = (params.scale   as number) ?? 500;
     const xOff  = (params.xOffset as number) ?? 350;
     const yOff  = (params.yOffset as number) ?? 350;
+    const zoom  = (params.sourceZoom as number) ?? 1;
+    const panX  = (params.sourcePanX as number) ?? 0;
+    const panY  = (params.sourcePanY as number) ?? 0;
     const boxW  = scale;
     const boxH  = scale * (9 / 16);
     const cx    = xOff;
     const cy    = h - yOff;
     ctx.globalAlpha = 1;
     if (to) { drawCover(ctx, to, 0, 0, w, h); }
-    ctx.save();
-    ctx.beginPath(); ctx.rect(cx - boxW / 2, cy - boxH / 2, boxW, boxH); ctx.clip();
-    if (from) { drawCover(ctx, from, cx - boxW / 2, cy - boxH / 2, boxW, boxH); }
-    ctx.restore();
+    if (from) { drawFacecamBox(ctx, from, w, h, cx - boxW / 2, cy - boxH / 2, boxW, boxH, zoom, panX, panY); }
   },
 };
 
