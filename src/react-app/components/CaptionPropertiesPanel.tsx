@@ -1,10 +1,11 @@
 import { useCallback } from 'react';
 import { Type, X, Palette, AlignCenter, Move } from 'lucide-react';
-import type { CaptionStyle, CaptionData } from '@/react-app/hooks/useProject';
+import type { CaptionStyle, CaptionData, CaptionWord } from '@/react-app/hooks/useProject';
 
 interface CaptionPropertiesPanelProps {
   captionData: CaptionData;
   onUpdateStyle: (styleUpdates: Partial<CaptionStyle>) => void;
+  onUpdateWords: (words: CaptionWord[]) => void;
   onClose: () => void;
 }
 
@@ -84,9 +85,14 @@ const CAPTION_PRESETS: Array<{ id: 'clean' | 'highlight'; label: string; style: 
 export default function CaptionPropertiesPanel({
   captionData,
   onUpdateStyle,
+  onUpdateWords,
   onClose,
 }: CaptionPropertiesPanelProps) {
   const style = captionData.style;
+
+  const handleWordTextChange = useCallback((index: number, text: string) => {
+    onUpdateWords(captionData.words.map((w, i) => (i === index ? { ...w, text } : w)));
+  }, [onUpdateWords, captionData.words]);
 
   const handleFontChange = useCallback((value: string) => {
     onUpdateStyle({ fontFamily: value });
@@ -161,6 +167,23 @@ export default function CaptionPropertiesPanel({
 
       {/* Properties */}
       <div className="flex-1 overflow-auto p-3 space-y-4">
+        {/* Word text — fix transcription typos in place; timing stays untouched */}
+        <div>
+          <span className="text-xs font-medium text-zinc-300 block mb-2">Words</span>
+          <div className="space-y-1">
+            {captionData.words.map((word, i) => (
+              <input
+                key={i}
+                name={`caption-word-${i}`}
+                type="text"
+                value={word.text}
+                onChange={(e) => handleWordTextChange(i, e.target.value)}
+                className="w-full px-2 py-1 bg-zinc-800 border border-zinc-700 rounded text-xs text-white"
+              />
+            ))}
+          </div>
+        </div>
+
         {/* Direct-response presets */}
         <div>
           <span className="text-xs font-medium text-zinc-300 block mb-2">Ad Presets</span>

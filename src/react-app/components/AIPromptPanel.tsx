@@ -1262,9 +1262,16 @@ export default function AIPromptPanel({
 
     } catch (error) {
       console.error('Caption workflow error:', error);
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      // User-driven outcomes (cancel/discard/guard) aren't server failures —
+      // show them plainly instead of tacking on the server hint (which also
+      // doubled the punctuation)
+      const isUserOutcome = /canceled|discarded|already running/i.test(message);
       setChatHistory(prev => [...prev, {
         type: 'assistant',
-        text: `Error: ${error instanceof Error ? error.message : 'Unknown error'}. Make sure the ffmpeg server is running.`,
+        text: isUserOutcome
+          ? message
+          : `Error: ${message.replace(/\.$/, '')}. Make sure the ffmpeg server is running.`,
       }]);
     } finally {
       setIsProcessing(false);

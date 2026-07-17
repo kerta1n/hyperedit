@@ -85,6 +85,10 @@ export interface CaptionData {
   // true = created by transcription (Generate Captions); absent/false = manual
   // text clip. Regeneration replaces only generated captions, never manual text.
   generated?: boolean;
+  // true = the user hand-edited this clip's word text. Detection only — used
+  // to WARN before a regeneration wipes hand edits; deliberately NOT used to
+  // skip clips during replacement (owner decision 2026-07-16).
+  wordsEdited?: boolean;
 }
 
 // How a word straddling a caption cut is distributed between the two halves
@@ -921,6 +925,16 @@ export function useProject() {
     });
   }, []);
 
+  // Update a caption clip's word list (in-place text fixes; per-word timing
+  // edits are a future extension of the same surface)
+  const updateCaptionWords = useCallback((clipId: string, words: CaptionWord[]): void => {
+    setCaptionData(prev => {
+      const existing = prev[clipId];
+      if (!existing) return prev;
+      return { ...prev, [clipId]: { ...existing, words, wordsEdited: true } };
+    });
+  }, []);
+
   // Update caption style
   const updateCaptionStyle = useCallback((clipId: string, styleUpdates: Partial<CaptionStyle>): void => {
     setCaptionData(prev => {
@@ -1353,6 +1367,7 @@ export function useProject() {
     addCaptionClipsBatch,
     deleteCaptionClips,
     updateCaptionStyle,
+    updateCaptionWords,
     getCaptionData,
 
     // Live-state refs for async flows (read-only)
