@@ -14,7 +14,8 @@ npm run dev              # Start Vite dev server
 npm run ffmpeg-server    # Start local FFmpeg server (port 3333) - run in separate terminal
 npm run build            # TypeScript + Vite production build
 npm run lint             # ESLint
-npm run check            # Full validation: type check + build
+npm run check            # Full validation: type check + build + tests
+npm run test             # Vitest unit tests (tests/, node env)
 npm run knip             # Check for unused dependencies
 ```
 
@@ -165,4 +166,4 @@ The segment-based approach (extract + concat) is required — single-pass filter
 - Plain Vite + React build. `chunkSizeWarningLimit: 5000` due to Remotion's size.
 - `knip.json` `ignoreDependencies` carries three deliberate zero-importer keeps: `@remotion/media` (WebCodecs POC core), `@remotion/transitions` (decided transition engine), `hono` (R1 decomposition's HTTP layer). Remove each entry when it gains importers; never park anything else there without a decision note.
 - Production hosting: the FFmpeg server serves `dist/` with SPA fallback routing (unmatched GETs return `index.html`); content-hashed assets cache immutably.
-- No tests exist in the codebase and no testing framework is configured. Only test via `npm run lint` for validation.
+- Tests: vitest (`tests/*.test.js`, node environment, config in `vitest.config.js`), run via `npm run test` and as part of `npm run check`. Coverage targets pure functions (project schema/migrations, remotion spec parsing, timeline-to-spec conversion) — no React/browser tests yet. Project state is versioned: `scripts/project-schema.js` holds `PROJECT_SCHEMA_VERSION` + the migration ladder; every server read/write path funnels through `ensureProjectDefaults`, which migrates then defaults. The render spec has its own versioning in `scripts/remotion-core/spec.js` (`SPEC_VERSION_*`, `migrateSpecToV2`).
