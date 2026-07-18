@@ -18,6 +18,7 @@ import { renderSpecWithRemotion, renderDynamicAnimation, renderVariantBatch, inv
 import { scoreVariantBatch, writeCampaignReport } from './remotion-core/ad-intelligence.js';
 import { detectCapabilities } from './hw-detect.js';
 import { getFFmpegEncodeArgs, getAccelSummary } from './hwaccel-config.js';
+import { createDefaultProjectState, ensureProjectDefaults } from './project-schema.js';
 
 // Load environment variables from .dev.vars
 function loadEnvVars() {
@@ -616,69 +617,8 @@ function saveAssetMetadata(session) {
   }
 }
 
-const DEFAULT_PROJECT_TRACKS = [
-  { id: 'T1', type: 'text', name: 'T1', order: 0 },
-  { id: 'V3', type: 'video', name: 'V3', order: 1 },
-  { id: 'V2', type: 'video', name: 'V2', order: 2 },
-  { id: 'V1', type: 'video', name: 'V1', order: 3 },
-  { id: 'A1', type: 'audio', name: 'A1', order: 4 },
-  { id: 'A2', type: 'audio', name: 'A2', order: 5 },
-];
-
-const DEFAULT_BRAND_THEME = {
-  name: 'HyperEdit Growth Theme',
-  fontFamily: 'Inter',
-  accentColor: '#f97316',
-  secondaryColor: '#22d3ee',
-  backgroundColor: '#0a0a0a',
-  textColor: '#ffffff',
-  glow: 0.4,
-  motionSpeed: 1,
-};
-
-function createDefaultProjectState() {
-  return {
-    tracks: [...DEFAULT_PROJECT_TRACKS],
-    clips: [],
-    settings: {
-      width: 1920,
-      height: 1080,
-      fps: 30,
-    },
-    captionData: {},
-    transitions: [],
-    brandTheme: { ...DEFAULT_BRAND_THEME },
-    adTemplate: null,
-  };
-}
-
-function ensureProjectDefaults(project = {}) {
-  return {
-    ...createDefaultProjectState(),
-    ...project,
-    tracks: Array.isArray(project.tracks) && project.tracks.length > 0
-      ? project.tracks
-      : [...DEFAULT_PROJECT_TRACKS],
-    clips: Array.isArray(project.clips) ? project.clips : [],
-    // Spread first so client-owned settings fields (e.g. captionSplitMode)
-    // survive the defaults pass instead of being rebuilt away
-    settings: {
-      ...(project.settings || {}),
-      width: project.settings?.width || 1920,
-      height: project.settings?.height || 1080,
-      fps: project.settings?.fps || 30,
-    },
-    captionData: project.captionData || {},
-    transitions: Array.isArray(project.transitions) ? project.transitions : [],
-    timelineTransitions: Array.isArray(project.timelineTransitions) ? project.timelineTransitions : [],
-    brandTheme: {
-      ...DEFAULT_BRAND_THEME,
-      ...(project.brandTheme || {}),
-    },
-    adTemplate: project.adTemplate || null,
-    renderOptions: project.renderOptions || null,
-  };
-}
+// Project defaults + version migration ladder live in project-schema.js
+// (imported above) so the ladder is unit-testable outside this file.
 
 // Composition values (fps/width/height) are owned by the project's settings
 // (spec.settings source of truth). Request-body values remain honored as an
@@ -700,6 +640,7 @@ function orientationOf(width, height) {
 function serializeProjectForClient(project = {}) {
   const normalized = ensureProjectDefaults(project);
   return {
+    version: normalized.version,
     tracks: normalized.tracks,
     clips: normalized.clips,
     settings: normalized.settings,
