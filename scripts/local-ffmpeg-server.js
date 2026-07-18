@@ -1996,7 +1996,7 @@ async function getMediaInfo(inputPath) {
     const result = await runFFmpegProbe([
       '-v', 'error',
       '-select_streams', 'v:0',
-      '-show_entries', 'stream=width,height,duration,r_frame_rate',
+      '-show_entries', 'stream=width,height,duration,r_frame_rate:format=duration',
       '-of', 'json',
       inputPath
     ], 'probe');
@@ -2008,10 +2008,14 @@ async function getMediaInfo(inputPath) {
       const [num, den] = stream.r_frame_rate.split('/').map(Number);
       if (num && den) fps = num / den;
     }
+    // Container (format) duration covers all streams; the video stream's own
+    // duration undershoots it when audio outruns video, which starved the
+    // /transcribe -t window of end-of-clip words. Same field getVideoDuration
+    // probes, so asset.duration and transcribe windows share one basis.
     return {
       width: stream.width || 0,
       height: stream.height || 0,
-      duration: parseFloat(stream.duration) || 0,
+      duration: parseFloat(info.format?.duration) || parseFloat(stream.duration) || 0,
       fps,
     };
   } catch {
@@ -3795,6 +3799,13 @@ async function handleTranscribe(req, res, sessionId) {
       console.log(`[${jobId}] Transcribing window: ${(startTime || 0).toFixed(2)}s → +${transcribedDuration.toFixed(2)}s`);
     }
 
+    // Unreachable via the UI today (0.1s resize floor), but a degenerate window
+    // would extract empty audio and surface as a misleading no-speech 400.
+    if (transcribedDuration <= 0) {
+      sendJSON(res, { error: 'Requested transcription window is empty (starts at or beyond the end of the media).' }, 400);
+      return;
+    }
+
     // Extract audio as MP3 (with optional trim for resized clips)
     console.log(`[${jobId}] Extracting audio...`);
     const ffmpegArgs = ['-y'];
@@ -3803,9 +3814,10 @@ async function handleTranscribe(req, res, sessionId) {
     }
     ffmpegArgs.push('-i', videoAsset.path);
     if (endTime !== undefined) {
-      // When using -ss before -i (input seeking), -to is relative to the new start
-      const duration = endTime - (startTime || 0);
-      ffmpegArgs.push('-t', String(duration));
+      // -ss before -i (input seeking) makes this relative to the new start.
+      // transcribedDuration is the clamped window, so -t always matches what
+      // every downstream consumer (LLM hints, fallback spacing, response) uses.
+      ffmpegArgs.push('-t', String(transcribedDuration));
     }
     ffmpegArgs.push('-vn', '-acodec', 'libmp3lame', '-ab', '64k', '-ar', '16000', '-ac', '1', audioPath);
     await runFFmpeg(ffmpegArgs, jobId);
@@ -3974,8 +3986,9 @@ Guidelines:
       console.error(`[${jobId}] Empty transcription - Gemini returned no words`);
       console.error(`[${jobId}] This could mean: no speech in video, audio too quiet, or unsupported language`);
 
+      const windowRequested = startTime !== undefined || endTime !== undefined;
       sendJSON(res, {
-        error: 'No speech detected. Make sure the video has clear, audible speech.',
+        error: `No speech detected${windowRequested ? ' in the selected clip range' : ''}. Make sure the video has clear, audible speech.`,
         debug: {
           transcriptionText: (transcription.text || '').substring(0, 200),
           wordCount: (transcription.words || []).length
