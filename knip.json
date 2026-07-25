@@ -4,7 +4,7 @@
     "src/react-app/main.tsx",
     "src/remotion/index.tsx"
   ],
-  "project": ["src/**/*.{ts,tsx}", "scripts/**/*.js"],
+  "project": ["src/**/*.{ts,tsx}", "scripts/**/*.{js,ts}"],
   "ignore": [
     ".bun/**",
     "dist/**",
@@ -12,8 +12,7 @@
   ],
   "ignoreDependencies": [
     "@remotion/media",
-    "@remotion/transitions",
-    "hono"
+    "@remotion/transitions"
   ],
   "rules": {
     "exports": "warn",

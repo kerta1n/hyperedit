@@ -35,11 +35,25 @@ export default tseslint.config(
     },
   },
   {
+    // R1 migration ratchet for scripts/server: handler bodies move in verbatim
+    // from the JS monolith, so explicit-any and empty-catch survive the move.
+    // Tighten per file as zod boundaries land (Phase 3); delete this block
+    // when the last verbatim body is typed.
+    files: ["scripts/server/**/*.ts"],
+    rules: {
+      "@typescript-eslint/no-explicit-any": "off",
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        { caughtErrors: "none", argsIgnorePattern: "^_" },
+      ],
+      "no-empty": ["error", { allowEmptyCatch: true }],
+    },
+  },
+  {
     // Grandfathered oversized files. This list may ONLY shrink: each
     // refactor phase deletes the entries for files it decomposes.
     // Never add entries.
     files: [
-      "scripts/local-ffmpeg-server.js",
       "src/react-app/components/AIPromptPanel.tsx",
       "src/remotion/DynamicAnimation.tsx",
       "src/react-app/pages/Home.tsx",

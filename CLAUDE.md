@@ -40,7 +40,12 @@ src/
 ├── remotion/            # Motion graphics system
 │   └── templates/       # 11 templates with registry in index.ts
 scripts/
-└── local-ffmpeg-server.js  # Session-based FFmpeg server with Whisper transcription
+└── server/              # Session-based FFmpeg/Remotion server (TypeScript, Hono)
+    ├── main.ts          # Entry: bootstrap + serve
+    ├── http-app.ts      # Hono routing over the service route tables
+    ├── *-service.ts     # One concern per service (assets, render, transcription, ...)
+    ├── *-gateway.ts     # Provider adapters (vendor names live ONLY here)
+    └── *-helpers.ts     # ffmpeg/whisper/http/spa shared substrate
 ```
 
 **Key patterns:**
@@ -68,7 +73,7 @@ The `useProject()` hook in `src/react-app/hooks/useProject.ts` is the central st
 
 ## FFmpeg Server
 
-The local FFmpeg server (`scripts/local-ffmpeg-server.js`, ~9000 lines) is a raw Node.js `http.createServer` with regex-based route matching. It handles all video processing, asset management, Remotion rendering, transcription, fal.ai calls, LLM edit-command generation, and SPA hosting.
+The local FFmpeg server lives in `scripts/server/` as native-TypeScript modules (Node 24 type stripping — no build step): a thin Hono layer (`http-app.ts`) routes to one-concern `*-service.ts` files, each exporting a typed route table; handlers write raw Node responses (streams, NDJSON, range requests) and provider SDKs are confined to `*-gateway.ts`. It handles all video processing, asset management, Remotion rendering, transcription, generative-media calls, LLM edit-command generation, and SPA hosting. Entry: `scripts/server/main.ts` (`npm run ffmpeg-server`).
 
 Key endpoints on `localhost:3333`:
 - `POST /session/create` - Create new editing session

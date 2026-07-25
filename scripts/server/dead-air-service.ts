@@ -1,0 +1,161 @@
+import type { IncomingMessage, ServerResponse } from 'http';
+import { existsSync, unlinkSync, writeFileSync } from 'fs';
+import { join } from 'path';
+import { calculateKeepSegments, detectSilence, getVideoDuration, runFFmpeg } from './ffmpeg-helpers.ts';
+import { sendJSON } from './http-helpers.ts';
+import { requireSession } from './session-store.ts';
+import type { SessionRoute } from './route-table.ts';
+
+// STABLE WORKFLOW — DO NOT MODIFY (see CLAUDE.md "Dead Air Removal").
+// The segment-based extract + re-encode + concat approach is required;
+// single-pass filter approaches (select/aselect, trim/atrim) drop audio
+// streams. This file's boundary IS the decree's scope.
+
+// Remove dead air within a session
+async function handleSessionRemoveDeadAir(req: IncomingMessage, res: ServerResponse, sessionId: string) {
+  const session = requireSession(res, sessionId);
+  if (!session) return;
+
+  const jobId = sessionId;
+  const outputPath = join(session.dir, `deadair-output-${Date.now()}.mp4`);
+  const concatListPath = join(session.dir, `concat-${Date.now()}.txt`);
+  const segmentPaths: string[] = [];
+
+  try {
+    // Parse options from body
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    const options = body ? JSON.parse(body) : {};
+
+    const silenceThreshold = options.silenceThreshold || -30;
+    const minSilenceDuration = options.minSilenceDuration || 0.3;
+
+    console.log(`\n[${jobId}] === DEAD AIR REMOVAL (Session) ===`);
+
+    // Explicit target only — library-order guessing is nondeterministic after restarts
+    if (!options.assetId) {
+      sendJSON(res, {
+        error: 'assetId is required',
+        hint: 'Pass the id of the video asset to process; GET /session/:id/assets lists assets.',
+      }, 400);
+      return;
+    }
+    const videoAsset = session.assets.get(options.assetId);
+    if (!videoAsset || videoAsset.type !== 'video') {
+      sendJSON(res, {
+        error: `No video asset with id ${options.assetId} in session`,
+        hint: 'GET /session/:id/assets lists available assets.',
+      }, 400);
+      return;
+    }
+
+    // Verify the video file exists on disk
+    if (!existsSync(videoAsset.path)) {
+      console.error(`[${jobId}] Video file missing: ${videoAsset.path}`);
+      sendJSON(res, {
+        error: 'Video file no longer exists. Your session may have expired. Please re-upload your video.',
+        code: 'VIDEO_FILE_MISSING'
+      }, 410);
+      return;
+    }
+
+    console.log(`[${jobId}] Using video asset: ${videoAsset.filename} (${videoAsset.path})`);
+
+    const totalDuration = await getVideoDuration(videoAsset.path);
+    console.log(`[${jobId}] Video duration: ${totalDuration.toFixed(2)}s`);
+
+    const silencePeriods = await detectSilence(videoAsset.path, jobId, {
+      silenceThreshold,
+      minSilenceDuration,
+    });
+
+    if (silencePeriods.length === 0) {
+      console.log(`[${jobId}] No silence detected`);
+      sendJSON(res, {
+        success: true,
+        duration: totalDuration,
+        removedDuration: 0,
+        message: 'No silence detected',
+      });
+      return;
+    }
+
+    const keepSegments = calculateKeepSegments(silencePeriods, totalDuration);
+    console.log(`[${jobId}] Keeping ${keepSegments.length} segments`);
+
+    const totalKeptDuration = keepSegments.reduce((sum, seg) => sum + (seg.end - seg.start), 0);
+    const removedDuration = totalDuration - totalKeptDuration;
+    console.log(`[${jobId}] Removing ${removedDuration.toFixed(2)}s of dead air (${((removedDuration / totalDuration) * 100).toFixed(1)}%)`);
+
+    // Extract segments
+    console.log(`[${jobId}] Extracting segments...`);
+    for (let i = 0; i < keepSegments.length; i++) {
+      const seg = keepSegments[i];
+      const segmentPath = join(session.dir, `segment-${Date.now()}-${i}.mp4`);
+      segmentPaths.push(segmentPath);
+
+      // -ss before -i (input seeking): jumps to the segment instead of decoding the
+      // whole file up to it — O(n) instead of O(n²) across segments. Frame-accurate
+      // here because every segment is re-encoded.
+      const args = [
+        '-y',
+        '-ss', seg.start.toString(),
+        '-i', videoAsset.path,
+        '-t', (seg.end - seg.start).toString(),
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18',
+        '-c:a', 'aac', '-b:a', '192k',
+        segmentPath
+      ];
+
+      await runFFmpeg(args, jobId);
+      console.log(`\n[${jobId}] Segment ${i + 1}/${keepSegments.length}`);
+    }
+
+    // Concatenate
+    const concatList = segmentPaths.map(p => `file '${p}'`).join('\n');
+    writeFileSync(concatListPath, concatList);
+
+    console.log(`[${jobId}] Concatenating...`);
+    await runFFmpeg(['-y', '-f', 'concat', '-safe', '0', '-i', concatListPath, '-c', 'copy', '-movflags', '+faststart', outputPath], jobId);
+
+    console.log(`\n[${jobId}] Dead air removal complete`);
+
+    // Cleanup segments
+    segmentPaths.forEach(p => { try { unlinkSync(p); } catch { } });
+    try { unlinkSync(concatListPath); } catch { }
+
+    // Replace the video asset file
+    const { rename, stat } = await import('fs/promises');
+    unlinkSync(videoAsset.path);
+    await rename(outputPath, videoAsset.path);
+
+    const newStats = await stat(videoAsset.path);
+
+    // Update the video asset metadata
+    videoAsset.duration = totalKeptDuration;
+    videoAsset.size = newStats.size;
+
+    session.editCount++;
+
+    console.log(`\n[${jobId}] === DEAD AIR REMOVAL COMPLETE ===`);
+
+    sendJSON(res, {
+      success: true,
+      duration: totalKeptDuration,
+      originalDuration: totalDuration,
+      removedDuration,
+      size: newStats.size,
+      editCount: session.editCount,
+    });
+
+  } catch (error: any) {
+    console.error(`[${jobId}] Error:`, error.message);
+    segmentPaths.forEach(p => { try { unlinkSync(p); } catch { } });
+    try { unlinkSync(concatListPath); } catch { }
+    sendJSON(res, { error: error.message }, 500);
+  }
+}
+
+export const deadAirRoutes: SessionRoute[] = [
+  { method: 'POST', action: 'remove-dead-air', handler: handleSessionRemoveDeadAir },
+];

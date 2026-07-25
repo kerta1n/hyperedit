@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.server.tsbuildinfo",
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "types": ["node"],
+
+    /* Node 24 runs these files directly via type stripping */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+
+    /* Linting — strict stays OFF while verbatim-JS handler bodies migrate in
+       (strict-null/unknown-catch errors on moved code); unresolved-name and
+       unused-local checking stay on. Flip strict on as zod boundaries land
+       (Phase 3). */
+    "strict": false,
+    "noUnusedLocals": true,
+    "noUnusedParameters": false,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["scripts/server/**/*.ts"]
+}

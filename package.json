@@ -9,6 +9,7 @@
   "dependencies": {
     "@fal-ai/client": "^1.8.4",
     "@google/genai": "^1.38.0",
+    "@hono/node-server": "2.0.10",
     "@remotion/animated-emoji": "^4.0.489",
     "@remotion/bundler": "^4.0.489",
     "@remotion/gif": "^4.0.489",
@@ -57,7 +58,7 @@
     "check": "tsc -b && vite build && vitest run",
     "test": "vitest run",
     "dev": "vite",
-    "ffmpeg-server": "node scripts/local-ffmpeg-server.js",
+    "ffmpeg-server": "node scripts/server/main.ts",
     "remotion:render": "node scripts/remotion-core-cli.js render",
     "remotion:variants": "node scripts/remotion-core-cli.js variants",
     "remotion:batch": "node scripts/remotion-core-cli.js batch",
