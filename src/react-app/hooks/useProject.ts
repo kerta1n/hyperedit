@@ -469,8 +469,11 @@ export function useProject() {
         width: result.asset.width,
         height: result.asset.height,
         fps: result.asset.fps,
+        // Cache-bust the thumbnail (parity with refreshAssets/loadProject): the
+        // background ingest re-writes this JPEG under the same id, and the
+        // endpoint is cached (max-age), so a bare URL would pin the first frame.
         thumbnailUrl: result.asset.thumbnailUrl
-          ? `${LOCAL_FFMPEG_URL}${result.asset.thumbnailUrl}`
+          ? `${LOCAL_FFMPEG_URL}${result.asset.thumbnailUrl}${result.asset.thumbnailUrl.includes('?') ? '&' : '?'}v=${Date.now()}`
           : null,
       };
 
@@ -510,10 +513,14 @@ export function useProject() {
     ));
   }, [session]);
 
-  // Get asset stream URL
+  // Get asset stream URL. ?tier=proxy asks the server for the 540p preview proxy
+  // (Phase 5 §7.4) — it silently falls back to the source when no proxy exists
+  // (fresh upload, non-video, ingest failed), so this is always safe. Preview
+  // only: the render path builds its own spec URLs server-side with no tier
+  // param, so render-reads-source holds by construction.
   const getAssetStreamUrl = useCallback((assetId: string): string | null => {
     if (!session) return null;
-    return `${LOCAL_FFMPEG_URL}/session/${session.sessionId}/assets/${assetId}/stream`;
+    return `${LOCAL_FFMPEG_URL}/session/${session.sessionId}/assets/${assetId}/stream?tier=proxy`;
   }, [session]);
 
   // Refresh assets from server (useful after server-side asset generation)
@@ -553,13 +560,32 @@ export function useProject() {
       thumbnailUrl: a.thumbnailUrl
         ? `${LOCAL_FFMPEG_URL}${a.thumbnailUrl}${a.thumbnailUrl.includes('?') ? '&' : '?'}v=${Date.now()}`
         : null,
-      streamUrl: `${LOCAL_FFMPEG_URL}/session/${session.sessionId}/assets/${a.id}/stream?v=${Date.now()}`,
+      streamUrl: `${LOCAL_FFMPEG_URL}/session/${session.sessionId}/assets/${a.id}/stream?v=${Date.now()}&tier=proxy`,
       // Preserve aiGenerated flag for Remotion-generated animations (critical for edit workflow detection)
       aiGenerated: a.aiGenerated || false,
     }));
 
     setAssets(serverAssets);
     return serverAssets;
+  }, [session]);
+
+  // Refresh ONLY the thumbnails of assets already in state — used after a
+  // background ingest finishes rebuilding a post-edit thumbnail (dead-air). It
+  // deliberately leaves streamUrl untouched so the preview <video> does NOT
+  // reload (playback/sync stays intact); it only re-stamps the thumbnail URL so
+  // the asset-library card drops the cached pre-edit frame.
+  const refreshThumbnails = useCallback(async (): Promise<void> => {
+    if (!session) return;
+    const response = await fetch(`${LOCAL_FFMPEG_URL}/session/${session.sessionId}/assets`);
+    if (!response.ok) return;
+    const data = await response.json();
+    const byId = new Map<string, string | null>();
+    for (const a of (data.assets || []) as { id: string; thumbnailUrl?: string | null }[]) {
+      byId.set(a.id, a.thumbnailUrl
+        ? `${LOCAL_FFMPEG_URL}${a.thumbnailUrl}${a.thumbnailUrl.includes('?') ? '&' : '?'}v=${Date.now()}`
+        : null);
+    }
+    setAssets(prev => prev.map(a => (byId.has(a.id) ? { ...a, thumbnailUrl: byId.get(a.id) ?? null } : a)));
   }, [session]);
 
   // Add clip to timeline
@@ -1191,11 +1217,15 @@ export function useProject() {
           width: a.width,
           height: a.height,
           fps: a.fps,
+          // Cache-bust the thumbnail too (parity with refreshAssets): an
+          // in-place edit rewrites the JPEG under the same id, and the endpoint
+          // is cached (max-age), so a bare URL keeps the pre-edit frame on reload.
           thumbnailUrl: a.thumbnailUrl
-            ? `${LOCAL_FFMPEG_URL}${a.thumbnailUrl}`
+            ? `${LOCAL_FFMPEG_URL}${a.thumbnailUrl}${a.thumbnailUrl.includes('?') ? '&' : '?'}v=${Date.now()}`
             : null,
-          // Add cache-busting timestamp to force reload after file changes
-          streamUrl: `${LOCAL_FFMPEG_URL}/session/${session.sessionId}/assets/${a.id}/stream?v=${Date.now()}`,
+          // Add cache-busting timestamp to force reload after file changes;
+          // ?tier=proxy serves the 540p preview proxy with silent source fallback (§7.4).
+          streamUrl: `${LOCAL_FFMPEG_URL}/session/${session.sessionId}/assets/${a.id}/stream?v=${Date.now()}&tier=proxy`,
           // Preserve aiGenerated flag for Remotion-generated animations (critical for edit workflow detection)
           aiGenerated: a.aiGenerated || false,
         }));
@@ -1416,6 +1446,7 @@ export function useProject() {
     deleteAsset,
     getAssetStreamUrl,
     refreshAssets,
+    refreshThumbnails,
     createGif,
 
     // Clips

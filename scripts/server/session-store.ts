@@ -5,6 +5,8 @@ import { randomUUID } from 'crypto';
 import { createDefaultProjectState, ensureProjectDefaults } from '../project-schema.js';
 import { SESSIONS_DIR, TEMP_DIR, UPLOAD_STAGING_DIR } from './server-config.ts';
 import { sendJSON } from './http-helpers.ts';
+// Runtime-only edge; proxy-cache-store imports THIS module type-only, so no cycle.
+import { evictAssetProxy } from './proxy-cache-store.ts';
 
 export interface SessionAsset {
   id: string;
@@ -27,6 +29,14 @@ export interface SessionAsset {
   vfr?: boolean;
   hdr?: boolean;
   rotation?: number;
+  // Proxy tier (additive since Phase 5 step 4): 540p preview transcode built by
+  // the ingest lane. Path is derived (…/proxies/{id}.mp4), so only status+version
+  // persist. `building` = a force rebuild is in flight after an in-place mutation
+  // (dead-air) — the stream tier resolver treats non-`ready` as "serve source".
+  proxy?: { status: 'ready' | 'failed' | 'building'; version: number } | null;
+  // Waveform peaks (additive since Phase 5 step 7): ~20 peaks/sec envelope JSON
+  // built by the ingest lane. Path is derived (…/peaks/{id}.json), so only status+version persist.
+  peaks?: { status: 'ready' | 'failed'; version: number } | null;
   [key: string]: any;
 }
 
@@ -79,6 +89,34 @@ export function cleanupStaleTempFiles(): void {
   };
   sweep(TEMP_DIR);
   sweep(UPLOAD_STAGING_DIR);
+}
+
+// Render-worker leftovers accumulate across restarts (§8 temp-hygiene): Chrome
+// user-data profiles land in the ramdisk root (HYPEREDIT_TEMP_DIR) and webpack
+// bundle dirs under {HYPEREDIT_OUTPUT}/cache/bundles are timestamped per build
+// and never reused across restarts. At startup the render worker hasn't spawned
+// (it's lazy) and the in-memory bundle cache is empty, so every one of these is
+// an orphan — clear them to reclaim ramdisk/HDD. (NVENC merged-binary dirs are
+// version-stamped and the current one is load-bearing, so they are left alone.)
+export function cleanupStaleRenderArtifacts(): void {
+  const removeMatching = (dir: string, prefix: string, label: string) => {
+    if (!dir || !existsSync(dir)) return;
+    let count = 0;
+    try {
+      for (const name of readdirSync(dir)) {
+        if (!name.startsWith(prefix)) continue;
+        try { rmSync(join(dir, name), { recursive: true, force: true }); count++; } catch { /* best-effort */ }
+      }
+    } catch (e) {
+      console.warn(`[Cleanup] ${label} sweep failed:`, (e as Error).message);
+      return;
+    }
+    if (count > 0) console.log(`[Cleanup] Removed ${count} stale ${label}`);
+  };
+
+  removeMatching(process.env.HYPEREDIT_TEMP_DIR || '', 'puppeteer_dev_chrome_profile-', 'Chrome render profile(s)');
+  const bundlesDir = join(process.env.HYPEREDIT_OUTPUT || join(process.cwd(), '.output'), 'cache', 'bundles');
+  removeMatching(bundlesDir, 'bundle-', 'render bundle(s)');
 }
 
 // Restore sessions from disk on server start
@@ -190,6 +228,8 @@ export function restoreSessionsFromDisk(): void {
           vfr: savedMeta.vfr,
           hdr: savedMeta.hdr,
           rotation: savedMeta.rotation,
+          proxy: savedMeta.proxy,
+          peaks: savedMeta.peaks,
         });
 
         if (savedMeta.aiGenerated) {
@@ -285,6 +325,10 @@ export function saveAssetMetadata(session: Session): void {
       vfr: asset.vfr,
       hdr: asset.hdr,
       rotation: asset.rotation,
+      // Proxy status/version (path derived from session dir, not persisted)
+      proxy: asset.proxy,
+      // Waveform peaks status/version (path derived, not persisted)
+      peaks: asset.peaks,
     };
   }
 
@@ -295,13 +339,20 @@ export function saveAssetMetadata(session: Session): void {
   }
 }
 
-// Asset-mutation choke point (Phase 5 §7.5). A destructive in-place edit
-// rewrites an asset's bytes under the SAME asset id, staling everything keyed to
-// it. This owns the cheap in-memory invalidation; the caller re-enqueues an
-// ingest job (enqueueIngest) to rebuild the derived artifacts — the thumbnail,
-// and later the proxy + waveform peaks. Kept split so session-store stays free
-// of a job-queue/ingest import (no cycle).
+// Asset-mutation choke point (Phase 5 §7.5) — THE single place an in-place asset
+// rewrite is registered. Any code path (human or agent) that rewrites an asset's
+// bytes under the SAME asset id MUST call this; it is the sole owner of proxy/
+// warm invalidation, so nothing else evicts on mutation (the ingest lane deliberately
+// does NOT). A destructive edit stales everything keyed to the id; this owns the
+// cheap in-memory invalidation, and the caller re-enqueues an ingest job
+// (enqueueIngest) to rebuild the derived artifacts — thumbnail, proxy, waveform
+// peaks. Kept split so session-store stays free of a job-queue/ingest import.
+// (R9 immutable asset versions supersede this hook entirely — do not grow it.)
 //   - invalidate the cached transcript (word timings shifted with the cut)
+//   - stale the proxy on BOTH tiers (§7.6) so the resolver serves the freshly
+//     rewritten source until the re-ingest rebuilds it — mark it non-`ready`
+//     (the status gate blocks the mid-rebuild HDD file) and drop the warm
+//     ramdisk copy (which would otherwise keep serving the pre-edit frames)
 //   - persist metadata — dead-air updates duration/size in memory only, so a
 //     restart would otherwise restore the PRE-edit values from assets-meta.json
 // Dead-air is currently the only in-place rewrite path (process-asset and
@@ -309,6 +360,9 @@ export function saveAssetMetadata(session: Session): void {
 export function onAssetMutated(session: Session, assetId: string): void {
   if (!session) return;
   session.transcriptCache?.delete(assetId);
+  const asset = session.assets.get(assetId);
+  if (asset?.proxy) asset.proxy = { status: 'building', version: Date.now() };
+  evictAssetProxy(session.id, assetId);
   saveAssetMetadata(session);
 }
 

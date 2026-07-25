@@ -109,10 +109,15 @@ export function useSessionManager({
       const res = await fetch(`${LOCAL_FFMPEG_URL}/session/${sessionId}`, {
         method: 'DELETE',
       });
-      if (!res.ok) throw new Error('Delete failed');
+      if (!res.ok) {
+        // Surface the server's reason (e.g. the 409 "a job is still running"
+        // hint) instead of a generic string, so the user knows to wait/cancel.
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.hint || data.error || `Delete failed (${res.status})`);
+      }
       await fetchSessions();
-    } catch {
-      setError('Failed to delete session');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to delete session');
     }
   }, [currentSession, fetchSessions]);
 

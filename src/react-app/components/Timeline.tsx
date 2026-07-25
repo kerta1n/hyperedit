@@ -508,6 +508,7 @@ export default function Timeline({
                 return (
                   <div
                     key={track.id}
+                    data-track-id={track.id}
                     className={`relative border-b border-zinc-800/50 ${
                       isDragOver ? 'bg-orange-500/10' : 'bg-zinc-900/30'
                     }`}

@@ -11,6 +11,7 @@ import {
 } from '../remotion-core/spec.js';
 import { PORT } from './server-config.ts';
 import { sendJSON } from './http-helpers.ts';
+import { warmSession } from './proxy-cache-store.ts';
 import {
   getSessionAssetsAsArray,
   requireSession,
@@ -39,6 +40,11 @@ function handleProjectGet(req: IncomingMessage, res: ServerResponse, sessionId: 
   }
 
   session.project = ensureProjectDefaults(session.project);
+
+  // GET /project is the "user opened this session" signal — warm its proxies
+  // into the ramdisk in the background (§7.1). Best-effort, never blocks the
+  // response; preview falls back to the HDD proxy / source until it lands.
+  warmSession(session).catch(() => {});
 
   sendJSON(res, serializeProjectForClient(session.project));
 }

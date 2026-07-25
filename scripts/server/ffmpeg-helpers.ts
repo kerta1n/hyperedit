@@ -8,21 +8,33 @@ export function runProcess(
   label: string,
   args: string[],
   jobId: string,
-  { timeout, resolveWith = 'stderr', logProgress = false }: { timeout?: number; resolveWith?: 'stderr' | 'stdout'; logProgress?: boolean } = {},
+  { timeout, resolveWith = 'stderr', logProgress = false, signal }: { timeout?: number; resolveWith?: 'stderr' | 'stdout'; logProgress?: boolean; signal?: AbortSignal } = {},
 ): Promise<string> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error(`${label} aborted`));
+      return;
+    }
     const child = spawn(binary, args);
     let stdout = '';
     let stderr = '';
-    let killed = false;
+    // Why the process died, if we killed it — keeps the timeout and cancel
+    // rejections distinguishable (a cancel must not look like a real failure).
+    let killReason: 'timeout' | 'abort' | null = null;
     let timer: NodeJS.Timeout | undefined;
 
     if (timeout) {
       timer = setTimeout(() => {
-        killed = true;
+        killReason = 'timeout';
         child.kill('SIGKILL');
       }, timeout);
     }
+
+    const onAbort = () => {
+      killReason = 'abort';
+      child.kill('SIGKILL');
+    };
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
 
     child.stdout.on('data', (data) => {
       stdout += data.toString();
@@ -42,8 +54,11 @@ export function runProcess(
 
     child.on('close', (code) => {
       if (timer) clearTimeout(timer);
-      if (killed) {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      if (killReason === 'timeout') {
         reject(new Error(`${label} timed out after ${timeout}ms`));
+      } else if (killReason === 'abort') {
+        reject(new Error(`${label} aborted`));
       } else if (code === 0) {
         resolve(resolveWith === 'stdout' ? stdout : stderr);
       } else {
@@ -52,18 +67,97 @@ export function runProcess(
     });
     child.on('error', (err) => {
       if (timer) clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', onAbort);
       reject(err);
     });
   });
 }
 
-export function runFFmpeg(args: string[], jobId: string, { timeout }: { timeout?: number } = {}): Promise<string> {
-  return runProcess('ffmpeg', 'FFmpeg', args, jobId, { timeout, logProgress: true });
+export function runFFmpeg(args: string[], jobId: string, { timeout, signal }: { timeout?: number; signal?: AbortSignal } = {}): Promise<string> {
+  return runProcess('ffmpeg', 'FFmpeg', args, jobId, { timeout, logProgress: true, signal });
 }
 
 // Run FFprobe command and return stdout
 export function runFFmpegProbe(args: string[], jobId: string): Promise<string> {
   return runProcess('ffprobe', 'FFprobe', args, jobId, { resolveWith: 'stdout' });
+}
+
+// True iff the file has at least one audio stream. Used to skip waveform-peak
+// extraction on silent video (screen recordings, muted exports): ffmpeg's
+// `-vn … -f s16le -` errors ("Output file does not contain any stream") when
+// there is no audio, so building peaks for those is a guaranteed failure — skip,
+// don't fail. A probe error returns false (skip) rather than throwing.
+export async function hasAudioStream(inputPath: string): Promise<boolean> {
+  try {
+    const out = await runFFmpegProbe([
+      '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', inputPath,
+    ], 'probe');
+    return out.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+// Compute a waveform peak envelope from an asset's audio for the timeline strip
+// (Phase 5 step 7). Decodes to low-rate mono s16le PCM on ffmpeg's STDOUT — no
+// temp file, no full PCM buffer left on the ramdisk — and buckets it in one
+// streaming pass: ~peaksPerSec buckets/sec, each the max |sample| in its window
+// normalized to 0..1 (rounded to 3 dp). Binary is captured as Buffers, never a
+// string (runProcess's string concat would corrupt the PCM). Boring JSON output,
+// no invented binary format. Rejects on non-zero exit, timeout, or abort.
+export function extractWaveformPeaks(
+  inputPath: string,
+  { peaksPerSec = 20, sampleRate = 8000, timeout = 600_000, signal }:
+    { peaksPerSec?: number; sampleRate?: number; timeout?: number; signal?: AbortSignal } = {},
+): Promise<number[]> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(new Error('waveform peaks aborted')); return; }
+    const samplesPerPeak = Math.max(1, Math.round(sampleRate / peaksPerSec));
+    const child = spawn('ffmpeg', [
+      '-v', 'error', '-i', inputPath, '-vn', '-ac', '1', '-ar', String(sampleRate), '-f', 's16le', '-',
+    ]);
+
+    const peaks: number[] = [];
+    let curMax = 0;
+    let count = 0;
+    let carry: Buffer | null = null; // odd trailing byte across a chunk boundary
+    let stderr = '';
+    let killReason: 'timeout' | 'abort' | null = null;
+
+    const timer = setTimeout(() => { killReason = 'timeout'; child.kill('SIGKILL'); }, timeout);
+    const onAbort = () => { killReason = 'abort'; child.kill('SIGKILL'); };
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      const buf = carry ? Buffer.concat([carry, chunk]) : chunk;
+      const usable = buf.length - (buf.length % 2);
+      carry = usable < buf.length ? buf.subarray(usable) : null;
+      for (let i = 0; i < usable; i += 2) {
+        const s = Math.abs(buf.readInt16LE(i));
+        if (s > curMax) curMax = s;
+        if (++count >= samplesPerPeak) {
+          peaks.push(Math.round((curMax / 32768) * 1000) / 1000);
+          curMax = 0; count = 0;
+        }
+      }
+    });
+    child.stderr.on('data', (d) => { stderr += d.toString(); });
+
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', onAbort);
+      reject(err);
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', onAbort);
+      if (killReason === 'timeout') { reject(new Error(`waveform peaks timed out after ${timeout}ms`)); return; }
+      if (killReason === 'abort') { reject(new Error('waveform peaks aborted')); return; }
+      if (code !== 0) { reject(new Error(`waveform peaks failed with code ${code}: ${stderr.slice(-300)}`)); return; }
+      if (count > 0) peaks.push(Math.round((curMax / 32768) * 1000) / 1000); // final partial bucket
+      resolve(peaks);
+    });
+  });
 }
 
 export interface SilencePeriod {

@@ -149,7 +149,7 @@ async function handleSessionRemoveDeadAir(req: IncomingMessage, res: ServerRespo
     // duration) + invalidate the cached transcript, then re-ingest the rewritten
     // bytes to rebuild the thumbnail (and later proxy/peaks) off the ffmpeg lane.
     onAssetMutated(session, options.assetId);
-    enqueueIngest(session, options.assetId, { force: true });
+    const ingestJob = enqueueIngest(session, options.assetId, { force: true });
 
     session.editCount++;
 
@@ -162,6 +162,9 @@ async function handleSessionRemoveDeadAir(req: IncomingMessage, res: ServerRespo
       removedDuration,
       size: newStats.size,
       editCount: session.editCount,
+      // The post-edit thumbnail (+ proxy) rebuild runs on this async ingest job;
+      // the client polls it to refresh the otherwise-stale pre-edit thumbnail.
+      ingestJobId: ingestJob.id,
     };
 
     } catch (error: any) {

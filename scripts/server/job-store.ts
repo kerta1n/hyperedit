@@ -18,6 +18,9 @@ export interface JobRecord {
   id: string;
   sessionId: string;
   kind: string;
+  // Subject asset for asset-scoped jobs (ingest) — lets a targeted cancel find
+  // just this asset's background work. Absent for session-scoped jobs.
+  assetId?: string;
   state: JobState;
   progress: Record<string, unknown> | null;
   result?: unknown;
@@ -46,12 +49,15 @@ const MIRROR_PROGRESS_INTERVAL_MS = 1000;
 
 const jobs = new Map<string, JobRecord>();
 const lastMirrorWrite = new Map<string, number>();
+// Resolvers awaiting a job reaching a finished state (see whenJobSettled).
+const settleWaiters = new Map<string, Array<() => void>>();
 
-export function createJob(sessionId: string, kind: string): JobRecord {
+export function createJob(sessionId: string, kind: string, assetId?: string): JobRecord {
   const job: JobRecord = {
     id: randomUUID(),
     sessionId,
     kind,
+    ...(assetId ? { assetId } : {}),
     state: 'queued',
     progress: null,
     createdAt: Date.now(),
@@ -76,13 +82,49 @@ export function hasActiveJob(sessionId: string, kind: string): boolean {
   return false;
 }
 
-// Any queued/running job for a session — guards destructive ops (deleting an
-// asset or the session) against a job that is reading its files mid-flight.
-export function hasAnyActiveJob(sessionId: string): boolean {
+// Active job that must BLOCK a destructive op (delete asset/session). Excludes
+// the background `ingest` lane (proxy build): it's disposable and the user never
+// requested it, so delete handlers cancel it instead of refusing (M1/M2 — an
+// invisible upload-spawned ingest must not 409 an otherwise-safe delete).
+export function hasBlockingJob(sessionId: string): boolean {
   for (const job of jobs.values()) {
-    if (job.sessionId === sessionId && !FINISHED_STATES.has(job.state)) return true;
+    if (job.sessionId === sessionId && job.kind !== 'ingest' && !FINISHED_STATES.has(job.state)) return true;
   }
   return false;
+}
+
+// Resolves when a job reaches a finished state (immediately if it already has,
+// or is unknown). Lets a caller cancel a job and await the underlying process
+// actually exiting — so a Windows unlink won't hit EBUSY on a file an ffmpeg
+// child still holds open.
+function whenJobSettled(jobId: string): Promise<void> {
+  const job = jobs.get(jobId);
+  if (!job || FINISHED_STATES.has(job.state)) return Promise.resolve();
+  return new Promise((resolve) => {
+    const arr = settleWaiters.get(jobId) || [];
+    arr.push(resolve);
+    settleWaiters.set(jobId, arr);
+  });
+}
+
+// Cancel (and await the settling of) background ingest jobs for a session, or
+// just one asset's. Delete handlers call this: an ingest proxy-encode holds the
+// source file open, so we stop it and wait for the child to exit before
+// unlinking — rather than refusing the delete. A 5s cap keeps a wedged job from
+// blocking the delete forever (the unlink is best-effort and guarded anyway).
+export async function cancelIngestJobs(sessionId: string, assetId?: string): Promise<void> {
+  const targets: JobRecord[] = [];
+  for (const job of jobs.values()) {
+    if (job.sessionId === sessionId && job.kind === 'ingest' && !FINISHED_STATES.has(job.state)
+      && (assetId === undefined || job.assetId === assetId)) {
+      targets.push(job);
+    }
+  }
+  if (targets.length === 0) return;
+  for (const job of targets) cancelJob(job);
+  const settled = Promise.all(targets.map((j) => whenJobSettled(j.id)));
+  const cap = new Promise<void>((r) => setTimeout(r, 5000));
+  await Promise.race([settled, cap]);
 }
 
 export function markJobRunning(job: JobRecord): void {
@@ -189,6 +231,11 @@ function finalizeJob(job: JobRecord): void {
   writeMirror(job);
   appendHistory(job);
   pruneFinished(job.sessionId);
+  const waiters = settleWaiters.get(job.id);
+  if (waiters) {
+    settleWaiters.delete(job.id);
+    for (const w of waiters) w();
+  }
 }
 
 function pruneFinished(sessionId: string): void {

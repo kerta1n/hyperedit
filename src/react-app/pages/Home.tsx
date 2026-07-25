@@ -71,6 +71,7 @@ export default function Home() {
     deleteAsset,
     getAssetStreamUrl,
     refreshAssets,
+    refreshThumbnails,
     addClip,
     updateClip,
     deleteClip,
@@ -1221,7 +1222,7 @@ export default function Home() {
 
     // 202 { jobId } — poll until the dead-air job settles
     const { jobId } = await response.json();
-    const result = await pollJob(session.sessionId, jobId) as { duration: number; removedDuration: number };
+    const result = await pollJob(session.sessionId, jobId) as { duration: number; removedDuration: number; ingestJobId?: string };
     console.log('Dead air removal result:', result);
 
     // Refresh assets to get the updated video with new cache-busting URL
@@ -1237,11 +1238,22 @@ export default function Home() {
       await saveProject();
     }
 
+    // The thumbnail (and proxy) rebuild on the background ingest job, which is
+    // still running here — refreshAssets above just fetched the pre-edit frame.
+    // Poll that job and refresh only the thumbnail when it finishes so the
+    // asset card stops showing the old frame (no video reload; nicety, so a
+    // failure is swallowed).
+    if (result.ingestJobId) {
+      pollJob(session.sessionId, result.ingestJobId)
+        .then(() => refreshThumbnails())
+        .catch(() => {});
+    }
+
     return {
       duration: result.duration,
       removedDuration: result.removedDuration,
     };
-  }, [session, assets, clips, refreshAssets, updateClip, saveProject]);
+  }, [session, assets, clips, refreshAssets, refreshThumbnails, updateClip, saveProject]);
 
   // Caption generation lives in its own hook — one concern, one file
   const { transcribeAndAddCaptions: handleTranscribeAndAddCaptions } = useCaptionGeneration({

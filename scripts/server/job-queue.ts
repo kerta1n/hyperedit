@@ -36,12 +36,13 @@ export function enqueueJob(args: {
   sessionId: string;
   kind: string;
   lane: string;
+  assetId?: string;
   run: (job: JobRecord) => Promise<unknown>;
 }): JobRecord {
   if (!(args.lane in LANE_CAPS)) {
     throw new Error(`Unknown job lane: ${args.lane}`);
   }
-  const job = createJob(args.sessionId, args.kind);
+  const job = createJob(args.sessionId, args.kind, args.assetId);
   let queue = laneQueues.get(args.lane);
   if (!queue) {
     queue = [];

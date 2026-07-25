@@ -32,28 +32,36 @@ function envBool(key, fallback = true) {
 // --------------- encoder arg helpers ---------------
 
 /** Per-encoder preset/quality flags for direct FFmpeg calls. */
+// The `proxy` tier is the Phase 5 preview transcode: a bitrate-capped ~1.5 Mbps
+// 540p stream (predictable file size drives the ramdisk budget math, §7.1), so
+// even the software fallback caps bitrate rather than using CRF.
 const ENCODER_ARGS = {
   h264_nvenc: {
+    proxy: ['-c:v', 'h264_nvenc', '-preset', 'p4', '-tune', 'hq', '-b:v', '1.5M', '-maxrate', '2M', '-bufsize', '3M'],
     preview: ['-c:v', 'h264_nvenc', '-preset', 'p4', '-tune', 'hq', '-b:v', '6M'],
     final: ['-c:v', 'h264_nvenc', '-preset', 'p5', '-tune', 'hq', '-b:v', '10M'],
     max: ['-c:v', 'h264_nvenc', '-preset', 'p7', '-tune', 'hq', '-b:v', '20M'],
   },
   h264_amf: {
+    proxy: ['-c:v', 'h264_amf', '-quality', 'speed', '-b:v', '1.5M', '-maxrate', '2M'],
     preview: ['-c:v', 'h264_amf', '-quality', 'speed', '-b:v', '6M'],
     final: ['-c:v', 'h264_amf', '-quality', 'balanced', '-b:v', '10M'],
     max: ['-c:v', 'h264_amf', '-quality', 'quality', '-b:v', '20M'],
   },
   h264_qsv: {
+    proxy: ['-c:v', 'h264_qsv', '-preset', 'faster', '-b:v', '1.5M', '-maxrate', '2M'],
     preview: ['-c:v', 'h264_qsv', '-preset', 'faster', '-b:v', '6M'],
     final: ['-c:v', 'h264_qsv', '-preset', 'medium', '-b:v', '10M'],
     max: ['-c:v', 'h264_qsv', '-preset', 'slow', '-b:v', '20M'],
   },
   h264_vaapi: {
+    proxy: ['-c:v', 'h264_vaapi', '-b:v', '1.5M', '-maxrate', '2M'],
     preview: ['-c:v', 'h264_vaapi', '-b:v', '6M'],
     final: ['-c:v', 'h264_vaapi', '-b:v', '10M'],
     max: ['-c:v', 'h264_vaapi', '-b:v', '20M'],
   },
   h264_videotoolbox: {
+    proxy: ['-c:v', 'h264_videotoolbox', '-b:v', '1.5M'],
     preview: ['-c:v', 'h264_videotoolbox', '-b:v', '6M'],
     final: ['-c:v', 'h264_videotoolbox', '-b:v', '10M'],
     max: ['-c:v', 'h264_videotoolbox', '-b:v', '20M'],
@@ -61,6 +69,7 @@ const ENCODER_ARGS = {
 };
 
 const SOFTWARE_ARGS = {
+  proxy: ['-c:v', 'libx264', '-preset', 'veryfast', '-b:v', '1.5M', '-maxrate', '2M', '-bufsize', '3M'],
   preview: ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18'],
   final: ['-c:v', 'libx264', '-preset', 'fast', '-crf', '20'],
   max: ['-c:v', 'libx264', '-preset', 'medium', '-crf', '18'],
@@ -178,7 +187,7 @@ export function getRenderMediaOptions(isPreview = false) {
 /**
  * Return FFmpeg encoder arg fragments for direct spawn() calls.
  *
- * @param {'preview'|'final'|'max'} quality
+ * @param {'proxy'|'preview'|'final'|'max'} quality
  * @returns {string[]} — array of FFmpeg args like ['-c:v', 'h264_nvenc', ...]
  */
 export function getFFmpegEncodeArgs(quality = 'preview') {

@@ -96,7 +96,7 @@ export function buildApp() {
   // Session lifecycle (static /session/create wins over :sessionId)
   app.post('/session/create', raw(handleSessionCreate));
   app.delete('/session/:sessionId', async (c) => {
-    handleSessionDelete(c.env.incoming, c.env.outgoing, c.req.param('sessionId'));
+    await handleSessionDelete(c.env.incoming, c.env.outgoing, c.req.param('sessionId'));
     return RESPONSE_ALREADY_SENT;
   });
   app.patch('/session/:sessionId/name', async (c) => {
@@ -106,7 +106,7 @@ export function buildApp() {
 
   // Parameterized asset routes
   app.delete('/session/:sessionId/assets/:assetId', async (c) => {
-    handleAssetDelete(c.env.incoming, c.env.outgoing, c.req.param('sessionId'), c.req.param('assetId'));
+    await handleAssetDelete(c.env.incoming, c.env.outgoing, c.req.param('sessionId'), c.req.param('assetId'));
     return RESPONSE_ALREADY_SENT;
   });
   app.get('/session/:sessionId/assets/:assetId/thumbnail', async (c) => {
@@ -114,7 +114,7 @@ export function buildApp() {
     return RESPONSE_ALREADY_SENT;
   });
   app.get('/session/:sessionId/assets/:assetId/stream', async (c) => {
-    await handleAssetStream(c.env.incoming, c.env.outgoing, c.req.param('sessionId'), c.req.param('assetId'));
+    await handleAssetStream(c.env.incoming, c.env.outgoing, c.req.param('sessionId'), c.req.param('assetId'), new URL(c.req.url));
     return RESPONSE_ALREADY_SENT;
   });
   app.all('/session/:sessionId/assets/*', async (c) => {

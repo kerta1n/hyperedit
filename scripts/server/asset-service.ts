@@ -5,7 +5,9 @@ import { randomUUID } from 'crypto';
 import { parseMultipartForm, sendJSON } from './http-helpers.ts';
 import { requireSession, saveAssetMetadata } from './session-store.ts';
 import { generateThumbnail, getMediaInfo, getVideoDuration } from './ffmpeg-helpers.ts';
-import { hasAnyActiveJob } from './job-store.ts';
+import { hasBlockingJob, cancelIngestJobs } from './job-store.ts';
+import { enqueueIngest } from './ingest-service.ts';
+import { touch as touchProxyCache, evictAssetProxy, getWarmProxyPath } from './proxy-cache-store.ts';
 import type { SessionRoute } from './route-table.ts';
 
 // Asset storage + serving: upload, list, delete, thumbnails, range-request
@@ -100,6 +102,13 @@ async function handleAssetUpload(req: IncomingMessage, res: ServerResponse, sess
 
     console.log(`[${sessionId}] Asset uploaded: ${assetId} (${type}, ${(stats.size / 1024 / 1024).toFixed(1)} MB)`);
 
+    // Background ingest: probe + thumbnail already ran inline for this response,
+    // so the ingest job's real work is the 540p proxy build (video) and the
+    // waveform peaks (video + audio, step 7). The proxy/peaks are optional, so
+    // the upload succeeds regardless of ingest outcome and we don't await it.
+    // Images have no ingest work beyond the inline thumbnail — no job spawned.
+    if (type === 'video' || type === 'audio') enqueueIngest(session, assetId);
+
     sendJSON(res, {
       success: true,
       asset: {
@@ -143,7 +152,7 @@ function handleAssetList(req: IncomingMessage, res: ServerResponse, sessionId: s
 }
 
 // Delete asset
-export function handleAssetDelete(req: IncomingMessage, res: ServerResponse, sessionId: string, assetId: string) {
+export async function handleAssetDelete(req: IncomingMessage, res: ServerResponse, sessionId: string, assetId: string) {
   const session = requireSession(res, sessionId);
   if (!session) return;
 
@@ -153,24 +162,34 @@ export function handleAssetDelete(req: IncomingMessage, res: ServerResponse, ses
     return;
   }
 
-  // A render/transcribe/dead-air/ingest job may be reading this asset's file
-  // right now — deleting it out from under the job corrupts the job. Jobs are
-  // session-scoped (not asset-scoped), so guard on any active job in the session.
-  if (hasAnyActiveJob(sessionId)) {
+  // A user-initiated job (render/transcribe/dead-air/…) may be reading this
+  // asset — refuse rather than corrupt it. The background ingest (proxy build)
+  // is disposable and was never user-requested, so it does NOT block; we cancel
+  // just this asset's ingest below and wait for the ffmpeg child to release the
+  // file before unlinking (M1).
+  if (hasBlockingJob(sessionId)) {
     sendJSON(res, {
       error: 'A job is still running for this session',
-      hint: 'Wait for in-flight renders/transcriptions/ingests to finish (or cancel them via DELETE /session/:id/jobs/:jobId) before deleting assets.',
+      hint: 'Wait for in-flight renders/transcriptions to finish (or cancel them via DELETE /session/:id/jobs/:jobId) before deleting assets.',
     }, 409);
     return;
   }
+  await cancelIngestJobs(sessionId, assetId);
 
-  // Remove files
+  // Remove files (source, thumbnail, the now-orphaned proxy and waveform peaks)
   try {
     if (existsSync(asset.path)) unlinkSync(asset.path);
     if (asset.thumbPath && existsSync(asset.thumbPath)) unlinkSync(asset.thumbPath);
+    const proxyPath = join(session.dir, 'proxies', `${assetId}.mp4`);
+    if (existsSync(proxyPath)) unlinkSync(proxyPath);
+    const peaksPath = join(session.dir, 'peaks', `${assetId}.json`);
+    if (existsSync(peaksPath)) unlinkSync(peaksPath);
   } catch (e: any) {
     console.warn(`[${sessionId}] Asset file cleanup failed:`, e.message);
   }
+  evictAssetProxy(sessionId, assetId); // drop the ramdisk warm copy too
+
+
 
   // Remove from session
   session.assets.delete(assetId);
@@ -209,9 +228,12 @@ export async function handleAssetThumbnail(req: IncomingMessage, res: ServerResp
 }
 
 // Stream asset
-export async function handleAssetStream(req: IncomingMessage, res: ServerResponse, sessionId: string, assetId: string) {
+export async function handleAssetStream(req: IncomingMessage, res: ServerResponse, sessionId: string, assetId: string, url: URL) {
   const session = requireSession(res, sessionId);
   if (!session) return;
+
+  // Active stream = keep this session's warm proxies from being evicted (§7.1).
+  touchProxyCache(sessionId);
 
   const asset = session.assets.get(assetId);
   if (!asset || !existsSync(asset.path)) {
@@ -219,8 +241,30 @@ export async function handleAssetStream(req: IncomingMessage, res: ServerRespons
     return;
   }
 
+  // Stream tier resolution (§7.4): an explicit ?tier=proxy prefers the 540p
+  // preview proxy — R: warm copy → HDD canonical → source; a bare /stream
+  // always serves the source, so the render path (its spec URLs carry no tier
+  // param) reads sources by construction. The proxy is video-only and an
+  // optimization, never a dependency: any miss (not yet built, ingest failed,
+  // evicted, non-video) silently falls back to the source — never 404/error —
+  // so preview works from the moment of upload. Coexists with ?v= cache-bust.
+  // The `status === 'ready'` gate is load-bearing: a proxy that is still
+  // encoding (fresh upload) or mid-rebuild (dead-air force, marked `building`
+  // by onAssetMutated) must NOT be served — the file on disk is partial or
+  // stale — so we fall through to the always-complete source until it settles.
+  let servePath = asset.path;
+  if (url.searchParams.get('tier') === 'proxy' && asset.type === 'video' && asset.proxy?.status === 'ready') {
+    const warm = getWarmProxyPath(sessionId, assetId);
+    if (warm) {
+      servePath = warm;
+    } else {
+      const hddProxy = join(session.dir, 'proxies', `${assetId}.mp4`);
+      if (existsSync(hddProxy)) servePath = hddProxy;
+    }
+  }
+
   const { stat } = await import('fs/promises');
-  const stats = await stat(asset.path);
+  const stats = await stat(servePath);
   const fileSize = stats.size;
 
   // Get proper MIME type for the asset
@@ -286,14 +330,14 @@ export async function handleAssetStream(req: IncomingMessage, res: ServerRespons
       'Access-Control-Allow-Origin': '*',
     });
 
-    createReadStream(asset.path, { start, end }).pipe(res);
+    createReadStream(servePath, { start, end }).pipe(res);
   } else {
     res.writeHead(200, {
       'Content-Length': fileSize,
       'Content-Type': contentType,
       'Access-Control-Allow-Origin': '*',
     });
-    createReadStream(asset.path).pipe(res);
+    createReadStream(servePath).pipe(res);
   }
 }
 

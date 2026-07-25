@@ -6,7 +6,8 @@
 import { PORT } from './server-config.ts';
 import { serve } from '@hono/node-server';
 import { detectCapabilities } from '../hw-detect.js';
-import { cleanupStaleTempFiles, restoreSessionsFromDisk } from './session-store.ts';
+import { cleanupStaleTempFiles, cleanupStaleRenderArtifacts, restoreSessionsFromDisk } from './session-store.ts';
+import { resetWarmCache } from './proxy-cache-store.ts';
 import { cancelAllActiveJobs } from './job-store.ts';
 import { shutdownWorker } from './render-client.ts';
 import { buildApp } from './http-app.ts';
@@ -31,6 +32,10 @@ process.on('uncaughtException', (err: any) => {
 });
 
 cleanupStaleTempFiles();
+cleanupStaleRenderArtifacts();
+// Stale warm proxy copies from a previous run are untracked ramdisk budget —
+// clear them; sessions re-warm from the HDD on open.
+resetWarmCache();
 restoreSessionsFromDisk();
 
 const app = buildApp();

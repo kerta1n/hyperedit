@@ -1,7 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { sendJSON } from './http-helpers.ts';
 import { cleanupSession, createSession, requireSession, saveSessionMeta, sessions } from './session-store.ts';
-import { hasAnyActiveJob } from './job-store.ts';
+import { hasBlockingJob, cancelIngestJobs } from './job-store.ts';
+import { evictSession } from './proxy-cache-store.ts';
 
 // Session lifecycle endpoints: list, create, rename, delete. The store
 // itself lives in session-store.ts; this is only the HTTP surface.
@@ -72,15 +73,19 @@ export async function handleSessionCreate(req: IncomingMessage, res: ServerRespo
 }
 
 // Delete session
-export function handleSessionDelete(req: IncomingMessage, res: ServerResponse, sessionId: string) {
-  // Don't rm the session dir while a job for it is still reading/writing files.
-  if (hasAnyActiveJob(sessionId)) {
+export async function handleSessionDelete(req: IncomingMessage, res: ServerResponse, sessionId: string) {
+  // Don't rm the session dir while a user-initiated job is reading/writing its
+  // files. Background ingest (proxy builds) don't block — we cancel them and
+  // wait for their ffmpeg children to exit so the recursive rm can't EBUSY.
+  if (hasBlockingJob(sessionId)) {
     sendJSON(res, {
       error: 'A job is still running for this session',
       hint: 'Wait for in-flight jobs to finish (or cancel them via DELETE /session/:id/jobs/:jobId) before deleting the session.',
     }, 409);
     return;
   }
+  await cancelIngestJobs(sessionId);
+  evictSession(sessionId); // drop the ramdisk warm copies before the dir goes
   cleanupSession(sessionId);
   sendJSON(res, { success: true });
 }
