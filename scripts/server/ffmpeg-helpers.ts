@@ -194,35 +194,73 @@ export async function generateThumbnail(inputPath: string, outputPath: string, i
 }
 
 // Get video/image dimensions
-export async function getMediaInfo(inputPath: string): Promise<{ width: number; height: number; duration: number; fps: number }> {
-  try {
-    const result = await runFFmpegProbe([
-      '-v', 'error',
-      '-select_streams', 'v:0',
-      '-show_entries', 'stream=width,height,duration,r_frame_rate:format=duration',
-      '-of', 'json',
-      inputPath
-    ], 'probe');
-    const info = JSON.parse(result);
-    const stream = info.streams?.[0] || {};
-    // r_frame_rate is a rational like "60/1" or "60000/1001"
-    let fps = 0;
-    if (stream.r_frame_rate) {
-      const [num, den] = stream.r_frame_rate.split('/').map(Number);
-      if (num && den) fps = num / den;
-    }
+export interface MediaInfo {
+  width: number;
+  height: number;
+  duration: number;
+  fps: number;
+  vfr: boolean;
+  hdr: boolean;
+  rotation: number;
+}
+
+// Parse a `-print_format json` ffprobe result into media info + the ingest
+// conform flags (VFR/HDR/rotation). Pure (no ffprobe call) so the
+// classification is unit-tested from canned JSON. Absent fields mean "unset"
+// → constant frame rate / SDR / no rotation.
+export function classifyMediaProbe(info: any): MediaInfo {
+  const stream = info?.streams?.[0] || {};
+  const rate = (r: unknown): number => {
+    if (typeof r !== 'string') return 0;
+    const [num, den] = r.split('/').map(Number);
+    return num && den ? num / den : 0;
+  };
+  const fps = rate(stream.r_frame_rate);
+  const avgFps = rate(stream.avg_frame_rate);
+  // VFR: the average rate diverges from the nominal base rate (both known).
+  // Screen recordings / phone footage report avg != r; true CFR has avg == r.
+  const vfr = fps > 0 && avgFps > 0 && Math.abs(fps - avgFps) / fps > 0.01;
+  // HDR is a transfer-function property: PQ (smpte2084) or HLG (arib-std-b67).
+  // BT.2020 primaries alone can be SDR, so key on color_transfer only.
+  const trc = String(stream.color_transfer || '').toLowerCase();
+  const hdr = trc === 'smpte2084' || trc === 'arib-std-b67';
+  // Rotation: display-matrix side data (modern) → legacy rotate tag (fallback),
+  // normalized to [0, 360). Side-data rotation is commonly negative.
+  let rotation = 0;
+  const sd = Array.isArray(stream.side_data_list)
+    ? stream.side_data_list.find((s: any) => s && s.rotation != null)
+    : null;
+  if (sd) rotation = Number(sd.rotation);
+  else if (stream.tags && stream.tags.rotate != null) rotation = Number(stream.tags.rotate);
+  rotation = ((Math.round(rotation) % 360) + 360) % 360;
+  return {
+    width: stream.width || 0,
+    height: stream.height || 0,
     // Container (format) duration covers all streams; the video stream's own
     // duration undershoots it when audio outruns video, which starved the
     // /transcribe -t window of end-of-clip words. Same field getVideoDuration
     // probes, so asset.duration and transcribe windows share one basis.
-    return {
-      width: stream.width || 0,
-      height: stream.height || 0,
-      duration: parseFloat(info.format?.duration) || parseFloat(stream.duration) || 0,
-      fps,
-    };
+    duration: parseFloat(info?.format?.duration) || parseFloat(stream.duration) || 0,
+    fps,
+    vfr,
+    hdr,
+    rotation,
+  };
+}
+
+export async function getMediaInfo(inputPath: string): Promise<MediaInfo> {
+  try {
+    const result = await runFFmpegProbe([
+      '-v', 'error',
+      '-select_streams', 'v:0',
+      '-show_entries',
+      'stream=width,height,duration,r_frame_rate,avg_frame_rate,color_transfer,color_primaries,color_space:stream_side_data=rotation:stream_tags=rotate:format=duration',
+      '-of', 'json',
+      inputPath
+    ], 'probe');
+    return classifyMediaProbe(JSON.parse(result));
   } catch {
-    return { width: 0, height: 0, duration: 0, fps: 0 };
+    return { width: 0, height: 0, duration: 0, fps: 0, vfr: false, hdr: false, rotation: 0 };
   }
 }
 

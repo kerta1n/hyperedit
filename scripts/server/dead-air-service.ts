@@ -3,7 +3,8 @@ import { existsSync, unlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { calculateKeepSegments, detectSilence, getVideoDuration, runFFmpeg } from './ffmpeg-helpers.ts';
 import { sendJSON, sendJobAccepted } from './http-helpers.ts';
-import { requireSession } from './session-store.ts';
+import { onAssetMutated, requireSession } from './session-store.ts';
+import { enqueueIngest } from './ingest-service.ts';
 import { enqueueJob } from './job-queue.ts';
 import type { SessionRoute } from './route-table.ts';
 
@@ -141,6 +142,14 @@ async function handleSessionRemoveDeadAir(req: IncomingMessage, res: ServerRespo
     // Update the video asset metadata
     videoAsset.duration = totalKeptDuration;
     videoAsset.size = newStats.size;
+
+    // Envelope-only bookkeeping AFTER the do-not-modify extract/concat/replace
+    // mechanics (Phase 5 §7.5, decree-2 exception): persist the new duration/size
+    // (dead-air updated them in memory only — a restart restored the pre-edit
+    // duration) + invalidate the cached transcript, then re-ingest the rewritten
+    // bytes to rebuild the thumbnail (and later proxy/peaks) off the ffmpeg lane.
+    onAssetMutated(session, options.assetId);
+    enqueueIngest(session, options.assetId, { force: true });
 
     session.editCount++;
 

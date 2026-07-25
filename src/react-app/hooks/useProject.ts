@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 
-import { API_BASE as LOCAL_FFMPEG_URL, pollJob } from '@/react-app/utils/api-helpers';
+import { API_BASE as LOCAL_FFMPEG_URL, pollJob, setActivePollSession } from '@/react-app/utils/api-helpers';
 const SESSION_STORAGE_KEY = 'clipwise-session';
 
 // Asset - source file in library
@@ -328,6 +328,17 @@ export function useProject() {
   useEffect(() => { timelineTransitionsRef.current = timelineTransitions; }, [timelineTransitions]);
   useEffect(() => { renderOptionsRef.current = renderOptions; }, [renderOptions]);
 
+  // Tell pollJob which session is active so long jobs that outlive a session
+  // switch abandon their (stale) result instead of applying it to the new
+  // project. Also clear any status/loading left over from that abandoned job so
+  // the new session doesn't inherit a stuck "Rendering…" message (handlers that
+  // clear status only on their success path can't, since the poll threw).
+  useEffect(() => {
+    setActivePollSession(session?.sessionId ?? null);
+    setStatus('');
+    setLoading(false);
+  }, [session?.sessionId]);
+
   // Wrapper to persist session to localStorage
   const setSession = useCallback((sessionOrUpdater: SessionInfo | null | ((prev: SessionInfo | null) => SessionInfo | null)) => {
     setSessionInternal(prev => {
@@ -476,9 +487,16 @@ export function useProject() {
   const deleteAsset = useCallback(async (assetId: string): Promise<void> => {
     if (!session) return;
 
-    await fetch(`${LOCAL_FFMPEG_URL}/session/${session.sessionId}/assets/${assetId}`, {
+    const res = await fetch(`${LOCAL_FFMPEG_URL}/session/${session.sessionId}/assets/${assetId}`, {
       method: 'DELETE',
     });
+    if (!res.ok) {
+      // Server refused (e.g. 409 while a job is using this asset). Do NOT drop it
+      // from client state — the file still exists on disk, so the next
+      // refreshAssets() would resurrect a "deleted" asset and desync the UI.
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.hint || data.error || `Could not delete asset (${res.status})`);
+    }
 
     setAssets(prev => prev.filter(a => a.id !== assetId));
     setClips(prev => prev.filter(c => c.assetId !== assetId));
@@ -528,10 +546,13 @@ export function useProject() {
       width: a.width,
       height: a.height,
       fps: a.fps,
+      // Cache-bust the thumbnail too: an in-place edit (dead-air, animation-edit)
+      // regenerates the JPEG under the same asset id, and the thumbnail endpoint
+      // is cached (max-age), so without a version stamp the timeline keeps the
+      // pre-edit frame. Same reason streamUrl is busted below.
       thumbnailUrl: a.thumbnailUrl
-        ? `${LOCAL_FFMPEG_URL}${a.thumbnailUrl}`
+        ? `${LOCAL_FFMPEG_URL}${a.thumbnailUrl}${a.thumbnailUrl.includes('?') ? '&' : '?'}v=${Date.now()}`
         : null,
-      // Add cache-busting timestamp to force reload after file changes (e.g., dead air removal)
       streamUrl: `${LOCAL_FFMPEG_URL}/session/${session.sessionId}/assets/${a.id}/stream?v=${Date.now()}`,
       // Preserve aiGenerated flag for Remotion-generated animations (critical for edit workflow detection)
       aiGenerated: a.aiGenerated || false,

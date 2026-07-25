@@ -5,6 +5,7 @@ import { randomUUID } from 'crypto';
 import { parseMultipartForm, sendJSON } from './http-helpers.ts';
 import { requireSession, saveAssetMetadata } from './session-store.ts';
 import { generateThumbnail, getMediaInfo, getVideoDuration } from './ffmpeg-helpers.ts';
+import { hasAnyActiveJob } from './job-store.ts';
 import type { SessionRoute } from './route-table.ts';
 
 // Asset storage + serving: upload, list, delete, thumbnails, range-request
@@ -46,6 +47,11 @@ async function handleAssetUpload(req: IncomingMessage, res: ServerResponse, sess
     let width = 0;
     let height = 0;
     let fps = 0;
+    // Ingest conform flags — the render/proxy pipeline consults these for
+    // hostile source media (VFR screen recordings, iPhone HLG, rotated phone clips).
+    let vfr = false;
+    let hdr = false;
+    let rotation = 0;
 
     if (!isAudio) {
       const info = await getMediaInfo(assetPath);
@@ -54,6 +60,9 @@ async function handleAssetUpload(req: IncomingMessage, res: ServerResponse, sess
       height = info.height;
       // Source frame rate only meaningful for videos (images report a bogus rate)
       if (type === 'video' && info.fps) fps = Math.round(info.fps);
+      vfr = info.vfr;
+      hdr = info.hdr;
+      rotation = info.rotation;
     } else {
       duration = await getVideoDuration(assetPath);
     }
@@ -80,6 +89,9 @@ async function handleAssetUpload(req: IncomingMessage, res: ServerResponse, sess
       width,
       height,
       fps: fps || undefined,
+      vfr,
+      hdr,
+      rotation,
       createdAt: Date.now(),
     };
 
@@ -138,6 +150,17 @@ export function handleAssetDelete(req: IncomingMessage, res: ServerResponse, ses
   const asset = session.assets.get(assetId);
   if (!asset) {
     sendJSON(res, { error: 'Asset not found' }, 404);
+    return;
+  }
+
+  // A render/transcribe/dead-air/ingest job may be reading this asset's file
+  // right now — deleting it out from under the job corrupts the job. Jobs are
+  // session-scoped (not asset-scoped), so guard on any active job in the session.
+  if (hasAnyActiveJob(sessionId)) {
+    sendJSON(res, {
+      error: 'A job is still running for this session',
+      hint: 'Wait for in-flight renders/transcriptions/ingests to finish (or cancel them via DELETE /session/:id/jobs/:jobId) before deleting assets.',
+    }, 409);
     return;
   }
 

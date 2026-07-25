@@ -2117,7 +2117,7 @@ export default function Home() {
               <AssetLibrary
                 assets={assets}
                 onUpload={handleAssetUpload}
-                onDelete={deleteAsset}
+                onDelete={(id) => { deleteAsset(id).catch((e) => alert((e as Error).message || 'Could not delete asset')); }}
                 onDragStart={handleAssetDragStart}
                 onSelect={handleAssetSelect}
                 selectedAssetId={selectedAssetId}

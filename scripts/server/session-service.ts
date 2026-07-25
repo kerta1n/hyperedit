@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { sendJSON } from './http-helpers.ts';
 import { cleanupSession, createSession, requireSession, saveSessionMeta, sessions } from './session-store.ts';
+import { hasAnyActiveJob } from './job-store.ts';
 
 // Session lifecycle endpoints: list, create, rename, delete. The store
 // itself lives in session-store.ts; this is only the HTTP surface.
@@ -72,6 +73,14 @@ export async function handleSessionCreate(req: IncomingMessage, res: ServerRespo
 
 // Delete session
 export function handleSessionDelete(req: IncomingMessage, res: ServerResponse, sessionId: string) {
+  // Don't rm the session dir while a job for it is still reading/writing files.
+  if (hasAnyActiveJob(sessionId)) {
+    sendJSON(res, {
+      error: 'A job is still running for this session',
+      hint: 'Wait for in-flight jobs to finish (or cancel them via DELETE /session/:id/jobs/:jobId) before deleting the session.',
+    }, 409);
+    return;
+  }
   cleanupSession(sessionId);
   sendJSON(res, { success: true });
 }

@@ -76,6 +76,15 @@ export function hasActiveJob(sessionId: string, kind: string): boolean {
   return false;
 }
 
+// Any queued/running job for a session — guards destructive ops (deleting an
+// asset or the session) against a job that is reading its files mid-flight.
+export function hasAnyActiveJob(sessionId: string): boolean {
+  for (const job of jobs.values()) {
+    if (job.sessionId === sessionId && !FINISHED_STATES.has(job.state)) return true;
+  }
+  return false;
+}
+
 export function markJobRunning(job: JobRecord): void {
   job.state = 'running';
   job.startedAt = Date.now();

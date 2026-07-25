@@ -23,6 +23,10 @@ export interface SessionAsset {
   width?: number;
   height?: number;
   fps?: number;
+  // Ingest conform flags (source media properties, additive since Phase 5)
+  vfr?: boolean;
+  hdr?: boolean;
+  rotation?: number;
   [key: string]: any;
 }
 
@@ -182,6 +186,10 @@ export function restoreSessionsFromDisk(): void {
           width: savedMeta.width,
           height: savedMeta.height,
           fps: savedMeta.fps,
+          // Additive since Phase 5; absent on pre-Phase-5 assets (backfilled on re-ingest)
+          vfr: savedMeta.vfr,
+          hdr: savedMeta.hdr,
+          rotation: savedMeta.rotation,
         });
 
         if (savedMeta.aiGenerated) {
@@ -273,6 +281,10 @@ export function saveAssetMetadata(session: Session): void {
       // fps the animation was rendered at — scene frame counts are anchored to
       // it, so edits must re-render at this fps to preserve wall-clock length
       fps: asset.fps,
+      // Ingest conform flags (additive since Phase 5)
+      vfr: asset.vfr,
+      hdr: asset.hdr,
+      rotation: asset.rotation,
     };
   }
 
@@ -281,6 +293,23 @@ export function saveAssetMetadata(session: Session): void {
   } catch (e) {
     console.log(`[Session] Could not save assets metadata: ${(e as Error).message}`);
   }
+}
+
+// Asset-mutation choke point (Phase 5 §7.5). A destructive in-place edit
+// rewrites an asset's bytes under the SAME asset id, staling everything keyed to
+// it. This owns the cheap in-memory invalidation; the caller re-enqueues an
+// ingest job (enqueueIngest) to rebuild the derived artifacts — the thumbnail,
+// and later the proxy + waveform peaks. Kept split so session-store stays free
+// of a job-queue/ingest import (no cycle).
+//   - invalidate the cached transcript (word timings shifted with the cut)
+//   - persist metadata — dead-air updates duration/size in memory only, so a
+//     restart would otherwise restore the PRE-edit values from assets-meta.json
+// Dead-air is currently the only in-place rewrite path (process-asset and
+// extract-audio produce NEW assets). R9 immutable versions supersede this.
+export function onAssetMutated(session: Session, assetId: string): void {
+  if (!session) return;
+  session.transcriptCache?.delete(assetId);
+  saveAssetMetadata(session);
 }
 
 // Composition values (fps/width/height) are owned by the project's settings

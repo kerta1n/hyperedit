@@ -19,6 +19,9 @@ const LANE_CAPS: Record<string, number> = {
   ffmpeg: envCap('HYPEREDIT_FFMPEG_CONCURRENCY', 1),
   llm: envCap('HYPEREDIT_LLM_CONCURRENCY', isLLMProviderLocal() ? 1 : 3),
   fal: envCap('HYPEREDIT_FAL_CONCURRENCY', 4),
+  // Asset ingest (probe/proxy/peaks/thumbnail). Its OWN lane, never shared with
+  // ffmpeg: a proxy build must never make dead-air queue behind it (§7.2).
+  ingest: envCap('HYPEREDIT_INGEST_CONCURRENCY', 1),
 };
 
 interface QueueEntry {

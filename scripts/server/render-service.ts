@@ -165,7 +165,12 @@ async function handleRenderFromSpec(req: IncomingMessage, res: ServerResponse, s
           renderInfo,
           migration: specResult.migration,
           warnings: specResult.warnings,
-          downloadUrl: `/session/${sessionId}/renders/${preview ? 'preview' : 'export'}`,
+          // Point at THIS render's file, not the generic /renders/export which
+          // resolves to the newest export-*.mp4 — a second render started before
+          // the user downloads would otherwise serve the wrong file.
+          downloadUrl: preview
+            ? `/session/${sessionId}/renders/preview`
+            : `/session/${sessionId}/renders/${encodeURIComponent(outputFilename)}/download`,
           duration: renderInfo.durationInFrames / (renderInfo.fps || 30),
         };
       },
@@ -281,7 +286,10 @@ async function handleProjectRenderRemotion(req: IncomingMessage, res: ServerResp
         specPath: specSnapshotPath,
         migration: specResult.migration,
         warnings: specResult.warnings,
-        downloadUrl: `/session/${sessionId}/renders/${preview ? 'preview' : 'export'}`,
+        // Point at THIS render's file, not the generic /renders/export (newest wins).
+        downloadUrl: preview
+          ? `/session/${sessionId}/renders/preview`
+          : `/session/${sessionId}/renders/${encodeURIComponent(outputFilename)}/download`,
       };
       },
     });
