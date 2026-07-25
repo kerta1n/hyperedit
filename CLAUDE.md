@@ -75,12 +75,15 @@ The `useProject()` hook in `src/react-app/hooks/useProject.ts` is the central st
 
 The local FFmpeg server lives in `scripts/server/` as native-TypeScript modules (Node 24 type stripping — no build step): a thin Hono layer (`http-app.ts`) routes to one-concern `*-service.ts` files, each exporting a typed route table; handlers write raw Node responses (streams, NDJSON, range requests) and provider SDKs are confined to `*-gateway.ts`. It handles all video processing, asset management, Remotion rendering, transcription, generative-media calls, LLM edit-command generation, and SPA hosting. Entry: `scripts/server/main.ts` (`npm run ffmpeg-server`).
 
+Every long-running route runs on the job model (`job-store.ts` + `job-queue.ts` + `job-service.ts`): the route validates synchronously (400/422 stay immediate), answers `202 { jobId }`, and state is polled at `GET /session/{id}/jobs/{jobId}` (DELETE cancels — no WebSockets/SSE by decree). Mid-work user-addressable failures (e.g. no speech in range) surface as job errors with `errorStatus` carrying the old HTTP status. The registry is in-memory with a ramdisk mirror for crash forensics only; finished jobs are capped at ~50 per session; `HYPEREDIT_JOB_HISTORY=1` enables append-only JSONL history. Lane concurrency caps (env-overridable via `HYPEREDIT_{RENDER,TRANSCRIBE,FFMPEG,LLM,FAL}_CONCURRENCY`): render 1, transcribe 1, ffmpeg 1 (dead-air/audio-sync/create-gif), llm 3 remote / 1 localhost (keyed off the provider base-URL host), fal 4 (real remote-cancel attempt on DELETE once the provider queue accepts). Job lanes: render ×4 + render-from-concept, transcribe ×2, chapters, dead-air, audio-sync, create-gif, animation ×7, b-roll, gen-media ×4. There is no NDJSON streaming anywhere — the frontend polls via `pollJob` (`utils/api-helpers.ts`).
+
 Key endpoints on `localhost:3333`:
 - `POST /session/create` - Create new editing session
 - `POST /session/{id}/assets` - Upload asset (auto-generates thumbnails)
 - `POST /session/{id}/transcribe` - Whisper transcription for captions
-- `POST /session/{id}/render` - Render final video
-- `POST /session/{id}/render-motion-graphic` - Render Remotion animation
+- `POST /session/{id}/render` - Render final video (job model: returns `202 { jobId }`)
+- `GET/DELETE /session/{id}/jobs/{jobId}` - Poll job state (`queued|running|done|error|canceled`, progress, result) or cancel; unknown jobId → 404 with hint (registry is in-memory — a server restart empties it)
+- `POST /session/{id}/render-motion-graphic` - Render Remotion animation (job model, `202 { jobId }`)
 - `POST /session/{id}/generate-animation` - AI-generated Remotion code (Gemini writes JSX → in-process render via @remotion/bundler + @remotion/renderer)
 - `POST /session/{id}/edit-animation` - Modify existing Remotion source in-place (same asset ID reused after re-render)
 - `POST /session/{id}/process-asset` - Apply FFmpeg command to a specific asset (replaces in-place)

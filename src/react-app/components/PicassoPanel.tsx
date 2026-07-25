@@ -1,4 +1,4 @@
-import { API_BASE } from '@/react-app/utils/api-helpers';
+import { API_BASE, pollJob } from '@/react-app/utils/api-helpers';
 import { useState, useRef, useEffect } from 'react';
 import { Palette, Send, Loader2, Sparkles, X, Zap, Image, Square, RectangleVertical } from 'lucide-react';
 
@@ -99,11 +99,14 @@ export default function PicassoPanel({
         }),
       });
 
-      const data = await response.json();
+      const submitted = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || 'Failed to generate image');
+        throw new Error(submitted.error || 'Failed to generate image');
       }
+
+      // 202 { jobId } — poll until the image-gen job settles
+      const data = await pollJob(sessionId as string, submitted.jobId) as { images: Array<{ id: string; filename: string; width: number; height: number; thumbnailUrl: string; streamUrl: string }> };
 
       setMessages(prev => [
         ...prev,

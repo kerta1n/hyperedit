@@ -3,8 +3,9 @@ import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { renderDynamicAnimation } from '../remotion-core/render.js';
 import { TEMP_DIR } from './server-config.ts';
-import { parseBody, sendJSON } from './http-helpers.ts';
+import { httpError, parseBody, sendJSON, sendJobAccepted } from './http-helpers.ts';
 import { orientationOf, requireSession, resolveCompositionSettings, saveAssetMetadata, writeJsonAtomic } from './session-store.ts';
+import { enqueueJob } from './job-queue.ts';
 import { getVideoDuration, runFFmpeg, runFFmpegProbe } from './ffmpeg-helpers.ts';
 import { checkLocalWhisper, runLocalWhisper } from './whisper-helpers.ts';
 import { generateWithLLM, hasLLMProvider, parseLLMJson, transcribeAudioWithLLM } from './llm-gateway.ts';
@@ -54,13 +55,19 @@ async function handleGenerateBatchAnimations(req, res, sessionId) {
 
     console.log(`[${jobId}] Using video: ${videoAsset.filename} (${videoAsset.duration}s)`);
 
+    // Cancellation covers the queued state only for this lane (multi-render
+    // batch has no single cancel seam); an in-flight batch settles canceled.
+    const job = enqueueJob({
+      sessionId,
+      kind: 'animation-batch',
+      lane: 'llm',
+      run: async () => {
     // Step 1: Get or create transcription
     console.log(`[${jobId}] Step 1: Getting video transcription...`);
     const transcription = await getOrTranscribeVideo(session, videoAsset, jobId);
 
     if (!transcription.text) {
-      sendJSON(res, { error: 'Could not transcribe video' }, 400);
-      return;
+      throw httpError(400, 'Could not transcribe video');
     }
 
     console.log(`[${jobId}] Transcription: ${transcription.text.substring(0, 200)}...`);
@@ -270,11 +277,15 @@ Make it visually engaging with good color choices. Use 2-4 scenes for variety.`;
     console.log(`[${jobId}] === BATCH GENERATION COMPLETE ===`);
     console.log(`[${jobId}] Generated ${generatedAnimations.length} animations\n`);
 
-    sendJSON(res, {
+    return {
       success: true,
       animations: generatedAnimations,
       videoDuration: videoAsset.duration,
+    };
+      },
     });
+
+    sendJobAccepted(res, sessionId, job);
 
   } catch (error) {
     console.error('Batch animation generation error:', error);
@@ -310,6 +321,11 @@ async function handleGenerateTranscriptAnimation(req, res, sessionId) {
       return;
     }
 
+    const job = enqueueJob({
+      sessionId,
+      kind: 'animation-transcript',
+      lane: 'llm',
+      run: async () => {
     const jobId = sessionId.substring(0, 8);
     console.log(`\n[${jobId}] === GENERATE TRANSCRIPT ANIMATION ===`);
     console.log(`[${jobId}] Video: ${videoAsset.filename}`);
@@ -547,7 +563,7 @@ Pick phrases that are spread throughout the video. Each phrase should be 2-6 wor
     console.log(`[${jobId}] Transcript animation created: ${assetId}`);
     console.log(`[${jobId}] === TRANSCRIPT ANIMATION COMPLETE ===\n`);
 
-    sendJSON(res, {
+    return {
       success: true,
       assetId,
       filename: asset.filename,
@@ -557,7 +573,11 @@ Pick phrases that are spread throughout the video. Each phrase should be 2-6 wor
       phrases: keyPhrases.map(p => p.phrase),
       thumbnailUrl: `/session/${sessionId}/assets/${assetId}/thumbnail`,
       streamUrl: `/session/${sessionId}/assets/${assetId}/stream`,
+    };
+      },
     });
+
+    sendJobAccepted(res, sessionId, job);
 
   } catch (error) {
     console.error('Transcript animation error:', error);
@@ -597,6 +617,11 @@ async function handleGenerateContextualAnimation(req, res, sessionId) {
       return;
     }
 
+    const job = enqueueJob({
+      sessionId,
+      kind: 'animation-contextual',
+      lane: 'llm',
+      run: async () => {
     const jobId = randomUUID();
     const outputAssetId = randomUUID();
     const outputPath = join(session.assetsDir, `${outputAssetId}.mp4`);
@@ -838,7 +863,7 @@ Use specific terms, concepts, and themes from the transcript.`;
     console.log(`[${jobId}] Contextual ${type} animation rendered: ${outputAssetId} (${durationInSeconds}s)`);
     console.log(`[${jobId}] === CONTEXTUAL ANIMATION COMPLETE ===\n`);
 
-    sendJSON(res, {
+    return {
       success: true,
       assetId: outputAssetId,
       filename: asset.filename,
@@ -848,7 +873,11 @@ Use specific terms, concepts, and themes from the transcript.`;
       sceneCount: sceneData.scenes.length,
       thumbnailUrl: `/session/${sessionId}/assets/${outputAssetId}/thumbnail`,
       streamUrl: `/session/${sessionId}/assets/${outputAssetId}/stream`,
+    };
+      },
     });
+
+    sendJobAccepted(res, sessionId, job);
 
   } catch (error) {
     console.error('Contextual animation generation error:', error);

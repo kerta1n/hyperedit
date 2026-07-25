@@ -146,7 +146,7 @@ interface ContextualAnimationRequest {
 }
 
 // Animation concept returned from analysis (for approval workflow)
-interface AnimationConcept {
+export interface AnimationConcept {
   type: 'intro' | 'outro' | 'transition' | 'highlight';
   fps?: number; // fps the scene frame counts were authored at (render honors it)
   transcript: string;

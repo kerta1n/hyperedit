@@ -2,8 +2,9 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { readFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { TEMP_DIR } from './server-config.ts';
-import { sendJSON } from './http-helpers.ts';
+import { httpError, sendJSON, sendJobAccepted } from './http-helpers.ts';
 import { requireSession, type Session, type SessionAsset } from './session-store.ts';
+import { enqueueJob } from './job-queue.ts';
 import { getVideoDuration, runFFmpeg } from './ffmpeg-helpers.ts';
 import { checkLocalWhisper, runLocalWhisper } from './whisper-helpers.ts';
 import { callGeminiSDK, generateWithLLM, hasLLMProvider, parseLLMJson, transcribeAudioWithLLM } from './llm-gateway.ts';
@@ -246,6 +247,12 @@ async function handleSessionChapters(req: IncomingMessage, res: ServerResponse, 
     }
     console.log(`[${jobId}] Using video asset: ${videoAsset.filename}`);
 
+    const job = enqueueJob({
+      sessionId,
+      kind: 'chapters',
+      lane: 'llm',
+      run: async () => {
+    try {
     const totalDuration = await getVideoDuration(videoPath);
 
     // Extract audio
@@ -314,13 +321,22 @@ Return JSON: {"chapters": [{"start": 0, "title": "Introduction"}], "summary": "B
 
     console.log(`[${jobId}] Generated ${result.chapters?.length || 0} chapters`);
 
-    sendJSON(res, {
+    return {
       success: true,
       chapters: result.chapters || [],
       youtubeFormat: youtubeChapters,
       summary: result.summary || '',
       videoDuration: totalDuration,
+    };
+
+    } catch (error: any) {
+      try { unlinkSync(audioPath); } catch { }
+      throw error;
+    }
+      },
     });
+
+    sendJobAccepted(res, sessionId, job);
 
   } catch (error: any) {
     console.error(`[${jobId}] Error:`, error.message);
@@ -414,6 +430,12 @@ async function handleTranscribe(req: IncomingMessage, res: ServerResponse, sessi
       return;
     }
 
+    const enqueuedJob = enqueueJob({
+      sessionId,
+      kind: 'transcribe',
+      lane: 'transcribe',
+      run: async () => {
+    try {
     // Extract audio as MP3 (with optional trim for resized clips)
     console.log(`[${jobId}] Extracting audio...`);
     const ffmpegArgs = ['-y'];
@@ -595,19 +617,12 @@ Guidelines:
       console.error(`[${jobId}] This could mean: no speech in video, audio too quiet, or unsupported language`);
 
       const windowRequested = startTime !== undefined || endTime !== undefined;
-      sendJSON(res, {
-        error: `No speech detected${windowRequested ? ' in the selected clip range' : ''}. Make sure the video has clear, audible speech.`,
-        debug: {
-          transcriptionText: (transcription.text || '').substring(0, 200),
-          wordCount: (transcription.words || []).length
-        }
-      }, 400);
-      return;
+      throw httpError(400, `No speech detected${windowRequested ? ' in the selected clip range' : ''}. Make sure the video has clear, audible speech.`);
     }
 
     console.log(`[${jobId}] === TRANSCRIPTION DONE ===\n`);
 
-    sendJSON(res, {
+    return {
       success: true,
       text: transcription.text || '',
       words: words,
@@ -615,7 +630,16 @@ Guidelines:
       // not the asset length — assetDuration carries that separately
       duration: transcribedDuration,
       assetDuration: totalDuration,
+    };
+
+    } catch (error: any) {
+      try { unlinkSync(audioPath); } catch { }
+      throw error;
+    }
+      },
     });
+
+    sendJobAccepted(res, sessionId, enqueuedJob);
 
   } catch (error: any) {
     console.error(`[${jobId}] Error:`, error.message);
@@ -656,6 +680,11 @@ async function handleTranscribeAndExtract(req: IncomingMessage, res: ServerRespo
 
     console.log(`[${jobId}] Using video: ${videoAsset.filename}`);
 
+    const job = enqueueJob({
+      sessionId,
+      kind: 'transcribe-extract',
+      lane: 'transcribe',
+      run: async () => {
     // Step 1: Transcribe
     const transcription = await transcribeVideo(videoAsset.path, jobId);
     console.log(`[${jobId}] Transcript: "${transcription.text.substring(0, 100)}..."`);
@@ -696,12 +725,16 @@ async function handleTranscribeAndExtract(req: IncomingMessage, res: ServerRespo
     console.log(`[${jobId}] Downloaded ${gifAssets.length} GIFs`);
     console.log(`[${jobId}] === TRANSCRIPTION COMPLETE ===\n`);
 
-    sendJSON(res, {
+    return {
       success: true,
       transcript: transcription.text,
       keywords: keywords,
       gifAssets: gifAssets,
+    };
+      },
     });
+
+    sendJobAccepted(res, sessionId, job);
 
   } catch (error: any) {
     console.error(`[${jobId}] Error:`, error.message);

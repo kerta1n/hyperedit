@@ -4,8 +4,9 @@ import { join } from 'path';
 import { randomUUID } from 'crypto';
 import SynAudio from 'synaudio';
 import { TEMP_DIR } from './server-config.ts';
-import { parseBody, sendJSON } from './http-helpers.ts';
+import { parseBody, sendJSON, sendJobAccepted } from './http-helpers.ts';
 import { requireSession, saveAssetMetadata } from './session-store.ts';
+import { enqueueJob } from './job-queue.ts';
 import { parseFFmpegArgs, runFFmpeg, runFFmpegProbe } from './ffmpeg-helpers.ts';
 import type { SessionRoute } from './route-table.ts';
 
@@ -43,7 +44,12 @@ async function handleCreateGif(req: IncomingMessage, res: ServerResponse, sessio
       return;
     }
 
-    const jobId = randomUUID();
+    const job = enqueueJob({
+      sessionId,
+      kind: 'gif',
+      lane: 'ffmpeg',
+      run: async (job) => {
+    const jobId = job.id;
     console.log(`\n[${jobId}] === CREATE ANIMATED GIF ===`);
     console.log(`[${jobId}] Source: ${sourceAsset.filename}, Effect: ${effect}, Duration: ${duration}s`);
 
@@ -148,7 +154,7 @@ async function handleCreateGif(req: IncomingMessage, res: ServerResponse, sessio
     console.log(`[${jobId}] GIF created: ${(stats.size / 1024).toFixed(1)} KB`);
     console.log(`[${jobId}] === GIF CREATION COMPLETE ===\n`);
 
-    sendJSON(res, {
+    return {
       success: true,
       asset: {
         id: gifAsset.id,
@@ -160,7 +166,11 @@ async function handleCreateGif(req: IncomingMessage, res: ServerResponse, sessio
         height: gifAsset.height,
         thumbnailUrl: gifAsset.thumbPath ? `/session/${sessionId}/assets/${gifId}/thumbnail` : null,
       },
+    };
+      },
     });
+
+    sendJobAccepted(res, sessionId, job);
 
   } catch (error: any) {
     console.error(`[${sessionId}] GIF creation error:`, error.message);
@@ -265,6 +275,12 @@ async function handleAudioSync(req: IncomingMessage, res: ServerResponse, sessio
       return args;
     };
 
+    const job = enqueueJob({
+      sessionId,
+      kind: 'audio-sync',
+      lane: 'ffmpeg',
+      run: async () => {
+    try {
     console.log(`[${jobId}] Extracting PCM at ${sampleRate}Hz...`);
     await Promise.all([
       runFFmpeg(extractArgs(assetObjA.path, pcmPathA, sliceA), jobId),
@@ -304,13 +320,18 @@ async function handleAudioSync(req: IncomingMessage, res: ServerResponse, sessio
     const response: any = { offsetSeconds, correlation, confidence };
     if (note) response.note = note;
 
-    sendJSON(res, response);
+    return response;
+    } finally {
+      try { unlinkSync(pcmPathA); } catch {}
+      try { unlinkSync(pcmPathB); } catch {}
+    }
+      },
+    });
+
+    sendJobAccepted(res, sessionId, job);
   } catch (err: any) {
     console.error(`[${jobId}] Audio sync failed:`, err);
     sendJSON(res, { error: 'Correlation failed', details: err.message }, 500);
-  } finally {
-    try { unlinkSync(pcmPathA); } catch {}
-    try { unlinkSync(pcmPathB); } catch {}
   }
 }
 

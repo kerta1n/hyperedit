@@ -2,24 +2,22 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { existsSync, unlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { calculateKeepSegments, detectSilence, getVideoDuration, runFFmpeg } from './ffmpeg-helpers.ts';
-import { sendJSON } from './http-helpers.ts';
+import { sendJSON, sendJobAccepted } from './http-helpers.ts';
 import { requireSession } from './session-store.ts';
+import { enqueueJob } from './job-queue.ts';
 import type { SessionRoute } from './route-table.ts';
 
 // STABLE WORKFLOW — DO NOT MODIFY (see CLAUDE.md "Dead Air Removal").
 // The segment-based extract + re-encode + concat approach is required;
 // single-pass filter approaches (select/aselect, trim/atrim) drop audio
-// streams. This file's boundary IS the decree's scope.
+// streams. This file's boundary IS the decree's scope. (Phase 3 changed the
+// response envelope only — 202 { jobId } + polled status; the workflow
+// mechanics inside the job are untouched.)
 
 // Remove dead air within a session
 async function handleSessionRemoveDeadAir(req: IncomingMessage, res: ServerResponse, sessionId: string) {
   const session = requireSession(res, sessionId);
   if (!session) return;
-
-  const jobId = sessionId;
-  const outputPath = join(session.dir, `deadair-output-${Date.now()}.mp4`);
-  const concatListPath = join(session.dir, `concat-${Date.now()}.txt`);
-  const segmentPaths: string[] = [];
 
   try {
     // Parse options from body
@@ -29,8 +27,6 @@ async function handleSessionRemoveDeadAir(req: IncomingMessage, res: ServerRespo
 
     const silenceThreshold = options.silenceThreshold || -30;
     const minSilenceDuration = options.minSilenceDuration || 0.3;
-
-    console.log(`\n[${jobId}] === DEAD AIR REMOVAL (Session) ===`);
 
     // Explicit target only — library-order guessing is nondeterministic after restarts
     if (!options.assetId) {
@@ -51,7 +47,7 @@ async function handleSessionRemoveDeadAir(req: IncomingMessage, res: ServerRespo
 
     // Verify the video file exists on disk
     if (!existsSync(videoAsset.path)) {
-      console.error(`[${jobId}] Video file missing: ${videoAsset.path}`);
+      console.error(`[${sessionId}] Video file missing: ${videoAsset.path}`);
       sendJSON(res, {
         error: 'Video file no longer exists. Your session may have expired. Please re-upload your video.',
         code: 'VIDEO_FILE_MISSING'
@@ -59,6 +55,18 @@ async function handleSessionRemoveDeadAir(req: IncomingMessage, res: ServerRespo
       return;
     }
 
+    const job = enqueueJob({
+      sessionId,
+      kind: 'dead-air',
+      lane: 'ffmpeg',
+      run: async (job) => {
+    const jobId = job.id;
+    const outputPath = join(session.dir, `deadair-output-${Date.now()}.mp4`);
+    const concatListPath = join(session.dir, `concat-${Date.now()}.txt`);
+    const segmentPaths: string[] = [];
+
+    try {
+    console.log(`\n[${jobId}] === DEAD AIR REMOVAL (Session) ===`);
     console.log(`[${jobId}] Using video asset: ${videoAsset.filename} (${videoAsset.path})`);
 
     const totalDuration = await getVideoDuration(videoAsset.path);
@@ -71,13 +79,12 @@ async function handleSessionRemoveDeadAir(req: IncomingMessage, res: ServerRespo
 
     if (silencePeriods.length === 0) {
       console.log(`[${jobId}] No silence detected`);
-      sendJSON(res, {
+      return {
         success: true,
         duration: totalDuration,
         removedDuration: 0,
         message: 'No silence detected',
-      });
-      return;
+      };
     }
 
     const keepSegments = calculateKeepSegments(silencePeriods, totalDuration);
@@ -139,19 +146,27 @@ async function handleSessionRemoveDeadAir(req: IncomingMessage, res: ServerRespo
 
     console.log(`\n[${jobId}] === DEAD AIR REMOVAL COMPLETE ===`);
 
-    sendJSON(res, {
+    return {
       success: true,
       duration: totalKeptDuration,
       originalDuration: totalDuration,
       removedDuration,
       size: newStats.size,
       editCount: session.editCount,
+    };
+
+    } catch (error: any) {
+      console.error(`[${jobId}] Error:`, error.message);
+      segmentPaths.forEach(p => { try { unlinkSync(p); } catch { } });
+      try { unlinkSync(concatListPath); } catch { }
+      throw error;
+    }
+      },
     });
 
+    sendJobAccepted(res, sessionId, job);
   } catch (error: any) {
-    console.error(`[${jobId}] Error:`, error.message);
-    segmentPaths.forEach(p => { try { unlinkSync(p); } catch { } });
-    try { unlinkSync(concatListPath); } catch { }
+    console.error(`[${sessionId}] Error:`, error.message);
     sendJSON(res, { error: error.message }, 500);
   }
 }

@@ -3,8 +3,9 @@ import { existsSync, readFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { TEMP_DIR } from './server-config.ts';
-import { sendJSON } from './http-helpers.ts';
+import { sendJSON, sendJobAccepted } from './http-helpers.ts';
 import { requireSession, saveAssetMetadata } from './session-store.ts';
+import { enqueueJob } from './job-queue.ts';
 import { getMediaInfo, getVideoDuration, runFFmpeg } from './ffmpeg-helpers.ts';
 import { checkLocalWhisper, runLocalWhisper } from './whisper-helpers.ts';
 import { generateImageWithGemini, generateWithLLM, hasLLMProvider, parseLLMJson, transcribeAudioWithLLM } from './llm-gateway.ts';
@@ -99,6 +100,11 @@ async function handleGenerateBroll(req: IncomingMessage, res: ServerResponse, se
 
     console.log(`[${jobId}] Using video: ${videoAsset.filename}`);
 
+    const job = enqueueJob({
+      sessionId,
+      kind: 'broll',
+      lane: 'llm',
+      run: async () => {
     // Step 1: Transcribe the video
     console.log(`[${jobId}] Step 1: Transcribing video...`);
     const audioPath = join(TEMP_DIR, `${jobId}-broll-audio.mp3`);
@@ -249,12 +255,16 @@ async function handleGenerateBroll(req: IncomingMessage, res: ServerResponse, se
     console.log(`[${jobId}] Generated ${brollAssets.length}/${opportunities.length} B-roll images`);
     console.log(`[${jobId}] === B-ROLL GENERATION COMPLETE ===\n`);
 
-    sendJSON(res, {
+    return {
       success: true,
       transcript: transcription.text,
       opportunities: opportunities,
       brollAssets: brollAssets,
+    };
+      },
     });
+
+    sendJobAccepted(res, sessionId, job);
 
   } catch (error: any) {
     console.error(`[${jobId}] Error:`, error.message);

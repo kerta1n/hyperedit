@@ -14,7 +14,13 @@ import { installDownloadShim, registerLocalRenderAssets } from './render-downloa
 // which is only reachable through the CJS module registry — the ESM entry
 // is a single pre-bundled, immutable file.
 const require = createRequire(import.meta.url);
-const { openBrowser, renderMedia, selectComposition } = require('@remotion/renderer');
+const { openBrowser, renderMedia, selectComposition, makeCancelSignal } = require('@remotion/renderer');
+
+// Re-exported so callers share this module's CJS copy of @remotion/renderer
+// (the binaries patch registers against it) instead of importing a second one.
+export function makeRenderCancelSignal() {
+  return makeCancelSignal();
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -91,11 +97,6 @@ function getDirs() {
 // render never blocks the next.
 let renderQueue = Promise.resolve();
 let renderQueueDepth = 0;
-
-/** Active + queued renders — lets the server tell a client it is waiting. */
-export function getRenderQueueDepth() {
-  return renderQueueDepth;
-}
 
 function serializeRender(fn) {
   renderQueueDepth += 1;
@@ -376,6 +377,7 @@ async function renderSpecInner({
   assetPathMap,
   renderOptions: userRenderOptions,
   onProgress,
+  cancelSignal,
 }) {
   if (!spec) {
     throw new Error('spec is required for renderSpecWithRemotion');
@@ -586,6 +588,10 @@ async function renderSpecInner({
 
   renderOpts.onProgress = makeProgressLogger(finalComposition.durationInFrames, onProgress);
 
+  // Job-model cancellation: a fired signal rejects renderMedia (late
+  // subscription fires immediately, so cancel-while-queued also lands).
+  if (cancelSignal) renderOpts.cancelSignal = cancelSignal;
+
   await renderMedia(renderOpts);
 
   return {
@@ -610,6 +616,7 @@ async function renderDynamicAnimationInner({
   fps = 30,
   logLevel = 'info',
   onProgress,
+  cancelSignal,
 }) {
   if (!sceneData || !sceneData.scenes) {
     throw new Error('sceneData with scenes array is required for renderDynamicAnimation');
@@ -672,6 +679,9 @@ async function renderDynamicAnimationInner({
   withHwBinaries(renderOptions);
 
   renderOptions.onProgress = makeProgressLogger(finalComposition.durationInFrames, onProgress);
+
+  // Job-model cancellation (see renderSpecInner note)
+  if (cancelSignal) renderOptions.cancelSignal = cancelSignal;
 
   await renderMedia(renderOptions);
 

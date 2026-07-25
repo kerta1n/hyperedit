@@ -3,25 +3,28 @@ import { createReadStream, existsSync, readFileSync, readdirSync, unlinkSync, wr
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { ensureProjectDefaults } from '../project-schema.js';
-import { renderSpecWithRemotion, renderVariantBatch } from '../remotion-core/render.js';
+import { makeRenderCancelSignal, renderSpecWithRemotion, renderVariantBatch } from '../remotion-core/render.js';
 import { scoreVariantBatch, writeCampaignReport } from '../remotion-core/ad-intelligence.js';
 import { generateAdVariants, RemotionSpecValidationError } from '../remotion-core/spec.js';
-import { parseBody, sendJSON, streamRender } from './http-helpers.ts';
+import { parseBody, sendJSON, sendJobAccepted } from './http-helpers.ts';
 import { requireSession, resolveCompositionSettings, saveAssetMetadata } from './session-store.ts';
 import { generateThumbnail, runFFmpeg } from './ffmpeg-helpers.ts';
 import { buildSessionRemotionSpec, parseIncomingRemotionSpec, saveSpecSnapshot, sendSpecValidationError } from './project-service.ts';
 import type { SessionRoute } from './route-table.ts';
+import { hasActiveJob, makeRenderProgressUpdater } from './job-store.ts';
+import { enqueueJob } from './job-queue.ts';
 
 // Remotion render lane + export-hub render management. The parameterized
 // /renders/:stem/* handlers are exported for the entry's legacy dispatch
 // (the flat route table has no params — the Hono slice absorbs them).
-// Phase-3 note: streamRender's NDJSON dies here first (jobId + polled
-// status per owner decree); activeRenders is per-session only — the job
-// model replaces it with a global concurrency cap.
+// Phase 3: every POST render route validates synchronously (400/422 stay
+// immediate), then answers 202 { jobId } and runs on the job queue's render
+// lane (global cap, owner-set 1). Progress/result/cancel live at
+// /session/:id/jobs/:jobId — the request-scoped NDJSON stream is gone.
 
 export const RENDER_STEM_RE = /^export-\d+$/;
 export const RENDER_FILE_RE = /^export-\d+\.(mp4|webm|mkv|mov)$/;
-const activeRenders = new Set<string>();
+
 
 async function handleRenderVariants(req: IncomingMessage, res: ServerResponse, sessionId: string) {
   const session = requireSession(res, sessionId);
@@ -55,40 +58,52 @@ async function handleRenderVariants(req: IncomingMessage, res: ServerResponse, s
     });
 
     const batchPrefix = options.prefix || 'ad-variant';
-    const results = await renderVariantBatch({
-      variants,
-      outDir: session.rendersDir,
-      prefix: batchPrefix,
-      preview: options.preview === true,
-      logLevel: 'warn',
+
+    // renderVariantBatch has no cancel seam — cancellation covers the queued
+    // state only; an in-flight batch runs to completion, then settles canceled.
+    const job = enqueueJob({
+      sessionId,
+      kind: 'render',
+      lane: 'render',
+      run: async () => {
+        const results = await renderVariantBatch({
+          variants,
+          outDir: session.rendersDir,
+          prefix: batchPrefix,
+          preview: options.preview === true,
+          logLevel: 'warn',
+        });
+
+        const specPaths = variants.map((variant: unknown, index: number) => {
+          const filename = `${batchPrefix}-${String(index + 1).padStart(2, '0')}.spec.json`;
+          return saveSpecSnapshot(session, filename, variant);
+        });
+
+        let scoreReport = null;
+        if (options.noScores !== true) {
+          const report = scoreVariantBatch(variants, {
+            batchLabel: options.campaignLabel || `session-${sessionId}-render-variants`,
+          });
+
+          scoreReport = await writeCampaignReport(session.rendersDir, report, {
+            prefix: options.scoresPrefix || `${batchPrefix}-intelligence`,
+          });
+        }
+
+        return {
+          success: true,
+          engine: 'remotion',
+          count: results.length,
+          renders: results,
+          specPaths,
+          migration: specResult.migration,
+          warnings: specResult.warnings,
+          scoreReport,
+        };
+      },
     });
 
-    const specPaths = variants.map((variant: unknown, index: number) => {
-      const filename = `${batchPrefix}-${String(index + 1).padStart(2, '0')}.spec.json`;
-      return saveSpecSnapshot(session, filename, variant);
-    });
-
-    let scoreReport = null;
-    if (options.noScores !== true) {
-      const report = scoreVariantBatch(variants, {
-        batchLabel: options.campaignLabel || `session-${sessionId}-render-variants`,
-      });
-
-      scoreReport = await writeCampaignReport(session.rendersDir, report, {
-        prefix: options.scoresPrefix || `${batchPrefix}-intelligence`,
-      });
-    }
-
-    sendJSON(res, {
-      success: true,
-      engine: 'remotion',
-      count: results.length,
-      renders: results,
-      specPaths,
-      migration: specResult.migration,
-      warnings: specResult.warnings,
-      scoreReport,
-    });
+    sendJobAccepted(res, sessionId, job);
   } catch (error: any) {
     if (error instanceof RemotionSpecValidationError) {
       sendSpecValidationError(res, error);
@@ -130,29 +145,43 @@ async function handleRenderFromSpec(req: IncomingMessage, res: ServerResponse, s
       assetPathMap.set(id, asset.path);
     }
 
-    const renderInfo = await renderSpecWithRemotion({
-      spec,
-      outputPath,
-      preview,
-      logLevel: 'warn',
-      assetPathMap,
+    const job = enqueueJob({
+      sessionId,
+      kind: 'render',
+      lane: 'render',
+      run: async (job) => {
+        const { cancelSignal, cancel } = makeRenderCancelSignal();
+        job.cancel = cancel;
+
+        const renderInfo = await renderSpecWithRemotion({
+          spec,
+          outputPath,
+          preview,
+          logLevel: 'warn',
+          assetPathMap,
+          onProgress: makeRenderProgressUpdater(job),
+          cancelSignal,
+        });
+
+        const { stat } = await import('fs/promises');
+        const outputStats = await stat(outputPath);
+        saveSpecSnapshot(session, `${outputFilename.replace(/\.mp4$/, '')}.spec.json`, spec);
+
+        return {
+          success: true,
+          engine: 'remotion',
+          path: outputPath,
+          size: outputStats.size,
+          renderInfo,
+          migration: specResult.migration,
+          warnings: specResult.warnings,
+          downloadUrl: `/session/${sessionId}/renders/${preview ? 'preview' : 'export'}`,
+          duration: renderInfo.durationInFrames / (renderInfo.fps || 30),
+        };
+      },
     });
 
-    const { stat } = await import('fs/promises');
-    const outputStats = await stat(outputPath);
-    saveSpecSnapshot(session, `${outputFilename.replace(/\.mp4$/, '')}.spec.json`, spec);
-
-    sendJSON(res, {
-      success: true,
-      engine: 'remotion',
-      path: outputPath,
-      size: outputStats.size,
-      renderInfo,
-      migration: specResult.migration,
-      warnings: specResult.warnings,
-      downloadUrl: `/session/${sessionId}/renders/${preview ? 'preview' : 'export'}`,
-      duration: renderInfo.durationInFrames / (renderInfo.fps || 30),
-    });
+    sendJobAccepted(res, sessionId, job);
   } catch (error: any) {
     if (error instanceof RemotionSpecValidationError) {
       sendSpecValidationError(res, error);
@@ -169,7 +198,6 @@ async function handleProjectRenderRemotion(req: IncomingMessage, res: ServerResp
   const session = requireSession(res, sessionId);
   if (!session) return;
 
-  activeRenders.add(sessionId);
   try {
     let body = '';
     for await (const chunk of req) body += chunk;
@@ -197,7 +225,6 @@ async function handleProjectRenderRemotion(req: IncomingMessage, res: ServerResp
     // timeline renders black frames with no audio, which is never intended.
     if ((spec.clips || []).length === 0) {
       sendJSON(res, { error: 'Timeline is empty — add at least one clip before rendering' }, 400);
-      activeRenders.delete(sessionId);
       return;
     }
 
@@ -216,7 +243,14 @@ async function handleProjectRenderRemotion(req: IncomingMessage, res: ServerResp
       assetPathMap.set(id, asset.path);
     }
 
-    await streamRender(res, async (onProgress) => {
+    const job = enqueueJob({
+      sessionId,
+      kind: 'render',
+      lane: 'render',
+      run: async (job) => {
+      const { cancelSignal, cancel } = makeRenderCancelSignal();
+      job.cancel = cancel;
+
       const renderInfo = await renderSpecWithRemotion({
         spec,
         outputPath,
@@ -224,7 +258,8 @@ async function handleProjectRenderRemotion(req: IncomingMessage, res: ServerResp
         logLevel: 'warn',
         assetPathMap,
         renderOptions: renderOpts,
-        onProgress,
+        onProgress: makeRenderProgressUpdater(job),
+        cancelSignal,
       });
 
       const { stat } = await import('fs/promises');
@@ -268,7 +303,10 @@ async function handleProjectRenderRemotion(req: IncomingMessage, res: ServerResp
         warnings: specResult.warnings,
         downloadUrl: `/session/${sessionId}/renders/${preview ? 'preview' : 'export'}`,
       };
+      },
     });
+
+    sendJobAccepted(res, sessionId, job);
   } catch (error: any) {
     if (error instanceof RemotionSpecValidationError) {
       sendSpecValidationError(res, error);
@@ -277,8 +315,6 @@ async function handleProjectRenderRemotion(req: IncomingMessage, res: ServerResp
 
     console.error(`[${sessionId}] Remotion render error:`, error.message);
     sendJSON(res, { error: error.message }, 500);
-  } finally {
-    activeRenders.delete(sessionId);
   }
 }
 
@@ -375,7 +411,7 @@ export async function handleListRenders(req: IncomingMessage, res: ServerRespons
 export async function handleDeleteRender(req: IncomingMessage, res: ServerResponse, sessionId: string, stem: string) {
   const session = requireSession(res, sessionId);
   if (!session) return;
-  if (activeRenders.has(sessionId)) {
+  if (hasActiveJob(sessionId, 'render')) {
     sendJSON(res, { error: 'Render in progress' }, 409);
     return;
   }
@@ -484,82 +520,93 @@ async function handleRenderMotionGraphic(req: IncomingMessage, res: ServerRespon
     const { templateId, props, duration } = body;
     const { fps, width, height } = resolveCompositionSettings(session, body);
 
-    const jobId = randomUUID();
     const assetId = randomUUID();
     const outputPath = join(session.assetsDir, `${assetId}.mp4`);
     const thumbPath = join(session.assetsDir, `${assetId}_thumb.jpg`);
 
-    console.log(`\n[${jobId}] === RENDER MOTION GRAPHIC ===`);
-    console.log(`[${jobId}] Template: ${templateId}`);
-    console.log(`[${jobId}] Duration: ${duration}s`);
+    // Fast ffmpeg job (seconds) — shares the render lane; no in-flight cancel.
+    const job = enqueueJob({
+      sessionId,
+      kind: 'render',
+      lane: 'render',
+      run: async (job) => {
+        const jobId = job.id;
 
-    // Get text and styling from props
-    const text = props.text || props.name || templateId;
-    const color = (props.color || props.primaryColor || '#ffffff').replace('#', '');
-    const bgColor = props.backgroundColor || '000000';
-    const fontSize = props.fontSize || 64;
+        console.log(`\n[${jobId}] === RENDER MOTION GRAPHIC ===`);
+        console.log(`[${jobId}] Template: ${templateId}`);
+        console.log(`[${jobId}] Duration: ${duration}s`);
 
-    // Create a video with text overlay using FFmpeg
-    // This is a placeholder - proper Remotion rendering would generate much nicer animations
-    const fontFile = '/System/Library/Fonts/Helvetica.ttc'; // macOS system font
+        // Get text and styling from props
+        const text = props.text || props.name || templateId;
+        const color = (props.color || props.primaryColor || '#ffffff').replace('#', '');
+        const bgColor = props.backgroundColor || '000000';
+        const fontSize = props.fontSize || 64;
 
-    // FFmpeg command to create a video with text
-    const ffmpegArgs = [
-      '-y',
-      '-f', 'lavfi',
-      '-i', `color=c=0x${bgColor}:s=${width}x${height}:d=${duration}:r=${fps}`,
-      '-vf', `drawtext=text='${text.replace(/'/g, "\\'")}':fontfile=${fontFile}:fontsize=${fontSize}:fontcolor=0x${color}:x=(w-text_w)/2:y=(h-text_h)/2`,
-      '-c:v', 'libx264',
-      '-pix_fmt', 'yuv420p',
-      '-preset', 'fast',
-      outputPath
-    ];
+        // Create a video with text overlay using FFmpeg
+        // This is a placeholder - proper Remotion rendering would generate much nicer animations
+        const fontFile = '/System/Library/Fonts/Helvetica.ttc'; // macOS system font
 
-    await runFFmpeg(ffmpegArgs, jobId);
+        // FFmpeg command to create a video with text
+        const ffmpegArgs = [
+          '-y',
+          '-f', 'lavfi',
+          '-i', `color=c=0x${bgColor}:s=${width}x${height}:d=${duration}:r=${fps}`,
+          '-vf', `drawtext=text='${text.replace(/'/g, "\\'")}':fontfile=${fontFile}:fontsize=${fontSize}:fontcolor=0x${color}:x=(w-text_w)/2:y=(h-text_h)/2`,
+          '-c:v', 'libx264',
+          '-pix_fmt', 'yuv420p',
+          '-preset', 'fast',
+          outputPath
+        ];
 
-    // Generate thumbnail
-    await runFFmpeg([
-      '-y', '-i', outputPath,
-      '-vf', 'scale=160:90:force_original_aspect_ratio=decrease,pad=160:90:(ow-iw)/2:(oh-ih)/2',
-      '-frames:v', '1',
-      thumbPath
-    ], jobId);
+        await runFFmpeg(ffmpegArgs, jobId);
 
-    const { stat } = await import('fs/promises');
-    const stats = await stat(outputPath);
+        // Generate thumbnail
+        await runFFmpeg([
+          '-y', '-i', outputPath,
+          '-vf', 'scale=160:90:force_original_aspect_ratio=decrease,pad=160:90:(ow-iw)/2:(oh-ih)/2',
+          '-frames:v', '1',
+          thumbPath
+        ], jobId);
 
-    // Create asset entry
-    const asset = {
-      id: assetId,
-      type: 'video',
-      filename: `motion-${templateId}-${Date.now()}.mp4`,
-      path: outputPath,
-      thumbPath: existsSync(thumbPath) ? thumbPath : null,
-      duration: duration,
-      size: stats.size,
-      width,
-      height,
-      fps,
-      createdAt: Date.now(),
-      // Metadata
-      templateId,
-      props,
-    };
+        const { stat } = await import('fs/promises');
+        const stats = await stat(outputPath);
 
-    session.assets.set(assetId, asset);
-    saveAssetMetadata(session); // Persist asset metadata to disk
+        // Create asset entry
+        const asset = {
+          id: assetId,
+          type: 'video',
+          filename: `motion-${templateId}-${Date.now()}.mp4`,
+          path: outputPath,
+          thumbPath: existsSync(thumbPath) ? thumbPath : null,
+          duration: duration,
+          size: stats.size,
+          width,
+          height,
+          fps,
+          createdAt: Date.now(),
+          // Metadata
+          templateId,
+          props,
+        };
 
-    console.log(`[${jobId}] Motion graphic rendered: ${assetId}`);
-    console.log(`[${jobId}] === RENDER COMPLETE ===\n`);
+        session.assets.set(assetId, asset);
+        saveAssetMetadata(session); // Persist asset metadata to disk
 
-    sendJSON(res, {
-      success: true,
-      assetId,
-      filename: asset.filename,
-      duration,
-      thumbnailUrl: `/session/${sessionId}/assets/${assetId}/thumbnail`,
-      streamUrl: `/session/${sessionId}/assets/${assetId}/stream`,
+        console.log(`[${jobId}] Motion graphic rendered: ${assetId}`);
+        console.log(`[${jobId}] === RENDER COMPLETE ===\n`);
+
+        return {
+          success: true,
+          assetId,
+          filename: asset.filename,
+          duration,
+          thumbnailUrl: `/session/${sessionId}/assets/${assetId}/thumbnail`,
+          streamUrl: `/session/${sessionId}/assets/${assetId}/stream`,
+        };
+      },
     });
+
+    sendJobAccepted(res, sessionId, job);
 
   } catch (error: any) {
     console.error('Motion graphic render error:', error);

@@ -15,11 +15,16 @@ export async function falUpload(filePath: string, mimeType: string, jobId: strin
 
 // Generative model call; resolves with the SDK's { data, requestId }.
 // Queue-managed by default; queue: false for short synchronous models.
-export function callFal(model: string, input: any, jobId: string, { queue = true }: { queue?: boolean } = {}): Promise<any> {
+// onRequestId fires when the provider queue accepts the request — the seam
+// the job model uses to make a remote cancel attempt on DELETE.
+export function callFal(model: string, input: any, jobId: string, { queue = true, onRequestId }: { queue?: boolean; onRequestId?: (requestId: string) => void } = {}): Promise<any> {
   if (!queue) return fal.run(model, { input });
   return fal.subscribe(model, {
     input,
     logs: true,
+    onEnqueue: (requestId: string) => {
+      onRequestId?.(requestId);
+    },
     onQueueUpdate: (update: any) => {
       if (update.status === 'IN_QUEUE') {
         console.log(`[${jobId}] Queued at position ${update.position || '?'}`);
@@ -28,6 +33,15 @@ export function callFal(model: string, input: any, jobId: string, { queue = true
       }
     },
   });
+}
+
+// Best-effort remote cancel for a queued/running generative request. The
+// paid path is untestable here (owner-accepted); failures only log.
+export function cancelGenerativeRequest(model: string, requestId: string, jobId: string): void {
+  fal.queue.cancel(model, { requestId }).then(
+    () => console.log(`[${jobId}] Remote cancel accepted for ${requestId}`),
+    (err: any) => console.warn(`[${jobId}] Remote cancel failed:`, err.message),
+  );
 }
 
 // Download a generated artifact URL to a local file.

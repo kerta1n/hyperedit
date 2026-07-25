@@ -3,15 +3,29 @@ import { existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { TEMP_DIR } from './server-config.ts';
-import { parseBody, sendJSON } from './http-helpers.ts';
+import { parseBody, sendJSON, sendJobAccepted } from './http-helpers.ts';
 import { requireSession, saveAssetMetadata } from './session-store.ts';
 import { getVideoDuration, runFFmpeg } from './ffmpeg-helpers.ts';
-import { callFal, downloadArtifact, falUpload } from './fal-gateway.ts';
+import { callFal, cancelGenerativeRequest, downloadArtifact, falUpload } from './fal-gateway.ts';
+import type { JobRecord } from './job-store.ts';
+import { enqueueJob } from './job-queue.ts';
 import { generateWithLLM, hasLLMProvider } from './llm-gateway.ts';
 import { ensureProjectDefaults } from '../project-schema.js';
 
 // Video generation lanes (DiCaprio agent): image-to-video, video restyle,
 // and background removal through the generative provider gateway.
+
+// DELETE on the job makes a real remote cancel attempt once the provider
+// queue has accepted the request. The paid path is untestable here
+// (owner-accepted); the caveat lands in the job record's note.
+function installRemoteCancel(job: JobRecord, model: string, jobId: string) {
+  return (requestId: string) => {
+    job.cancel = () => {
+      job.note = 'remote cancel attempted (untested paid path)';
+      cancelGenerativeRequest(model, requestId, jobId);
+    };
+  };
+}
 
 // Generate video from image using fal.ai (DiCaprio agent)
 async function handleGenerateVideo(req, res, sessionId) {
@@ -45,6 +59,11 @@ async function handleGenerateVideo(req, res, sessionId) {
       return;
     }
 
+    const job = enqueueJob({
+      sessionId,
+      kind: 'video-gen',
+      lane: 'fal',
+      run: async (job) => {
     const jobId = sessionId.substring(0, 8);
     console.log(`\n[${jobId}] === DICAPRIO: GENERATE VIDEO ===`);
     console.log(`[${jobId}] User prompt: ${prompt}`);
@@ -94,12 +113,13 @@ Return ONLY the enhanced prompt text. No explanations, no quotes, no markdown.`;
       : (genSettings.width > genSettings.height ? '16:9' : '9:16');
 
     console.log(`[${jobId}] Calling video-gen provider (${genAspect})...`);
-    const falResult = await callFal('fal-ai/kling-video/v1.5/pro/image-to-video', {
+    const videoGenModel = 'fal-ai/kling-video/v1.5/pro/image-to-video';
+    const falResult = await callFal(videoGenModel, {
       prompt: enhancedPrompt,
       image_url: uploadedImageUrl,
       duration: duration === 10 ? '10' : '5',
       aspect_ratio: genAspect,
-    }, jobId);
+    }, jobId, { onRequestId: installRemoteCancel(job, videoGenModel, jobId) });
 
     console.log(`[${jobId}] Video generation complete!`);
 
@@ -155,7 +175,7 @@ Return ONLY the enhanced prompt text. No explanations, no quotes, no markdown.`;
     console.log(`[${jobId}] Saved video: ${asset.filename} (${(stats.size / 1024 / 1024).toFixed(1)} MB)`);
     console.log(`[${jobId}] === DICAPRIO COMPLETE ===\n`);
 
-    sendJSON(res, {
+    return {
       success: true,
       video: {
         id: videoId,
@@ -164,7 +184,11 @@ Return ONLY the enhanced prompt text. No explanations, no quotes, no markdown.`;
         streamUrl: `/session/${sessionId}/assets/${videoId}/stream`,
         duration: videoDuration,
       },
+    };
+      },
     });
+
+    sendJobAccepted(res, sessionId, job);
 
   } catch (error) {
     console.error('Video generation error:', error);
@@ -205,6 +229,11 @@ async function handleRestyleVideo(req, res, sessionId) {
       return;
     }
 
+    const job = enqueueJob({
+      sessionId,
+      kind: 'restyle',
+      lane: 'fal',
+      run: async (job) => {
     const jobId = sessionId.substring(0, 8);
     console.log(`\n[${jobId}] === DICAPRIO: RESTYLE VIDEO ===`);
     console.log(`[${jobId}] User prompt: ${prompt}`);
@@ -258,7 +287,8 @@ Return ONLY the enhanced prompt, no explanations.`)).trim();
     try { unlinkSync(compressedPath); } catch (e) { }
 
     console.log(`[${jobId}] Calling restyle provider...`);
-    const falResult = await callFal('fal-ai/ltx-2-19b/video-to-video', {
+    const restyleModel = 'fal-ai/ltx-2-19b/video-to-video';
+    const falResult = await callFal(restyleModel, {
       prompt: enhancedPrompt,
       video_url: uploadedVideoUrl,
       num_inference_steps: 40,
@@ -266,7 +296,7 @@ Return ONLY the enhanced prompt, no explanations.`)).trim();
       video_strength: 0.7,
       generate_audio: false,
       video_quality: 'high',
-    }, jobId);
+    }, jobId, { onRequestId: installRemoteCancel(job, restyleModel, jobId) });
 
     console.log(`[${jobId}] Video restyle complete!`);
 
@@ -320,7 +350,7 @@ Return ONLY the enhanced prompt, no explanations.`)).trim();
     console.log(`[${jobId}] Saved restyled video: ${asset.filename}`);
     console.log(`[${jobId}] === DICAPRIO RESTYLE COMPLETE ===\n`);
 
-    sendJSON(res, {
+    return {
       success: true,
       video: {
         id: newVideoId,
@@ -329,7 +359,11 @@ Return ONLY the enhanced prompt, no explanations.`)).trim();
         streamUrl: `/session/${sessionId}/assets/${newVideoId}/stream`,
         duration: videoDuration,
       },
+    };
+      },
     });
+
+    sendJobAccepted(res, sessionId, job);
 
   } catch (error) {
     console.error('Video restyle error:', error);
@@ -364,6 +398,11 @@ async function handleRemoveVideoBg(req, res, sessionId) {
       return;
     }
 
+    const job = enqueueJob({
+      sessionId,
+      kind: 'bg-removal',
+      lane: 'fal',
+      run: async (job) => {
     const jobId = sessionId.substring(0, 8);
     console.log(`\n[${jobId}] === DICAPRIO: REMOVE VIDEO BACKGROUND ===`);
     console.log(`[${jobId}] Source video: ${videoAsset.filename}`);
@@ -392,10 +431,11 @@ async function handleRemoveVideoBg(req, res, sessionId) {
     try { unlinkSync(compressedPath); } catch (e) { }
 
     console.log(`[${jobId}] Calling bg-removal provider...`);
-    const falResult = await callFal('fal-ai/ben/v2/video', {
+    const bgRemovalModel = 'fal-ai/ben/v2/video';
+    const falResult = await callFal(bgRemovalModel, {
       video_url: uploadedVideoUrl,
       output_format: 'webm',  // WebM for transparency support
-    }, jobId);
+    }, jobId, { onRequestId: installRemoteCancel(job, bgRemovalModel, jobId) });
 
     console.log(`[${jobId}] Background removal complete!`);
 
@@ -449,7 +489,7 @@ async function handleRemoveVideoBg(req, res, sessionId) {
     console.log(`[${jobId}] Saved video: ${asset.filename}`);
     console.log(`[${jobId}] === DICAPRIO REMOVE BG COMPLETE ===\n`);
 
-    sendJSON(res, {
+    return {
       success: true,
       video: {
         id: newVideoId,
@@ -458,7 +498,11 @@ async function handleRemoveVideoBg(req, res, sessionId) {
         streamUrl: `/session/${sessionId}/assets/${newVideoId}/stream`,
         duration: videoDuration,
       },
+    };
+      },
     });
+
+    sendJobAccepted(res, sessionId, job);
 
   } catch (error) {
     console.error('Video background removal error:', error);

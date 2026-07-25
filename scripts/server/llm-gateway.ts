@@ -27,6 +27,20 @@ export function hasLLMProvider(): boolean {
   return !!getLLMProvider();
 }
 
+// True when the resolved provider serves from this machine (job-queue keys
+// its llm lane cap off this: localhost 1, remote/LAN 3 — owner-set).
+export function isLLMProviderLocal(): boolean {
+  if (getLLMProvider() !== 'openai') return false;
+  const baseUrl = process.env.OPENAI_API_BASE_URL;
+  if (!baseUrl) return false;
+  try {
+    const host = new URL(baseUrl).hostname;
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  } catch {
+    return false;
+  }
+}
+
 // Call OpenAI-compatible API (Ollama, etc.) via fetch
 export async function callOpenAICompat(messages: Array<{ role: string; content: string }>, options: LLMOptions = {}): Promise<string> {
   const baseUrl = process.env.OPENAI_API_BASE_URL;

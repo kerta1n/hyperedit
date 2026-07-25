@@ -1,9 +1,11 @@
 import { createReadStream, existsSync, unlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
-import { renderDynamicAnimation } from '../remotion-core/render.js';
+import { makeRenderCancelSignal, renderDynamicAnimation } from '../remotion-core/render.js';
 import { TEMP_DIR } from './server-config.ts';
-import { parseBody, sendJSON } from './http-helpers.ts';
+import { parseBody, sendJSON, sendJobAccepted } from './http-helpers.ts';
+import { makeRenderProgressUpdater } from './job-store.ts';
+import { enqueueJob } from './job-queue.ts';
 import { orientationOf, requireSession, resolveCompositionSettings, saveAssetMetadata, writeJsonAtomic } from './session-store.ts';
 import { runFFmpeg, runFFmpegProbe } from './ffmpeg-helpers.ts';
 import { checkLocalWhisper, runLocalWhisper } from './whisper-helpers.ts';
@@ -50,6 +52,11 @@ async function handleAnalyzeForAnimation(req, res, sessionId) {
       return;
     }
 
+    const job = enqueueJob({
+      sessionId,
+      kind: 'animation-analyze',
+      lane: 'llm',
+      run: async () => {
     const jobId = randomUUID();
     const audioPath = join(TEMP_DIR, `${jobId}-audio.mp3`);
 
@@ -289,7 +296,7 @@ Feel free to add a GIF scene for reactions or emphasis when appropriate!`;
     console.log(`[${jobId}] === ANALYSIS COMPLETE (awaiting approval) ===\n`);
 
     // Return the concept for user approval (NOT rendered yet)
-    sendJSON(res, {
+    return {
       success: true,
       concept: {
         type,
@@ -310,7 +317,11 @@ Feel free to add a GIF scene for reactions or emphasis when appropriate!`;
         duration: totalDuration,
         assetId: videoAsset.id,
       },
+    };
+      },
     });
+
+    sendJobAccepted(res, sessionId, job);
 
   } catch (error) {
     console.error('Animation analysis error:', error);
@@ -337,6 +348,11 @@ async function handleRenderFromConcept(req, res, sessionId) {
     // analyze time; render at that fps so the approved duration holds.
     const fps = concept.fps || projectFps;
 
+    const job = enqueueJob({
+      sessionId,
+      kind: 'animation-render',
+      lane: 'render',
+      run: async (job) => {
     const jobId = randomUUID();
     const assetId = randomUUID();
     const outputPath = join(session.assetsDir, `${assetId}.mp4`);
@@ -412,6 +428,8 @@ async function handleRenderFromConcept(req, res, sessionId) {
     // Render with Remotion Node API
     console.log(`[${jobId}] Rendering with Remotion...`);
 
+    const { cancelSignal, cancel } = makeRenderCancelSignal();
+    job.cancel = cancel;
     await renderDynamicAnimation({
       sceneData,
       outputPath,
@@ -419,6 +437,8 @@ async function handleRenderFromConcept(req, res, sessionId) {
       height,
       fps,
       logLevel: 'warn',
+      onProgress: makeRenderProgressUpdater(job),
+      cancelSignal,
     });
 
     // Generate thumbnail
@@ -463,7 +483,7 @@ async function handleRenderFromConcept(req, res, sessionId) {
     console.log(`[${jobId}] Animation rendered: ${assetId} (${durationInSeconds}s)`);
     console.log(`[${jobId}] === RENDER COMPLETE ===\n`);
 
-    sendJSON(res, {
+    return {
       success: true,
       assetId,
       filename: asset.filename,
@@ -472,7 +492,11 @@ async function handleRenderFromConcept(req, res, sessionId) {
       sceneCount: concept.scenes.length,
       thumbnailUrl: `/session/${sessionId}/assets/${assetId}/thumbnail`,
       streamUrl: `/session/${sessionId}/assets/${assetId}/stream`,
+    };
+      },
     });
+
+    sendJobAccepted(res, sessionId, job);
 
   } catch (error) {
     console.error('Render from concept error:', error);

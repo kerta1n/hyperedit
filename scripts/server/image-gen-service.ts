@@ -2,8 +2,9 @@ import type { SessionRoute } from './route-table.ts';
 import { existsSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
-import { parseBody, sendJSON } from './http-helpers.ts';
+import { parseBody, sendJSON, sendJobAccepted } from './http-helpers.ts';
 import { requireSession, saveAssetMetadata } from './session-store.ts';
+import { enqueueJob } from './job-queue.ts';
 import { runFFmpeg } from './ffmpeg-helpers.ts';
 import { callFal } from './fal-gateway.ts';
 import { generateWithLLM, hasLLMProvider } from './llm-gateway.ts';
@@ -38,6 +39,13 @@ async function handleGenerateImage(req, res, sessionId) {
       return;
     }
 
+    // Synchronous provider call (queue: false) — no remote cancel seam;
+    // cancellation covers the queued state only.
+    const job = enqueueJob({
+      sessionId,
+      kind: 'image-gen',
+      lane: 'fal',
+      run: async () => {
     const jobId = sessionId.substring(0, 8);
     console.log(`\n[${jobId}] === PICASSO: GENERATE IMAGE ===`);
     console.log(`[${jobId}] User prompt: ${prompt}`);
@@ -174,11 +182,15 @@ async function handleGenerateImage(req, res, sessionId) {
     saveAssetMetadata(session); // Persist asset metadata to disk
     console.log(`[${jobId}] === PICASSO COMPLETE ===\n`);
 
-    sendJSON(res, {
+    return {
       success: true,
       images: generatedAssets,
       description: falResult.description,
+    };
+      },
     });
+
+    sendJobAccepted(res, sessionId, job);
 
   } catch (error) {
     console.error('Image generation error:', error);

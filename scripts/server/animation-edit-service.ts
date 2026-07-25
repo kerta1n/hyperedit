@@ -1,9 +1,11 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
-import { renderDynamicAnimation } from '../remotion-core/render.js';
+import { makeRenderCancelSignal, renderDynamicAnimation } from '../remotion-core/render.js';
 
-import { parseBody, sendJSON, streamRender } from './http-helpers.ts';
+import { parseBody, sendJSON, sendJobAccepted } from './http-helpers.ts';
+import { makeRenderProgressUpdater } from './job-store.ts';
+import { enqueueJob } from './job-queue.ts';
 import { orientationOf, requireSession, saveAssetMetadata, writeJsonAtomic } from './session-store.ts';
 import { runFFmpeg } from './ffmpeg-helpers.ts';
 import { generateWithLLM, hasLLMProvider, parseLLMJson } from './llm-gateway.ts';
@@ -64,6 +66,11 @@ async function handleEditAnimation(req, res, sessionId) {
     const width = originalAsset.width || 1920;
     const height = originalAsset.height || 1080;
 
+    const job = enqueueJob({
+      sessionId,
+      kind: 'animation',
+      lane: 'llm',
+      run: async (job) => {
     const jobId = randomUUID();
     // IMPORTANT: Reuse the same asset ID to replace in-place (no asset creep)
     const outputPath = originalAsset.path; // Overwrite existing video file
@@ -316,16 +323,18 @@ Return ONLY the complete JSON structure with your minimal change applied. No mar
     // Render with Remotion Node API
     console.log(`[${jobId}] Rendering with Remotion...`);
 
-    await streamRender(res, async (onProgress) => {
-      await renderDynamicAnimation({
-        sceneData: newSceneData,
-        outputPath,
-        width,
-        height,
-        fps,
-        logLevel: 'warn',
-        onProgress,
-      });
+    const { cancelSignal, cancel } = makeRenderCancelSignal();
+    job.cancel = cancel;
+    await renderDynamicAnimation({
+      sceneData: newSceneData,
+      outputPath,
+      width,
+      height,
+      fps,
+      logLevel: 'warn',
+      onProgress: makeRenderProgressUpdater(job),
+      cancelSignal,
+    });
 
       // Generate thumbnail
       await runFFmpeg([
@@ -375,7 +384,10 @@ Return ONLY the complete JSON structure with your minimal change applied. No mar
         thumbnailUrl: `/session/${sessionId}/assets/${assetId}/thumbnail?t=${Date.now()}`,
         streamUrl: `/session/${sessionId}/assets/${assetId}/stream?t=${Date.now()}`,
       };
+      },
     });
+
+    sendJobAccepted(res, sessionId, job);
 
   } catch (error) {
     console.error('Animation edit error:', error);

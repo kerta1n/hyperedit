@@ -1,4 +1,4 @@
-import { API_BASE } from '@/react-app/utils/api-helpers';
+import { API_BASE, pollJob } from '@/react-app/utils/api-helpers';
 import { useState, useRef, useEffect } from 'react';
 import { Film, Send, Loader2, Video, X, Zap, Plus, Play, Wand2, Eraser, Image as ImageIcon } from 'lucide-react';
 
@@ -180,8 +180,11 @@ export default function DiCaprioPanel({
         }),
       });
 
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Failed to generate video');
+      const submitted = await response.json();
+      if (!response.ok) throw new Error(submitted.error || 'Failed to generate video');
+
+      // 202 { jobId } — poll until the video-gen job settles
+      const data = await pollJob(sessionId as string, submitted.jobId) as { video: { id: string; filename: string; thumbnailUrl: string; streamUrl: string; duration: number } };
 
       setMessages(prev => [...prev, {
         type: 'assistant',
@@ -217,8 +220,11 @@ export default function DiCaprioPanel({
         }),
       });
 
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Failed to restyle video');
+      const submitted = await response.json();
+      if (!response.ok) throw new Error(submitted.error || 'Failed to restyle video');
+
+      // 202 { jobId } — poll until the restyle job settles
+      const data = await pollJob(sessionId as string, submitted.jobId) as { video: { id: string; filename: string; thumbnailUrl: string; streamUrl: string; duration: number } };
 
       setMessages(prev => [...prev, {
         type: 'assistant',
@@ -253,8 +259,11 @@ export default function DiCaprioPanel({
         }),
       });
 
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Failed to remove background');
+      const submitted = await response.json();
+      if (!response.ok) throw new Error(submitted.error || 'Failed to remove background');
+
+      // 202 { jobId } — poll until the bg-removal job settles
+      const data = await pollJob(sessionId as string, submitted.jobId) as { video: { id: string; filename: string; thumbnailUrl: string; streamUrl: string; duration: number } };
 
       setMessages(prev => [...prev, {
         type: 'assistant',

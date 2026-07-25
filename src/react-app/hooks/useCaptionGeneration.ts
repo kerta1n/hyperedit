@@ -1,4 +1,4 @@
-import { API_BASE } from '@/react-app/utils/api-helpers';
+import { API_BASE, pollJob } from '@/react-app/utils/api-helpers';
 import { useCallback, useRef } from 'react';
 import type { MutableRefObject } from 'react';
 import type {
@@ -181,7 +181,20 @@ export function useCaptionGeneration({
         throw new Error(message);
       }
 
-      const data = await response.json();
+      // 202 { jobId } — whisper runs as a job; poll until it settles. A 4xx
+      // errorStatus (e.g. no speech in range) keeps the userNotice semantics
+      // the synchronous 400 used to carry.
+      const { jobId } = await response.json();
+      let data;
+      try {
+        data = await pollJob(session.sessionId, jobId) as { words?: TranscribedWord[]; duration?: number };
+      } catch (err) {
+        const status = (err as Error & { status?: number }).status;
+        if (status !== undefined && status >= 400 && status < 500) {
+          throw userNotice((err as Error).message);
+        }
+        throw err;
+      }
       console.log('Transcription result:', data);
 
       // The transcript matches the trim window that was sent. If the clip was
@@ -251,8 +264,6 @@ export function useCaptionGeneration({
       }
       await saveProject();
       console.log(`Created ${chunks.length} caption clips${generatedClipIds.length > 0 ? `, replaced ${generatedClipIds.length}` : ''}`);
-
-      return data;
     } finally {
       inFlightRef.current = false;
     }

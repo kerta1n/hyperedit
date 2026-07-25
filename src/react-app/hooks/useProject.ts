@@ -1,7 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { readNDJSONStream } from '../utils/ndjson';
 
-import { API_BASE as LOCAL_FFMPEG_URL } from '@/react-app/utils/api-helpers';
+import { API_BASE as LOCAL_FFMPEG_URL, pollJob } from '@/react-app/utils/api-helpers';
 const SESSION_STORAGE_KEY = 'clipwise-session';
 
 // Asset - source file in library
@@ -1255,10 +1254,20 @@ export function useProject() {
         throw new Error(errorData.error || 'Render failed');
       }
 
-      const result = await readNDJSONStream(response, ({ pct, frames, total, elapsed }) => {
-        setStatus(`Rendering: ${pct}% (${frames}/${total} frames) [${elapsed}]`);
-      }, (position) => {
-        setStatus(`Render queued — waiting for ${position} earlier render${position === 1 ? '' : 's'}…`);
+      // 202 { jobId } — progress and result are polled from the jobs endpoint
+      const { jobId } = await response.json();
+      const result = await pollJob(session.sessionId, jobId, {
+        onUpdate: (job) => {
+          if (job.state === 'queued') {
+            const position = job.queuePosition ?? 0;
+            setStatus(position > 0
+              ? `Render queued — waiting for ${position} earlier render${position === 1 ? '' : 's'}…`
+              : 'Render queued…');
+          } else if (job.state === 'running' && job.progress) {
+            const { pct, frames, total, elapsed } = job.progress as { pct: number; frames: number; total: number; elapsed: string };
+            setStatus(`Rendering: ${pct}% (${frames}/${total} frames) [${elapsed}]`);
+          }
+        },
       }) as { warnings?: { message: string }[]; downloadUrl: string };
 
       if (result.warnings?.length) {
@@ -1312,7 +1321,9 @@ export function useProject() {
         throw new Error(error.error || 'GIF creation failed');
       }
 
-      const result = await response.json();
+      // 202 { jobId } — poll until the gif job settles
+      const { jobId } = await response.json();
+      const result = await pollJob(session.sessionId, jobId) as { asset: Asset & { thumbnailUrl: string | null } };
       const asset: Asset = {
         id: result.asset.id,
         type: result.asset.type,

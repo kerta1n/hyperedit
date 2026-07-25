@@ -32,6 +32,7 @@ import { imageGenRoutes } from './image-gen-service.ts';
 import { videoGenRoutes } from './video-gen-service.ts';
 import { handleAiEditCommand } from './director-service.ts';
 import { handleSessionCreate, handleSessionDelete, handleSessionList, handleSessionRename } from './session-service.ts';
+import { handleJobCancel, handleJobStatus } from './job-service.ts';
 import { serveSpa } from './spa-helpers.ts';
 
 // The thin HTTP layer: Hono routing over the raw-(req,res) service handlers.
@@ -169,6 +170,21 @@ export function buildApp() {
   });
   app.all('/session/:sessionId/renders/*', async (c) => {
     sendJSON(c.env.outgoing, { error: 'Render endpoint not found' }, 404);
+    return RESPONSE_ALREADY_SENT;
+  });
+
+  // Job status/cancel (Phase-3 job model: long-running routes answer
+  // 202 { jobId }; state is polled here, DELETE cancels).
+  app.get('/session/:sessionId/jobs/:jobId', async (c) => {
+    await handleJobStatus(c.env.incoming, c.env.outgoing, c.req.param('sessionId'), c.req.param('jobId'));
+    return RESPONSE_ALREADY_SENT;
+  });
+  app.delete('/session/:sessionId/jobs/:jobId', async (c) => {
+    await handleJobCancel(c.env.incoming, c.env.outgoing, c.req.param('sessionId'), c.req.param('jobId'));
+    return RESPONSE_ALREADY_SENT;
+  });
+  app.all('/session/:sessionId/jobs/*', async (c) => {
+    sendJSON(c.env.outgoing, { error: 'Job endpoint not found' }, 404);
     return RESPONSE_ALREADY_SENT;
   });
 

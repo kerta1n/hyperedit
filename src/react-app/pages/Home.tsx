@@ -1,4 +1,4 @@
-import { API_BASE } from '@/react-app/utils/api-helpers';
+import { API_BASE, pollJob } from '@/react-app/utils/api-helpers';
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import VideoPreview, { VideoPreviewHandle } from '@/react-app/components/VideoPreview';
 import Timeline from '@/react-app/components/Timeline';
@@ -8,7 +8,7 @@ import CaptionPropertiesPanel from '@/react-app/components/CaptionPropertiesPane
 import { useCaptionGeneration } from '@/react-app/hooks/useCaptionGeneration';
 import TransitionPropertiesPanel from '@/react-app/components/TransitionPropertiesPanel';
 import TrackPropertiesPanel from '@/react-app/components/TrackPropertiesPanel';
-import AIPromptPanel from '@/react-app/components/AIPromptPanel';
+import AIPromptPanel, { type AnimationConcept } from '@/react-app/components/AIPromptPanel';
 import PicassoPanel from '@/react-app/components/PicassoPanel';
 import DiCaprioPanel from '@/react-app/components/DiCaprioPanel';
 import GifSearchPanel from '@/react-app/components/GifSearchPanel';
@@ -18,7 +18,6 @@ import TimelineTabs from '@/react-app/components/TimelineTabs';
 import RenderSettingsModal from '@/react-app/components/RenderSettingsModal';
 import { useProject, Asset, TimelineClip, CaptionStyle } from '@/react-app/hooks/useProject';
 import type { RenderOptions } from '@/react-app/hooks/useProject';
-import { readNDJSONStream } from '@/react-app/utils/ndjson';
 import { deriveTimelineVideoTarget } from '@/react-app/utils/target-helpers';
 import SessionManager from '@/react-app/components/SessionManager';
 import { Sparkles, ListOrdered, Copy, Check, X, Download, Play, Palette, Film } from 'lucide-react';
@@ -970,7 +969,9 @@ export default function Home() {
       throw new Error(error.error || 'Failed to generate chapters');
     }
 
-    const result = await response.json();
+    // 202 { jobId } — poll until the chapters job settles
+    const { jobId } = await response.json();
+    const result = await pollJob(session.sessionId, jobId) as { chapters: Array<{ start: number; title: string }>; youtubeFormat: string; summary: string };
     const chapters: Array<{ start: number; title: string }> = result.chapters || [];
 
     if (chapters.length === 0) {
@@ -1086,7 +1087,9 @@ export default function Home() {
       throw new Error(error.error || 'Failed to extract keywords');
     }
 
-    const data = await response.json();
+    // 202 { jobId } — poll until the transcribe-and-extract job settles
+    const { jobId } = await response.json();
+    const data = await pollJob(session.sessionId, jobId) as { gifAssets: { assetId: string; timestamp: number }[] };
     console.log('Transcription result:', data);
 
     // Add each GIF to the timeline at its timestamp on the V2 (overlay) track
@@ -1097,8 +1100,6 @@ export default function Home() {
 
     // Save the project with the new clips
     await saveProject();
-
-    return data;
   }, [session, clips, assets, addClip, saveProject]);
 
   // Handle generating B-roll images and adding to timeline
@@ -1125,7 +1126,9 @@ export default function Home() {
       throw new Error(error.error || 'Failed to generate B-roll');
     }
 
-    const data = await response.json();
+    // 202 { jobId } — poll until the b-roll job settles
+    const { jobId } = await response.json();
+    const data = await pollJob(session.sessionId, jobId) as { brollAssets: Array<{ assetId: string; keyword: string; timestamp: number }> };
     console.log('B-roll generation result:', data);
     console.log('B-roll assets to add:', data.brollAssets);
 
@@ -1183,8 +1186,6 @@ export default function Home() {
     await loadProject();
 
     console.log('B-roll clips added successfully!');
-
-    return data;
   }, [session, clips, assets, refreshAssets, loadProject]);
 
   // Handle removing dead air / silence from the video
@@ -1218,7 +1219,9 @@ export default function Home() {
       throw new Error(error.error || 'Failed to remove dead air');
     }
 
-    const result = await response.json();
+    // 202 { jobId } — poll until the dead-air job settles
+    const { jobId } = await response.json();
+    const result = await pollJob(session.sessionId, jobId) as { duration: number; removedDuration: number };
     console.log('Dead air removal result:', result);
 
     // Refresh assets to get the updated video with new cache-busting URL
@@ -1293,7 +1296,9 @@ export default function Home() {
         throw new Error(error.error || 'Failed to render motion graphic');
       }
 
-      const data = await response.json();
+      // 202 { jobId } — poll until the render job settles
+      const { jobId } = await response.json();
+      const data = await pollJob(session.sessionId, jobId) as { assetId: string };
 
       // Refresh assets to sync with server (motion graphic was just created)
       await refreshAssets();
@@ -1350,8 +1355,15 @@ export default function Home() {
       }
 
       setStatus('Generating animation...');
-      const data = await readNDJSONStream(response, ({ pct, frames, total, elapsed }) => {
-        setStatus(`Rendering animation: ${pct}% (${frames}/${total} frames) [${elapsed}]`);
+      // 202 { jobId } — LLM authoring then render runs as a job; poll it
+      const { jobId } = await response.json();
+      const data = await pollJob(session.sessionId, jobId, {
+        onUpdate: (job) => {
+          if (job.state === 'running' && job.progress) {
+            const { pct, frames, total, elapsed } = job.progress as { pct: number; frames: number; total: number; elapsed: string };
+            setStatus(`Rendering animation: ${pct}% (${frames}/${total} frames) [${elapsed}]`);
+          }
+        },
       }) as { assetId: string; duration: number; sceneCount?: number };
       setStatus('');
 
@@ -1444,7 +1456,9 @@ export default function Home() {
       throw new Error(error.error || 'Failed to analyze video');
     }
 
-    return await response.json();
+    // 202 { jobId } — poll until the analysis job settles
+    const { jobId } = await response.json();
+    return await pollJob(session.sessionId, jobId) as { concept: AnimationConcept };
   }, [session, clips, assets, saveProjectImmediate]);
 
   // Handle rendering from pre-approved concept (skips analysis, uses provided scenes)
@@ -1484,7 +1498,9 @@ export default function Home() {
       throw new Error(error.error || 'Failed to render animation');
     }
 
-    const data = await response.json();
+    // 202 { jobId } — poll until the render job settles
+    const { jobId } = await response.json();
+    const data = await pollJob(session.sessionId, jobId) as { assetId: string; duration: number };
 
     // Refresh assets to get the newly rendered animation
     await refreshAssets();
@@ -1545,7 +1561,9 @@ export default function Home() {
       throw new Error(error.error || 'Failed to generate transcript animation');
     }
 
-    const data = await response.json();
+    // 202 { jobId } — poll until the transcript-animation job settles
+    const { jobId } = await response.json();
+    const data = await pollJob(session.sessionId, jobId) as { assetId: string; duration: number };
 
     // Refresh assets to get the newly generated animation
     await refreshAssets();
@@ -1592,7 +1610,9 @@ export default function Home() {
       throw new Error(error.error || 'Failed to generate batch animations');
     }
 
-    const data = await response.json();
+    // 202 { jobId } — poll until the batch job settles
+    const { jobId } = await response.json();
+    const data = await pollJob(session.sessionId, jobId) as { animations: Array<{ assetId: string; filename: string; duration: number; startTime: number; type: 'intro' | 'highlight' | 'transition' | 'callout' | 'outro'; title: string }>; videoDuration: number };
 
     // Refresh assets to get the newly generated animations
     await refreshAssets();
@@ -1670,7 +1690,9 @@ export default function Home() {
       const err = await response.json() as { error?: string };
       throw new Error(err.error || 'Audio sync failed');
     }
-    return response.json() as Promise<{ offsetSeconds: number; correlation: number; confidence: 'high' | 'medium' | 'low'; note?: string }>;
+    // 202 { jobId } — poll until the audio-sync job settles
+    const { jobId } = await response.json();
+    return await pollJob(session.sessionId, jobId) as { offsetSeconds: number; correlation: number; confidence: 'high' | 'medium' | 'low'; note?: string };
   }, [session]);
 
   const handleApplyAudioSync = useCallback((result: { analyzedClipIds: [string, string]; analyzedTabId: string; anchorClipId: string; nonAnchorClipId: string; nonAnchorIsAssetB: boolean; anchorInPoint: number; nonAnchorInPoint: number; offsetSeconds: number }) => {
@@ -1755,7 +1777,9 @@ export default function Home() {
         throw new Error(error.error || 'Failed to generate animation');
       }
 
-      const data = await response.json();
+      // 202 { jobId } — poll until the contextual-animation job settles
+      const { jobId } = await response.json();
+      const data = await pollJob(session.sessionId, jobId) as { assetId: string; duration: number; contentSummary?: string; sceneCount?: number };
 
       // Refresh assets to get the newly generated animation
       await refreshAssets();
@@ -1843,8 +1867,15 @@ export default function Home() {
     }
 
     setStatus('Editing animation...');
-    const data = await readNDJSONStream(response, ({ pct, frames, total, elapsed }) => {
-      setStatus(`Rendering animation: ${pct}% (${frames}/${total} frames) [${elapsed}]`);
+    // 202 { jobId } — LLM edit then re-render runs as a job; poll it
+    const { jobId } = await response.json();
+    const data = await pollJob(session.sessionId, jobId, {
+      onUpdate: (job) => {
+        if (job.state === 'running' && job.progress) {
+          const { pct, frames, total, elapsed } = job.progress as { pct: number; frames: number; total: number; elapsed: string };
+          setStatus(`Rendering animation: ${pct}% (${frames}/${total} frames) [${elapsed}]`);
+        }
+      },
     }) as { assetId: string; duration: number; sceneCount: number; editCount: number };
     setStatus('');
 

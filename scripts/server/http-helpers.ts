@@ -1,13 +1,27 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import formidable from 'formidable';
-import { getRenderQueueDepth } from '../remotion-core/render.js';
 import { MAX_UPLOAD_BYTES, UPLOAD_STAGING_DIR } from './server-config.ts';
+import type { JobRecord } from './job-store.ts';
 
 // Send a JSON response. CORS headers are already applied globally per-request
 // in the server's request handler.
 export function sendJSON(res: ServerResponse, data: unknown, status = 200): void {
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(data));
+}
+
+// 202 submit response — uniform across every job-model lane.
+export function sendJobAccepted(res: ServerResponse, sessionId: string, job: JobRecord): void {
+  sendJSON(res, { success: true, jobId: job.id, statusUrl: `/session/${sessionId}/jobs/${job.id}` }, 202);
+}
+
+// Error carrying an HTTP-status-equivalent. Job lanes throw these so a
+// mid-work 4xx (user-addressable outcome) keeps its meaning through the
+// polled error state instead of flattening into a server failure.
+export function httpError(statusCode: number, message: string): Error {
+  const err = new Error(message) as Error & { statusCode: number };
+  err.statusCode = statusCode;
+  return err;
 }
 
 export async function parseBody(req: IncomingMessage): Promise<any> {
@@ -27,49 +41,4 @@ export function parseMultipartForm(req: IncomingMessage, options: { maxFileSize?
     keepExtensions: true,
   });
   return form.parse(req);
-}
-
-// Stream render progress as NDJSON, then write final result
-export async function streamRender(res: ServerResponse, renderFn: (onProgress: (p: any) => void) => Promise<any>): Promise<void> {
-  // A disconnecting client must not crash the server: writes to a destroyed
-  // socket emit async 'error' events that try/catch around res.write can't see.
-  res.on('error', (err) => {
-    console.warn('[Render] Response stream error (client gone?):', err.message);
-  });
-  res.writeHead(200, {
-    'Content-Type': 'application/x-ndjson',
-    'Transfer-Encoding': 'chunked',
-    'Access-Control-Allow-Origin': '*',
-    'Cache-Control': 'no-cache',
-  });
-
-  // Renders serialize through a global queue; a queued request would otherwise
-  // stream nothing until it reaches the front — tell the client it is waiting.
-  const queueDepth = getRenderQueueDepth();
-  if (queueDepth > 0) {
-    try {
-      res.write(JSON.stringify({ type: 'queued', position: queueDepth }) + '\n');
-    } catch (e) { /* client disconnected */ }
-  }
-
-  const onProgress = ({ pct, renderedFrames, totalFrames, elapsed }: any) => {
-    const min = Math.floor(elapsed / 60);
-    const sec = String(elapsed % 60).padStart(2, '0');
-    try {
-      res.write(JSON.stringify({
-        type: 'progress', pct, frames: renderedFrames, total: totalFrames, elapsed: `${min}:${sec}`,
-      }) + '\n');
-    } catch (e) { /* client disconnected */ }
-  };
-
-  try {
-    const result = await renderFn(onProgress);
-    res.write(JSON.stringify({ type: 'result', ...result }) + '\n');
-    res.end();
-  } catch (err: any) {
-    try {
-      res.write(JSON.stringify({ type: 'error', message: err.message }) + '\n');
-      res.end();
-    } catch (e) { res.end(); }
-  }
 }

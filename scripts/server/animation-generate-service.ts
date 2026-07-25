@@ -1,9 +1,11 @@
 import { existsSync, unlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
-import { renderDynamicAnimation } from '../remotion-core/render.js';
+import { makeRenderCancelSignal, renderDynamicAnimation } from '../remotion-core/render.js';
 import { PORT } from './server-config.ts';
-import { parseBody, sendJSON, streamRender } from './http-helpers.ts';
+import { parseBody, sendJSON, sendJobAccepted } from './http-helpers.ts';
+import { makeRenderProgressUpdater } from './job-store.ts';
+import { enqueueJob } from './job-queue.ts';
 import { orientationOf, requireSession, resolveCompositionSettings, saveAssetMetadata, writeJsonAtomic } from './session-store.ts';
 import { runFFmpeg } from './ffmpeg-helpers.ts';
 import { generateWithLLM, hasLLMProvider, parseLLMJson } from './llm-gateway.ts';
@@ -103,6 +105,11 @@ async function handleGenerateAnimation(req, res, sessionId) {
       return;
     }
 
+    const job = enqueueJob({
+      sessionId,
+      kind: 'animation',
+      lane: 'llm',
+      run: async (job) => {
     const jobId = randomUUID();
     const assetId = randomUUID();
     const outputPath = join(session.assetsDir, `${assetId}.mp4`);
@@ -652,16 +659,18 @@ ${attachedAssetIds?.length ? `- IMPORTANT: Include media scenes to showcase the 
     // Step 3: Render with Remotion Node API
     console.log(`[${jobId}] Rendering with Remotion...`);
 
-    await streamRender(res, async (onProgress) => {
-      await renderDynamicAnimation({
-        sceneData,
-        outputPath,
-        width,
-        height,
-        fps,
-        logLevel: 'warn',
-        onProgress,
-      });
+    const { cancelSignal, cancel } = makeRenderCancelSignal();
+    job.cancel = cancel;
+    await renderDynamicAnimation({
+      sceneData,
+      outputPath,
+      width,
+      height,
+      fps,
+      logLevel: 'warn',
+      onProgress: makeRenderProgressUpdater(job),
+      cancelSignal,
+    });
 
       // Step 4: Generate thumbnail
       await runFFmpeg([
@@ -721,7 +730,10 @@ ${attachedAssetIds?.length ? `- IMPORTANT: Include media scenes to showcase the 
         thumbnailUrl: `/session/${sessionId}/assets/${assetId}/thumbnail`,
         streamUrl: `/session/${sessionId}/assets/${assetId}/stream`,
       };
+      },
     });
+
+    sendJobAccepted(res, sessionId, job);
 
   } catch (error: any) {
     console.error('AI animation generation error:', error);
