@@ -498,6 +498,24 @@ export function useProject() {
       };
 
       setAssets(prev => [...prev, asset]);
+
+      // Fresh upload: the proxy is built in the background, so the preview first
+      // serves the raw source (the stream tier only serves a proxy once it's
+      // `ready`). When the ingest job reports done, re-stamp this asset's
+      // streamUrl so the preview <video> reloads and switches to the proxy —
+      // otherwise it stays committed to the raw source (unscrubbable for long
+      // sources) until a manual reload. Fire-and-forget; pollJob's active-session
+      // guard drops the result if the user switched sessions mid-build, and any
+      // failure just leaves the preview on the (always-valid) source.
+      if (result.ingestJobId) {
+        const sid = currentSession.sessionId;
+        pollJob(sid, result.ingestJobId)
+          .then(() => setAssets(prev => prev.map(a => a.id === asset.id
+            ? { ...a, streamUrl: `${LOCAL_FFMPEG_URL}/session/${sid}/assets/${asset.id}/stream?v=${Date.now()}&tier=proxy` }
+            : a)))
+          .catch(() => {});
+      }
+
       setStatus('');
       return asset;
     } finally {

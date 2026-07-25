@@ -107,7 +107,11 @@ async function handleAssetUpload(req: IncomingMessage, res: ServerResponse, sess
     // waveform peaks (video + audio, step 7). The proxy/peaks are optional, so
     // the upload succeeds regardless of ingest outcome and we don't await it.
     // Images have no ingest work beyond the inline thumbnail — no job spawned.
-    if (type === 'video' || type === 'audio') enqueueIngest(session, assetId);
+    // Return the jobId so the client can poll it and switch the preview from the
+    // raw source to the proxy once it's built (a fresh upload's preview otherwise
+    // stays committed to the unscrubbable source until a manual reload).
+    let ingestJobId: string | undefined;
+    if (type === 'video' || type === 'audio') ingestJobId = enqueueIngest(session, assetId).id;
 
     sendJSON(res, {
       success: true,
@@ -122,6 +126,7 @@ async function handleAssetUpload(req: IncomingMessage, res: ServerResponse, sess
         fps: asset.fps,
         thumbnailUrl: asset.thumbPath ? `/session/${sessionId}/assets/${assetId}/thumbnail` : null,
       },
+      ingestJobId,
     });
 
   } catch (error: any) {

@@ -128,7 +128,12 @@ export async function warmSession(session: Session): Promise<void> {
   try {
     mkdirSync(dest, { recursive: true });
     for (const f of files) {
-      await copyFile(join(src, f), join(dest, f));
+      const destFile = join(dest, f);
+      // Skip files already warm — lets warm-on-ingest-complete (a new/rebuilt
+      // proxy joining an already-hot session) copy only the newcomer, not re-copy
+      // every existing proxy. A stale copy can't survive here: onAssetMutated
+      // evicts it before the rebuild, so anything present is current.
+      if (!existsSync(destFile)) await copyFile(join(src, f), destFile);
     }
     warm.set(session.id, { sizeBytes: incomingBytes, lastAccess: Date.now() });
     console.log(`[ProxyCache] Warmed ${files.length} prox${files.length === 1 ? 'y' : 'ies'} (${asMB(incomingBytes)}) for ${session.id}`);

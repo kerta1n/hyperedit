@@ -6,6 +6,7 @@ import { enqueueJob } from './job-queue.ts';
 import { getMediaInfo, generateThumbnail, runFFmpeg, extractWaveformPeaks, hasAudioStream, type MediaInfo } from './ffmpeg-helpers.ts';
 import { saveAssetMetadata, type Session } from './session-store.ts';
 import { getFFmpegEncodeArgs } from '../hwaccel-config.js';
+import { warmSession } from './proxy-cache-store.ts';
 
 // Per-asset ingest pipeline on the `ingest` lane. One declared job graph —
 // probe → conform flags → proxy → waveform peaks → thumbnail — instead of each
@@ -98,6 +99,12 @@ async function runIngest(job: JobRecord, session: Session, assetId: string, forc
         // already dropped the warm copy, and warmSession won't re-warm a proxy
         // until it is `ready` — so there is never a stale/partial warm copy to
         // evict at this point (§7.6 both-tier invalidation lives in onAssetMutated).
+        // Warm the freshly-ready proxy into the ramdisk NOW, not just on the next
+        // session-open — so a just-uploaded (or dead-air-rebuilt) asset previews at
+        // RAM speed immediately. Best-effort, non-blocking; warmSession warms only
+        // `ready` proxies, copies just the missing files, and the stream-guard keeps
+        // it from evicting an actively-streamed session.
+        warmSession(session).catch(() => {});
         done.push('proxy');
       } catch (e) {
         if (existsSync(proxyPath)) { try { unlinkSync(proxyPath); } catch { /* partial cleanup best-effort */ } }
