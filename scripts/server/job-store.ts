@@ -146,6 +146,14 @@ export function cancelJob(job: JobRecord): void {
   }
 }
 
+// Cancel every queued/running job (graceful shutdown). Running render jobs fire
+// their IPC cancel hook; lanes without an in-flight cancel just settle canceled.
+export function cancelAllActiveJobs(): void {
+  for (const job of jobs.values()) {
+    if (!FINISHED_STATES.has(job.state)) cancelJob(job);
+  }
+}
+
 // API shape per the R1 dual-audience mandate: flat, few fields, enum state.
 export function serializeJob(job: JobRecord): Record<string, unknown> {
   const out: Record<string, unknown> = {

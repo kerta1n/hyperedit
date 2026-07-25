@@ -1,20 +1,25 @@
 /**
  * render-download-helpers.js — Short-circuits Remotion's asset downloads for
- * files that are already local.
+ * session files that are already local.
  *
  * Remotion downloads every http(s) media src into its per-render download-map
  * before frame extraction (OffthreadVideo) and audio mixing — for HyperEdit
- * that means a full copy of each session asset (multi-GB sources) on EVERY
- * render, written to the same HDD that is absorbing frame captures, streamed
- * through the same Node event loop that drives the render. Slow, wears the
- * disk, and when the copy outlasts the delayRender window the render dies
- * with the cryptic "delayRender was called but not cleared after 118000ms".
+ * that means a full copy of each session asset (multi-GB long-form sources) on
+ * EVERY render, written to the same drive that is absorbing frame captures.
+ * Slow and wears the disk.
  *
  * The shim patches downloadFile in Remotion's CJS module registry (render.js
- * consumes the CJS build for exactly this reason): session-asset URLs
- * registered via registerLocalRenderAssets() are hard-linked into the
- * download dir instead of streamed over HTTP — instant, zero extra disk
- * (same volume). Everything else (GIPHY, remote media) passes through.
+ * consumes the CJS build for exactly this reason): session-asset :3333 URLs are
+ * hard-linked into the download dir instead of streamed over HTTP — instant,
+ * zero extra disk (same volume). Everything else (GIPHY, remote media) passes
+ * through untouched.
+ *
+ * Phase 4 §6.6 note: this is NO LONGER a deadlock workaround (the render worker
+ * runs off the event loop, so the supervisor can serve :3333 during a render).
+ * It is kept purely as the perf optimization above — without it every render
+ * re-copies its source assets over HTTP. The registration path was dropped:
+ * URLs resolve straight from the sessions directory (assetId prefix), so no
+ * per-render assetId→path map is threaded through the render call anymore.
  */
 
 import { createRequire } from 'module';
@@ -23,25 +28,10 @@ import { dirname, join } from 'path';
 
 const require = createRequire(import.meta.url);
 
-/** assetId → absolute path of the already-local source file */
-const localAssets = new Map();
 let installed = false;
 
-/**
- * Register the assetId → local path map for the upcoming render and make sure
- * the download shim is installed. Safe to call once per render; entries
- * accumulate (asset ids are unique per session).
- */
-export function registerLocalRenderAssets(assetPathMap) {
-  for (const [assetId, path] of assetPathMap) {
-    localAssets.set(assetId, path);
-  }
-  installDownloadShim();
-}
-
-// Animation renders (media scenes) reference session assets by :3333 URL
-// without a registration step, so also resolve straight from the sessions
-// directory: /session/{sid}/assets/{aid}/... → {sessionsDir}/{sid}/assets/{aid}.*
+// Session assets are referenced by :3333 URL; resolve straight from the
+// sessions directory: /session/{sid}/assets/{aid}/... → {sessionsDir}/{sid}/assets/{aid}.*
 function resolveFromSessionsDir(pathname) {
   const match = pathname.match(/\/session\/([^/]+)\/assets\/([^/]+)\//);
   if (!match) return null;
@@ -62,10 +52,6 @@ function resolveLocalPath(url) {
     return null;
   }
   if (parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') return null;
-  const match = parsed.pathname.match(/\/assets\/([^/]+)\//);
-  if (!match) return null;
-  const registered = localAssets.get(match[1]);
-  if (registered && existsSync(registered)) return registered;
   return resolveFromSessionsDir(parsed.pathname);
 }
 
@@ -86,8 +72,6 @@ export function installDownloadShim() {
     if (!localPath) return originalDownloadFile(options, ...rest);
 
     // Same signature Remotion uses: to(contentDisposition, contentType).
-    // contentType is only consulted when the pathname has no extension —
-    // rewritten session srcs always carry one (e.g. stream.mp4).
     const to = options.to(null, null);
     mkdirSync(dirname(to), { recursive: true });
     if (!existsSync(to)) {

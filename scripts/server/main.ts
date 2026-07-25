@@ -6,8 +6,9 @@
 import { PORT } from './server-config.ts';
 import { serve } from '@hono/node-server';
 import { detectCapabilities } from '../hw-detect.js';
-import { invalidateBundleCache } from '../remotion-core/render.js';
 import { cleanupStaleTempFiles, restoreSessionsFromDisk } from './session-store.ts';
+import { cancelAllActiveJobs } from './job-store.ts';
+import { shutdownWorker } from './render-client.ts';
 import { buildApp } from './http-app.ts';
 
 // Run hardware detection after env vars are loaded
@@ -34,9 +35,9 @@ restoreSessionsFromDisk();
 
 const app = buildApp();
 
-serve({ fetch: app.fetch, port: PORT }, () => {
-  // Clear stale Remotion bundle cache so builtin transition changes take effect
-  invalidateBundleCache();
+const server = serve({ fetch: app.fetch, port: PORT }, () => {
+  // Bundle cache lives in the render worker now (lazily spawned) and starts
+  // empty, so there is nothing to invalidate at supervisor startup.
   console.log(`\n🎬 Local FFmpeg server running at http://localhost:${PORT}`);
   console.log(`\n   Session Management:`);
   console.log(`   GET  /sessions - List all sessions`);
@@ -72,3 +73,21 @@ serve({ fetch: app.fetch, port: PORT }, () => {
   console.log(`\n   GET /health - Health check`);
   console.log(`   GET /hwaccel-info - Hardware acceleration diagnostics\n`);
 });
+
+// Graceful shutdown (SIGTERM from `docker stop`, SIGINT from Ctrl+C): stop
+// accepting new requests, cancel in-flight jobs (running renders fire their
+// IPC cancel), close the render worker so its Chrome exits cleanly, then exit.
+// Leaves no orphaned ffmpeg/Chrome for the next start's temp sweep to find.
+let shuttingDown = false;
+async function gracefulShutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`\n[Server] ${signal} received — shutting down`);
+  try { server.close(); } catch { /* already closing */ }
+  cancelAllActiveJobs();
+  await shutdownWorker();
+  console.log('[Server] shutdown complete');
+  process.exit(0);
+}
+process.on('SIGTERM', () => { void gracefulShutdown('SIGTERM'); });
+process.on('SIGINT', () => { void gracefulShutdown('SIGINT'); });

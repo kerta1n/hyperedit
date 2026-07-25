@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
-import { invalidateBundleCache } from '../remotion-core/render.js';
+import { invalidateBundleInWorker } from './render-client.ts';
 import { TEMP_DIR } from './server-config.ts';
 import { parseBody, parseMultipartForm, sendJSON } from './http-helpers.ts';
 import { requireSession } from './session-store.ts';
@@ -134,7 +134,7 @@ async function handleUploadTransition(req: IncomingMessage, res: ServerResponse,
     }
     writeFileSync(join(CUSTOM_TRANSITIONS_DIR, `${transitionId}.tsx`), code);
     regenerateBarrelFile();
-    invalidateBundleCache();
+    invalidateBundleInWorker();
 
     if (!session.customTransitions) session.customTransitions = new Map();
     session.customTransitions.set(transitionId, {
@@ -174,7 +174,7 @@ async function handleDeleteTransition(req: IncomingMessage, res: ServerResponse,
 
     unlinkSync(filePath);
     regenerateBarrelFile();
-    invalidateBundleCache();
+    invalidateBundleInWorker();
 
     console.log(`[Transitions] Deleted custom transition: ${transitionId}`);
     sendJSON(res, { success: true, transitionId });
@@ -327,7 +327,7 @@ Return ONLY the .tsx code, no explanation.`;
     }
     writeFileSync(join(CUSTOM_TRANSITIONS_DIR, `${transitionId}.tsx`), code);
     regenerateBarrelFile();
-    invalidateBundleCache();
+    invalidateBundleInWorker();
 
     if (!session.customTransitions) session.customTransitions = new Map();
     session.customTransitions.set(transitionId, {

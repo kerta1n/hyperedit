@@ -1,7 +1,7 @@
 import { createReadStream, existsSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
-import { renderDynamicAnimation } from '../remotion-core/render.js';
+import { renderDynamicInWorker } from './render-client.ts';
 import { TEMP_DIR } from './server-config.ts';
 import { httpError, parseBody, sendJSON, sendJobAccepted } from './http-helpers.ts';
 import { orientationOf, requireSession, resolveCompositionSettings, saveAssetMetadata, writeJsonAtomic } from './session-store.ts';
@@ -61,7 +61,7 @@ async function handleGenerateBatchAnimations(req, res, sessionId) {
       sessionId,
       kind: 'animation-batch',
       lane: 'llm',
-      run: async () => {
+      run: async (job) => {
     // Step 1: Get or create transcription
     console.log(`[${jobId}] Step 1: Getting video transcription...`);
     const transcription = await getOrTranscribeVideo(session, videoAsset, jobId);
@@ -210,7 +210,7 @@ Make it visually engaging with good color choices. Use 2-4 scenes for variety.`;
       const durationInSeconds = totalDuration / fps;
 
       // Render with Remotion Node API
-      await renderDynamicAnimation({
+      await renderDynamicInWorker(job, {
         sceneData,
         outputPath,
         width,
@@ -325,7 +325,7 @@ async function handleGenerateTranscriptAnimation(req, res, sessionId) {
       sessionId,
       kind: 'animation-transcript',
       lane: 'llm',
-      run: async () => {
+      run: async (job) => {
     const jobId = sessionId.substring(0, 8);
     console.log(`\n[${jobId}] === GENERATE TRANSCRIPT ANIMATION ===`);
     console.log(`[${jobId}] Video: ${videoAsset.filename}`);
@@ -516,7 +516,7 @@ Pick phrases that are spread throughout the video. Each phrase should be 2-6 wor
     writeFileSync(propsPath, JSON.stringify(sceneData, null, 2));
 
     // Render with Remotion Node API
-    await renderDynamicAnimation({
+    await renderDynamicInWorker(job, {
       sceneData,
       outputPath,
       width,
@@ -621,7 +621,7 @@ async function handleGenerateContextualAnimation(req, res, sessionId) {
       sessionId,
       kind: 'animation-contextual',
       lane: 'llm',
-      run: async () => {
+      run: async (job) => {
     const jobId = randomUUID();
     const outputAssetId = randomUUID();
     const outputPath = join(session.assetsDir, `${outputAssetId}.mp4`);
@@ -809,7 +809,7 @@ Use specific terms, concepts, and themes from the transcript.`;
     // Step 3: Render with Remotion Node API
     console.log(`[${jobId}] Step 3: Rendering with Remotion...`);
 
-    await renderDynamicAnimation({
+    await renderDynamicInWorker(job, {
       sceneData,
       outputPath,
       width,

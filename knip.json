@@ -2,7 +2,8 @@
   "$schema": "https://unpkg.com/knip@5/schema.json",
   "entry": [
     "src/react-app/main.tsx",
-    "src/remotion/index.tsx"
+    "src/remotion/index.tsx",
+    "scripts/server/render-worker.ts"
   ],
   "project": ["src/**/*.{ts,tsx}", "scripts/**/*.{js,ts}"],
   "ignore": [

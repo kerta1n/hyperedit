@@ -1,4 +1,4 @@
-import { link, copyFile, mkdir, rm } from 'fs/promises';
+import { mkdir, rm } from 'fs/promises';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync, mkdirSync } from 'fs';
@@ -7,7 +7,7 @@ import { bundle } from '@remotion/bundler';
 import { parseSpecInput } from './spec.js';
 import { getRenderMediaOptions } from '../hwaccel-config.js';
 import { ensureNvencBinariesDir } from './render-binaries-helpers.js';
-import { installDownloadShim, registerLocalRenderAssets } from './render-download-helpers.js';
+import { installDownloadShim } from './render-download-helpers.js';
 
 // CJS build deliberately (not `import`): the Windows NVENC path patches
 // Remotion's internal audio-codec module (see render-binaries-helpers.js),
@@ -62,8 +62,9 @@ let _dirs = null;
 function getDirs() {
   if (_dirs) return _dirs;
 
-  // Every render path passes through here — make sure session-asset URLs are
-  // hard-linked instead of downloaded (animation renders never register a map)
+  // Hard-link session :3333 assets into Remotion's download-map instead of
+  // HTTP-copying them per render (perf; resolves straight from the sessions
+  // dir, no registration). No longer a deadlock workaround — Phase 4 §6.6.
   installDownloadShim();
 
   const outputRoot = process.env.HYPEREDIT_OUTPUT || join(projectRoot, '.output');
@@ -202,6 +203,19 @@ export function invalidateBrowserCache() {
   if (old) old.close({ silent: true }).catch(() => {});
 }
 
+// Graceful shutdown: close the cached browser and AWAIT it so Chrome exits
+// before the worker process does — avoids an orphaned Chrome on SIGTERM
+// (no process groups on Windows; POSIX similar without group-kill).
+export async function closeRenderBrowser() {
+  const old = cachedBrowserInstance;
+  cachedBrowserPromise = null;
+  cachedBrowserInstance = null;
+  browserConfigKey = '';
+  if (old) {
+    try { await old.close({ silent: true }); } catch { /* already gone */ }
+  }
+}
+
 function getBrowserConfigKey(hw) {
   return JSON.stringify({
     chromeMode: hw.chromeMode,
@@ -271,75 +285,6 @@ async function getBrowser(hwOptions) {
   return cachedBrowserPromise;
 }
 
-/**
- * Hard-link (or copy) session assets into the Remotion bundle directory, then
- * rewrite clip src URLs to relative paths so the bundle server serves them.
- *
- * This is REQUIRED because the FFmpeg server is single-threaded — it blocks on
- * the renderMedia() call, so Remotion cannot fetch assets from localhost:3333.
- * The bundle dir lives on the same drive as session assets (D:), so hard links
- * are instant and use zero extra disk space.
- */
-async function copyAssetsToBundle(bundlePath, spec, assetPathMap) {
-  if (!assetPathMap || assetPathMap.size === 0) return;
-
-  let copiedCount = 0;
-
-  // Process both clips and voiceover entries — both have src URLs that
-  // Remotion will try to download, causing deadlock if they point at :3333
-  const allSrcEntries = [
-    ...(spec.clips || []),
-    ...(spec.voiceover || []),
-  ];
-
-  for (const clip of allSrcEntries) {
-    if (!clip.src) continue;
-
-    // clip.src is a full URL like "http://localhost:3333/session/{id}/assets/{assetId}/stream"
-    let urlPath;
-    try {
-      urlPath = new URL(clip.src).pathname;
-    } catch {
-      urlPath = clip.src;
-    }
-
-    const match = urlPath.match(/\/assets\/([^/]+)\//);
-    if (!match) continue;
-    const assetId = match[1];
-    const sourcePath = assetPathMap.get(assetId);
-    if (!sourcePath) continue;
-
-    // Build destination inside bundle — use the source file's extension so
-    // Remotion's bundle server sets the correct Content-Type and the compositor
-    // can identify the codec from the filename.
-    const ext = sourcePath.match(/\.[^.]+$/)?.[0] || '.mp4';
-    const segments = urlPath.split('/').filter(Boolean);
-    // Replace the last segment (e.g. "stream") with "stream.mp4"
-    segments[segments.length - 1] += ext;
-    const destPath = join(bundlePath, ...segments);
-    const rewrittenUrl = '/' + segments.join('/');
-
-    try {
-      await mkdir(dirname(destPath), { recursive: true });
-      try {
-        await link(sourcePath, destPath);
-      } catch {
-        await copyFile(sourcePath, destPath);
-      }
-      // Rewrite src to relative path — Remotion's bundle server serves it
-      clip.src = rewrittenUrl;
-      copiedCount++;
-      console.log(`[Remotion] Asset ${assetId}: ${sourcePath} → ${destPath}`);
-    } catch (err) {
-      console.warn(`[Remotion] Failed to copy asset ${assetId}: ${err.message}`);
-    }
-  }
-
-  if (copiedCount > 0) {
-    console.log(`[Remotion] Copied ${copiedCount} assets into bundle, rewrote src to relative paths`);
-  }
-}
-
 function withDefaults(spec) {
   const { spec: parsedSpec } = parseSpecInput(spec || {}, {
     source: 'renderSpecWithRemotion',
@@ -374,7 +319,6 @@ async function renderSpecInner({
   imageFormat = 'jpeg',
   logLevel = 'info',
   concurrency,
-  assetPathMap,
   renderOptions: userRenderOptions,
   onProgress,
   cancelSignal,
@@ -404,16 +348,11 @@ async function renderSpecInner({
 
   const serveUrl = await getBundleUrl(customIds);
 
-  // Hard-link assets into the bundle so Remotion's bundle server serves them.
-  // The FFmpeg server is blocked during renderMedia(), so Remotion can't fetch
-  // from localhost:3333. Bundle is on the same drive → hard links are free.
-  // Also register them with the download shim so Remotion's download-map gets
-  // hard links instead of multi-GB HTTP copies (see render-download-helpers).
-  if (assetPathMap) {
-    registerLocalRenderAssets(assetPathMap);
-    await copyAssetsToBundle(serveUrl, normalizedSpec, assetPathMap);
-  }
-
+  // Clip srcs are absolute http://localhost:3333/... URLs (see buildAssetSrc in
+  // timeline-to-spec.js). No more copying assets into the bundle + rewriting src
+  // (Phase 4 §6.6): the worker runs off the event loop so the supervisor serves
+  // those :3333 requests, and the download shim in getDirs() hard-links them
+  // from the sessions dir into Remotion's download-map (perf, no HTTP copy).
   const inputProps = { spec: normalizedSpec };
 
   // Resolve final codec: explicit param → user renderOptions → default

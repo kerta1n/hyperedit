@@ -3,7 +3,7 @@ import { createReadStream, existsSync, readFileSync, readdirSync, unlinkSync, wr
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { ensureProjectDefaults } from '../project-schema.js';
-import { makeRenderCancelSignal, renderSpecWithRemotion, renderVariantBatch } from '../remotion-core/render.js';
+import { renderSpecInWorker, renderVariantBatchInWorker } from './render-client.ts';
 import { scoreVariantBatch, writeCampaignReport } from '../remotion-core/ad-intelligence.js';
 import { generateAdVariants, RemotionSpecValidationError } from '../remotion-core/spec.js';
 import { parseBody, sendJSON, sendJobAccepted } from './http-helpers.ts';
@@ -65,8 +65,8 @@ async function handleRenderVariants(req: IncomingMessage, res: ServerResponse, s
       sessionId,
       kind: 'render',
       lane: 'render',
-      run: async () => {
-        const results = await renderVariantBatch({
+      run: async (job) => {
+        const results = await renderVariantBatchInWorker(job, {
           variants,
           outDir: session.rendersDir,
           prefix: batchPrefix,
@@ -140,27 +140,17 @@ async function handleRenderFromSpec(req: IncomingMessage, res: ServerResponse, s
         : `export-${Date.now()}.mp4`;
     const outputPath = join(session.rendersDir, outputFilename);
 
-    const assetPathMap = new Map();
-    for (const [id, asset] of session.assets) {
-      assetPathMap.set(id, asset.path);
-    }
-
     const job = enqueueJob({
       sessionId,
       kind: 'render',
       lane: 'render',
       run: async (job) => {
-        const { cancelSignal, cancel } = makeRenderCancelSignal();
-        job.cancel = cancel;
-
-        const renderInfo = await renderSpecWithRemotion({
+        const renderInfo = await renderSpecInWorker(job, {
           spec,
           outputPath,
           preview,
           logLevel: 'warn',
-          assetPathMap,
           onProgress: makeRenderProgressUpdater(job),
-          cancelSignal,
         });
 
         const { stat } = await import('fs/promises');
@@ -238,28 +228,18 @@ async function handleProjectRenderRemotion(req: IncomingMessage, res: ServerResp
     console.log(`\n[${sessionId}] === REMOTION ${preview ? 'PREVIEW' : 'EXPORT'} ===`);
     console.log(`[${sessionId}] Clips: ${spec.clips.length} | Captions: ${spec.captions.length}`);
 
-    const assetPathMap = new Map();
-    for (const [id, asset] of session.assets) {
-      assetPathMap.set(id, asset.path);
-    }
-
     const job = enqueueJob({
       sessionId,
       kind: 'render',
       lane: 'render',
       run: async (job) => {
-      const { cancelSignal, cancel } = makeRenderCancelSignal();
-      job.cancel = cancel;
-
-      const renderInfo = await renderSpecWithRemotion({
+      const renderInfo = await renderSpecInWorker(job, {
         spec,
         outputPath,
         preview,
         logLevel: 'warn',
-        assetPathMap,
         renderOptions: renderOpts,
         onProgress: makeRenderProgressUpdater(job),
-        cancelSignal,
       });
 
       const { stat } = await import('fs/promises');

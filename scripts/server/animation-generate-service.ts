@@ -1,7 +1,7 @@
 import { existsSync, unlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
-import { makeRenderCancelSignal, renderDynamicAnimation } from '../remotion-core/render.js';
+import { renderDynamicInWorker } from './render-client.ts';
 import { PORT } from './server-config.ts';
 import { parseBody, sendJSON, sendJobAccepted } from './http-helpers.ts';
 import { makeRenderProgressUpdater } from './job-store.ts';
@@ -659,9 +659,7 @@ ${attachedAssetIds?.length ? `- IMPORTANT: Include media scenes to showcase the 
     // Step 3: Render with Remotion Node API
     console.log(`[${jobId}] Rendering with Remotion...`);
 
-    const { cancelSignal, cancel } = makeRenderCancelSignal();
-    job.cancel = cancel;
-    await renderDynamicAnimation({
+    await renderDynamicInWorker(job, {
       sceneData,
       outputPath,
       width,
@@ -669,7 +667,6 @@ ${attachedAssetIds?.length ? `- IMPORTANT: Include media scenes to showcase the 
       fps,
       logLevel: 'warn',
       onProgress: makeRenderProgressUpdater(job),
-      cancelSignal,
     });
 
       // Step 4: Generate thumbnail
