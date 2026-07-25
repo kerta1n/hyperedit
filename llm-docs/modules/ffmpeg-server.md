@@ -480,7 +480,7 @@ POST /session/:id/upload-transition  (or generate-transition)
 
 ## Connections
 
-- [[useProject]] — calls every session/asset/project/render endpoint; manages `sessionId` in `localStorage('clipwise-session')`
+- [[useProject]] — calls every session/asset/project/render endpoint; manages `sessionId` in `localStorage('hyperedit-session')`
 - [[Home]] — calls `transcribe`, `generate-animation`, `generate-broll`, `remove-dead-air`, `extract-audio`, `render`
 - [[AIPromptPanel]] (Director) — sends user prompt to this server's `POST /ai-edit` (LLM-generated FFmpeg command); panel calls `process-asset` or `process` to execute
 - [[PicassoPanel]] — calls `generate-image`

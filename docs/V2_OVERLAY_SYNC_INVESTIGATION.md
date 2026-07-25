@@ -3671,7 +3671,7 @@ After Run 12 closed out the immediate measurement cycle, the team consolidated o
    - Timeline scroll container right edge x ≈ 1462 (AI panel overlap). Positions > 70 s require `scrollLeft` adjustment.
    - Playhead triangle blocks `document.elementFromPoint` — workaround: dispatch MouseEvents directly on ruler via `querySelector`.
    - pixelsPerSecond observed range 16.629–16.667 depending on aspect-ratio toggle / panel state — always re-measure per session.
-   - `localStorage['clipwise-session']` JSON parsing for session ID extraction.
+   - `localStorage['hyperedit-session']` JSON parsing for session ID extraction.
    - Direct FFmpeg server `GET /session/{id}/project` for full project state JSON without UI navigation.
    - Project duration vs source duration gotcha (project = max(clip.start + clip.duration), source files can be much longer).
 
@@ -5053,7 +5053,7 @@ Read all 4 skill files before attempting any further measurement or Path 4 imple
 
 - **Test machine**: Windows 10 Home (10.0.19045). Likely 144Hz monitor (warm `expDT−presT` signature = +6.7–6.9ms = 1/144s). GPU specs not captured — `chrome://gpu` should be inspected if hardware variance becomes a question.
 - **Browser**: Brave on `--remote-debugging-port=9222`. chrome-devtools-mcp MCP server connects to this port. HyperEdit dev server at `http://localhost:5173/`. FFmpeg server at `http://localhost:3333/`. Both must be running (see CLAUDE.md commands section).
-- **Project state expectations**: V1 + V2 clips loaded, V1 base track ~120s duration, V2 overlay starts ~T=28.25s, lasts ~91.89s. pixelsPerSecond ≈ 16.629 on the timeline ruler (`.sticky.top-0.h-6` selector). Session ID in `localStorage['clipwise-session']`.
+- **Project state expectations**: V1 + V2 clips loaded, V1 base track ~120s duration, V2 overlay starts ~T=28.25s, lasts ~91.89s. pixelsPerSecond ≈ 16.629 on the timeline ruler (`.sticky.top-0.h-6` selector). Session ID in `localStorage['hyperedit-session']`.
 - **Toolchain**: `rtk tsc` and `rtk lint` for validation (see `~/.claude/CLAUDE.md` for rtk reference). No test suite. Type-check + lint clean is the only automated correctness gate.
 
 ### Sub-agent invocation pattern (copyable prompt skeleton)

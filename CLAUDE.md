@@ -65,7 +65,7 @@ The `useProject()` hook in `src/react-app/hooks/useProject.ts` is the central st
 
 **Critical patterns:**
 - The hook uses parallel refs (`tracksRef`, `clipsRef`, `settingsRef`) synced via `useEffect` so debounced/async operations read latest state without stale closures. This is essential for `saveProject` and `renderProject`.
-- Session ID is persisted in `localStorage` under key `clipwise-session`. If the FFmpeg server restarts, the stored session may be invalid (404), in which case localStorage is cleared and a new session is created on next asset upload.
+- Session ID is persisted in `localStorage` under key `hyperedit-session` (a one-time `migrateLegacySessionKey()` rolls any pre-rename pointer forward). If the FFmpeg server restarts, the stored session may be invalid (404), in which case localStorage is cleared and a new session is created on next asset upload.
 - Tracks are always initialized client-side (never loaded from server) to guard against outdated server data.
 - Auto-save is intentionally disabled to prevent excessive saves during drag operations. Saves must be triggered explicitly via `saveProject()`.
 - `refreshAssets` appends `?v=Date.now()` to `streamUrl` for cache-busting after server-side file modifications.

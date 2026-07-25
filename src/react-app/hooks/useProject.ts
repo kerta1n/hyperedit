@@ -1,7 +1,13 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 
 import { API_BASE as LOCAL_FFMPEG_URL, pollJob, setActivePollSession } from '@/react-app/utils/api-helpers';
-const SESSION_STORAGE_KEY = 'clipwise-session';
+const SESSION_STORAGE_KEY = 'hyperedit-session';
+// Legacy key from the pre-rename build. Read once by migrateLegacySessionKey()
+// so an existing browser keeps its session, then dropped. TEMPORARY — this is
+// the only remaining 'clipwise-' reference by design; delete it (and the
+// migration) once browsers have rolled over, no later than R9's session-store
+// redesign (it must not survive R9).
+const LEGACY_SESSION_STORAGE_KEY = 'clipwise-session';
 
 // Asset - source file in library
 export interface Asset {
@@ -174,9 +180,23 @@ export interface SessionInfo {
   createdAt: number;
 }
 
+// One-time migration of the pre-rename localStorage key. Copies the legacy
+// pointer forward if the new key is unset, then removes the legacy key. Idempotent
+// (no-ops once migrated) and safe in private mode (storage may throw).
+function migrateLegacySessionKey(): void {
+  try {
+    if (localStorage.getItem(SESSION_STORAGE_KEY) === null) {
+      const legacy = localStorage.getItem(LEGACY_SESSION_STORAGE_KEY);
+      if (legacy !== null) localStorage.setItem(SESSION_STORAGE_KEY, legacy);
+    }
+    localStorage.removeItem(LEGACY_SESSION_STORAGE_KEY);
+  } catch { /* storage disabled / private mode — nothing to migrate */ }
+}
+
 // Helper to load session from localStorage (migrates old entries missing `name`)
 function loadSessionFromStorage(): SessionInfo | null {
   try {
+    migrateLegacySessionKey();
     const stored = localStorage.getItem(SESSION_STORAGE_KEY);
     if (stored) {
       const parsed = JSON.parse(stored);

@@ -115,11 +115,11 @@ Read timeline clips:
 
 ### localStorage session
 
-The session ID is stored in `localStorage` under key `clipwise-session` as a JSON string:
+The session ID is stored in `localStorage` under key `hyperedit-session` as a JSON string:
 
 ```js
 () => {
-  const raw = localStorage.getItem('clipwise-session');
+  const raw = localStorage.getItem('hyperedit-session');
   if (!raw) return null;
   const parsed = JSON.parse(raw);
   return { sessionId: parsed.sessionId, name: parsed.name, createdAt: parsed.createdAt };

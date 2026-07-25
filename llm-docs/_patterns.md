@@ -16,7 +16,7 @@ Parallel refs (`tracksRef`, `clipsRef`, `settingsRef`) synced via `useEffect` pr
 
 ## Session Persistence
 
-localStorage key `clipwise-session` stores session ID. On page load:
+localStorage key `hyperedit-session` stores session ID. On page load:
 1. Check localStorage for existing session
 2. Verify server (GET /session/{id}/assets) — if 404, clear and create new
 3. All assets/renders stored at `/tmp/hyperedit-ffmpeg/sessions/{id}/`

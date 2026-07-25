@@ -399,7 +399,7 @@ Union: `'none' \| 'crossfade' \| 'slide-left' \| 'slide-right' \| 'dip-to-black'
 |------|------|-------|
 | `defaultCaptionStyle` | 183–201 | Full `CaptionStyle` with defaults (see table above) |
 | `defaultRenderOptions` | 233–255 | Full `RenderOptions` with defaults (see table above) |
-| `SESSION_STORAGE_KEY` | 6 | `'clipwise-session'` |
+| `SESSION_STORAGE_KEY` | 6 | `'hyperedit-session'` |
 | `LOCAL_FFMPEG_URL` | 4 | `'http://localhost:3333'` |
 
 ### Exported Function: `useProject()` (line 257)
@@ -442,7 +442,7 @@ Refs are kept in sync via `useEffect` at lines 302–308 (one effect per ref).
 
 | Function | Line | Description |
 |----------|------|-------------|
-| `loadSessionFromStorage()` | 165–180 | Reads `localStorage['clipwise-session']`; migrates entries missing `name` field by injecting `'Untitled Project'` |
+| `loadSessionFromStorage()` | 165–180 | Reads `localStorage['hyperedit-session']` (after `migrateLegacySessionKey()` rolls any pre-rename pointer forward); migrates entries missing `name` field by injecting `'Untitled Project'` |
 
 #### Methods Returned
 
@@ -703,7 +703,7 @@ Refs are kept in sync via `useEffect` at lines 302–308 (one effect per ref).
 ```text
 1. STARTUP
    main.tsx → App.tsx → Home.tsx mounts
-   └── useProject() reads localStorage['clipwise-session']
+   └── useProject() reads localStorage['hyperedit-session']
          ├── session found: validateSession (GET /project) → 404 clears it
          └── session valid: loadProject() fetches assets + project data
 
