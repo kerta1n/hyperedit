@@ -1,3 +1,4 @@
+import { API_BASE } from '@/react-app/utils/api-helpers';
 import { useState, useRef, useEffect } from 'react';
 import { Film, Send, Loader2, Video, X, Zap, Plus, Play, Wand2, Eraser, Image as ImageIcon } from 'lucide-react';
 
@@ -169,7 +170,7 @@ export default function DiCaprioPanel({
     setIsGenerating(true);
 
     try {
-      const response = await fetch(`http://localhost:3333/session/${sessionId}/generate-video`, {
+      const response = await fetch(`${API_BASE}/session/${sessionId}/generate-video`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -207,7 +208,7 @@ export default function DiCaprioPanel({
     setIsGenerating(true);
 
     try {
-      const response = await fetch(`http://localhost:3333/session/${sessionId}/restyle-video`, {
+      const response = await fetch(`${API_BASE}/session/${sessionId}/restyle-video`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -244,7 +245,7 @@ export default function DiCaprioPanel({
     setIsGenerating(true);
 
     try {
-      const response = await fetch(`http://localhost:3333/session/${sessionId}/remove-video-bg`, {
+      const response = await fetch(`${API_BASE}/session/${sessionId}/remove-video-bg`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -514,10 +515,10 @@ export default function DiCaprioPanel({
                       <div className="mt-3">
                         <div className="relative rounded-lg overflow-hidden bg-zinc-900">
                           <video
-                            src={`http://localhost:3333${message.video.streamUrl}`}
+                            src={`${API_BASE}${message.video.streamUrl}`}
                             controls
                             className="w-full h-auto"
-                            poster={message.video.thumbnailUrl ? `http://localhost:3333${message.video.thumbnailUrl}` : undefined}
+                            poster={message.video.thumbnailUrl ? `${API_BASE}${message.video.thumbnailUrl}` : undefined}
                           />
                           <div className="absolute bottom-0 left-0 right-0 px-2 py-1 bg-black/50 backdrop-blur-sm pointer-events-none">
                             <p className="text-xs text-zinc-300 truncate">{message.video.filename}</p>

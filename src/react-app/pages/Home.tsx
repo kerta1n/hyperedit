@@ -1,3 +1,4 @@
+import { API_BASE } from '@/react-app/utils/api-helpers';
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import VideoPreview, { VideoPreviewHandle } from '@/react-app/components/VideoPreview';
 import Timeline from '@/react-app/components/Timeline';
@@ -18,7 +19,7 @@ import RenderSettingsModal from '@/react-app/components/RenderSettingsModal';
 import { useProject, Asset, TimelineClip, CaptionStyle } from '@/react-app/hooks/useProject';
 import type { RenderOptions } from '@/react-app/hooks/useProject';
 import { readNDJSONStream } from '@/react-app/utils/ndjson';
-import { useVideoSession } from '@/react-app/hooks/useVideoSession';
+import { deriveTimelineVideoTarget } from '@/react-app/utils/target-helpers';
 import SessionManager from '@/react-app/components/SessionManager';
 import { Sparkles, ListOrdered, Copy, Check, X, Download, Play, Palette, Film } from 'lucide-react';
 import type { ActiveTransition } from '@/react-app/components/TransitionPreview';
@@ -143,13 +144,6 @@ export default function Home() {
     return activeTab?.clips || [];
   }, [activeTabId, clips, timelineTabs]);
 
-  // Use the legacy session hook for AI editing (single video operations)
-  const {
-    session: legacySession,
-    processing: legacyProcessing,
-    status: legacyStatus,
-    generateChapters: legacyGenerateChapters,
-  } = useVideoSession();
 
   // Check server on mount
   useEffect(() => {
@@ -733,7 +727,7 @@ export default function Home() {
   const fetchAvailableTransitions = useCallback(async () => {
     if (!session) return;
     try {
-      const response = await fetch(`http://localhost:3333/session/${session.sessionId}/transitions`);
+      const response = await fetch(`${API_BASE}/session/${session.sessionId}/transitions`);
       if (response.ok) {
         const data = await response.json();
         setAvailableTransitions(data);
@@ -754,7 +748,7 @@ export default function Home() {
     const formData = new FormData();
     formData.append('file', file);
     formData.append('name', file.name.replace(/\.tsx$/, ''));
-    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/upload-transition`, {
+    const response = await fetch(`${API_BASE}/session/${session.sessionId}/upload-transition`, {
       method: 'POST',
       body: formData,
     });
@@ -767,7 +761,7 @@ export default function Home() {
   // Delete a custom transition
   const handleDeleteTransition = useCallback(async (transitionId: string) => {
     if (!session) throw new Error('No session');
-    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/delete-transition`, {
+    const response = await fetch(`${API_BASE}/session/${session.sessionId}/delete-transition`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ transitionId }),
@@ -780,7 +774,7 @@ export default function Home() {
   // Generate a custom transition with AI
   const handleGenerateTransition = useCallback(async (description: string) => {
     if (!session) throw new Error('No session');
-    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/generate-transition`, {
+    const response = await fetch(`${API_BASE}/session/${session.sessionId}/generate-transition`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ description }),
@@ -895,32 +889,18 @@ export default function Home() {
       throw new Error('Please upload a video first');
     }
 
-    // Find the video asset to edit - prioritize selected clip's asset, otherwise first video
-    let targetAssetId: string | null = null;
-
-    if (selectedClipId) {
-      const selectedClip = clips.find(c => c.id === selectedClipId);
-      if (selectedClip) {
-        const asset = assets.find(a => a.id === selectedClip.assetId);
-        if (asset?.type === 'video') {
-          targetAssetId = asset.id;
-        }
-      }
+    // Find the video asset to edit - selected clip wins, else earliest timeline video
+    const target = deriveTimelineVideoTarget(clips, assets, { selectedClipId });
+    if (!target) {
+      throw new Error('No video clip on the timeline. Please add a video to the timeline first.');
     }
-
-    if (!targetAssetId) {
-      const videoAsset = assets.find(a => a.type === 'video');
-      if (!videoAsset) {
-        throw new Error('Please upload a video first');
-      }
-      targetAssetId = videoAsset.id;
-    }
+    const targetAssetId = target.asset.id;
 
     console.log('Applying FFmpeg edit to asset:', targetAssetId);
     console.log('Command:', command);
 
     // Call the server to process the video with FFmpeg
-    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/process-asset`, {
+    const response = await fetch(`${API_BASE}/session/${session.sessionId}/process-asset`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -951,23 +931,6 @@ export default function Home() {
     }
   }, [session, assets, clips, selectedClipId, refreshAssets, updateClip, saveProject]);
 
-  // Handle chapter generation
-  const handleGenerateChapters = useCallback(async () => {
-    if (!legacySession) {
-      alert('Please upload a video using the AI Edit panel first');
-      return;
-    }
-
-    try {
-      const result = await legacyGenerateChapters();
-      setChapterData(result);
-      setShowChapters(true);
-    } catch (error) {
-      console.error('Chapter generation failed:', error);
-      alert(`Failed to generate chapters: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  }, [legacySession, legacyGenerateChapters]);
-
   // Copy chapters to clipboard
   const handleCopyChapters = useCallback(() => {
     if (chapterData?.youtubeFormat) {
@@ -987,17 +950,19 @@ export default function Home() {
       throw new Error('No session available');
     }
 
-    // Check if we have a video asset on V1
-    const v1Clip = clips.find(c => c.trackId === 'V1');
-    if (!v1Clip) {
-      throw new Error('No video clip on V1 track. Please add a video to the timeline first.');
+    // Derive the chapter source from the timeline (earliest video clip, any V track)
+    const target = deriveTimelineVideoTarget(clips, assets, { preferNonAi: true });
+    if (!target) {
+      throw new Error('No video clip on the timeline. Please add a video to the timeline first.');
     }
 
     console.log('Generating chapters and making cuts...');
 
     // Generate chapters using the session API
-    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/chapters`, {
+    const response = await fetch(`${API_BASE}/session/${session.sessionId}/chapters`, {
       method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ assetId: target.asset.id }),
     });
 
     if (!response.ok) {
@@ -1026,7 +991,7 @@ export default function Home() {
     console.log('Cut timestamps:', cutTimestamps);
 
     // Get current project state from server
-    const projectResponse = await fetch(`http://localhost:3333/session/${session.sessionId}/project`);
+    const projectResponse = await fetch(`${API_BASE}/session/${session.sessionId}/project`);
     const projectData = await projectResponse.json();
     const currentClips: TimelineClip[] = projectData.clips || [];
 
@@ -1035,9 +1000,9 @@ export default function Home() {
     let cutsApplied = 0;
 
     for (const timestamp of cutTimestamps) {
-      // Find clip that spans this timestamp on V1
+      // Find clip that spans this timestamp on the target clip's track
       const clipIndex = currentClips.findIndex((clip: TimelineClip) =>
-        clip.trackId === 'V1' &&
+        clip.trackId === target.clip.trackId &&
         timestamp > clip.start &&
         timestamp < clip.start + clip.duration
       );
@@ -1080,7 +1045,7 @@ export default function Home() {
 
     // Save the modified clips directly to server
     if (cutsApplied > 0) {
-      await fetch(`http://localhost:3333/session/${session.sessionId}/project`, {
+      await fetch(`${API_BASE}/session/${session.sessionId}/project`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...projectData, clips: currentClips }),
@@ -1095,7 +1060,7 @@ export default function Home() {
       cutsApplied,
       youtubeFormat: result.youtubeFormat || '',
     };
-  }, [session, clips, loadProject]);
+  }, [session, clips, assets, loadProject]);
 
   // Handle auto-extract keywords and add GIFs
   const handleExtractKeywordsAndAddGifs = useCallback(async () => {
@@ -1103,16 +1068,17 @@ export default function Home() {
       throw new Error('No session available');
     }
 
-    // Check if we have a video asset
-    const videoAsset = assets.find(a => a.type === 'video');
-    if (!videoAsset) {
-      throw new Error('Please upload a video first');
+    // Derive the transcription source from the timeline
+    const target = deriveTimelineVideoTarget(clips, assets, { preferNonAi: true });
+    if (!target) {
+      throw new Error('No video clip on the timeline. Please add a video to the timeline first.');
     }
 
     // Call the transcribe-and-extract endpoint
-    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/transcribe-and-extract`, {
+    const response = await fetch(`${API_BASE}/session/${session.sessionId}/transcribe-and-extract`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ assetId: target.asset.id }),
     });
 
     if (!response.ok) {
@@ -1133,7 +1099,7 @@ export default function Home() {
     await saveProject();
 
     return data;
-  }, [session, assets, addClip, saveProject]);
+  }, [session, clips, assets, addClip, saveProject]);
 
   // Handle generating B-roll images and adding to timeline
   const handleGenerateBroll = useCallback(async () => {
@@ -1141,16 +1107,17 @@ export default function Home() {
       throw new Error('No session available');
     }
 
-    // Check if we have a video asset
-    const videoAsset = assets.find(a => a.type === 'video');
-    if (!videoAsset) {
-      throw new Error('Please upload a video first');
+    // Derive the transcription source from the timeline
+    const target = deriveTimelineVideoTarget(clips, assets, { preferNonAi: true });
+    if (!target) {
+      throw new Error('No video clip on the timeline. Please add a video to the timeline first.');
     }
 
     // Call the generate-broll endpoint
-    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/generate-broll`, {
+    const response = await fetch(`${API_BASE}/session/${session.sessionId}/generate-broll`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ assetId: target.asset.id }),
     });
 
     if (!response.ok) {
@@ -1198,12 +1165,12 @@ export default function Home() {
     // Actually, let's just save directly to server and reload
 
     // Save clips directly to server
-    const projectResponse = await fetch(`http://localhost:3333/session/${session.sessionId}/project`);
+    const projectResponse = await fetch(`${API_BASE}/session/${session.sessionId}/project`);
     const projectData = await projectResponse.json();
 
     const updatedClips = [...(projectData.clips || []), ...newClips];
 
-    await fetch(`http://localhost:3333/session/${session.sessionId}/project`, {
+    await fetch(`${API_BASE}/session/${session.sessionId}/project`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1218,7 +1185,7 @@ export default function Home() {
     console.log('B-roll clips added successfully!');
 
     return data;
-  }, [session, assets, refreshAssets, loadProject]);
+  }, [session, clips, assets, refreshAssets, loadProject]);
 
   // Handle removing dead air / silence from the video
   const handleRemoveDeadAir = useCallback(async (): Promise<{ duration: number; removedDuration: number }> => {
@@ -1226,20 +1193,21 @@ export default function Home() {
       throw new Error('No session available');
     }
 
-    // Check if we have a video asset (prefer original, non-AI-generated)
-    const videoAsset = assets.find(a => a.type === 'video' && !a.aiGenerated) || assets.find(a => a.type === 'video');
-    if (!videoAsset) {
-      throw new Error('Please upload a video first');
+    // Derive the target from the timeline (prefer original, non-AI-generated)
+    const target = deriveTimelineVideoTarget(clips, assets, { preferNonAi: true });
+    if (!target) {
+      throw new Error('No video clip on the timeline. Please add a video to the timeline first.');
     }
 
     console.log('Removing dead air from video...');
 
     // Call the remove-dead-air endpoint
     // -26dB catches real pauses, 0.4s avoids cutting natural speech rhythm
-    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/remove-dead-air`, {
+    const response = await fetch(`${API_BASE}/session/${session.sessionId}/remove-dead-air`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        assetId: target.asset.id,
         silenceThreshold: -26, // dB threshold
         minSilenceDuration: 0.4, // minimum silence duration in seconds
       }),
@@ -1254,28 +1222,15 @@ export default function Home() {
     console.log('Dead air removal result:', result);
 
     // Refresh assets to get the updated video with new cache-busting URL
-    const refreshedAssets = await refreshAssets();
+    await refreshAssets();
 
-    // Find the current original video asset from refreshed data
-    const assetPool = refreshedAssets.length > 0 ? refreshedAssets : assets;
-    const currentVideoAsset = assetPool.find(a => a.type === 'video' && !a.aiGenerated) || assetPool.find(a => a.type === 'video');
-
-    // Update V1 clip: fix asset reference + update duration
+    // Update the targeted clip's duration (the asset was replaced in-place, same id)
     if (result.duration) {
-      const v1Clip = clips.find(c => c.trackId === 'V1');
-      if (v1Clip) {
-        const updates: Partial<typeof v1Clip> = {
-          duration: result.duration,
-          outPoint: result.duration,
-        };
-        // Also fix asset ID if it's stale (e.g., after server restart)
-        if (currentVideoAsset && v1Clip.assetId !== currentVideoAsset.id) {
-          console.log(`[DeadAir] Fixing stale asset ref: ${v1Clip.assetId} -> ${currentVideoAsset.id}`);
-          updates.assetId = currentVideoAsset.id;
-        }
-        console.log(`[DeadAir] Updating clip ${v1Clip.id}: duration ${v1Clip.duration} -> ${result.duration}`);
-        updateClip(v1Clip.id, updates);
-      }
+      console.log(`[DeadAir] Updating clip ${target.clip.id}: duration ${target.clip.duration} -> ${result.duration}`);
+      updateClip(target.clip.id, {
+        duration: result.duration,
+        outPoint: result.duration,
+      });
       await saveProject();
     }
 
@@ -1323,7 +1278,7 @@ export default function Home() {
       await saveProjectImmediate();
 
       // Call the server to render the motion graphic
-      const response = await fetch(`http://localhost:3333/session/${session.sessionId}/render-motion-graphic`, {
+      const response = await fetch(`${API_BASE}/session/${session.sessionId}/render-motion-graphic`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1365,24 +1320,10 @@ export default function Home() {
     }
 
     try {
-      // Find the primary video asset to use as context for the animation
-      // First check V1 clips, then fall back to first video asset
-      const v1Clips = clips.filter(c => c.trackId === 'V1');
-      let videoAssetId: string | undefined;
-
-      if (v1Clips.length > 0) {
-        const v1Asset = assets.find(a => a.id === v1Clips[0].assetId && a.type === 'video');
-        if (v1Asset) {
-          videoAssetId = v1Asset.id;
-        }
-      }
-
-      if (!videoAssetId) {
-        const firstVideo = assets.find(a => a.type === 'video' && !a.aiGenerated);
-        if (firstVideo) {
-          videoAssetId = firstVideo.id;
-        }
-      }
+      // Context video derived from the timeline (earliest video clip, any V track).
+      // Animations can generate without context, so no timeline video is allowed.
+      const target = deriveTimelineVideoTarget(clips, assets, { preferNonAi: true });
+      const videoAssetId: string | undefined = target?.asset.id;
 
       console.log(`[Animation] Creating with video context: ${videoAssetId || 'none'}, time range: ${startTime !== undefined ? `${startTime}s` : 'auto'}${endTime !== undefined ? ` - ${endTime}s` : ''}${attachedAssetIds?.length ? `, attached assets: ${attachedAssetIds.length}` : ''}${durationSeconds ? `, duration: ${durationSeconds}s` : ''}`);
 
@@ -1390,7 +1331,7 @@ export default function Home() {
       await saveProjectImmediate();
 
       // Call the server to generate AI animation with video context
-      const response = await fetch(`http://localhost:3333/session/${session.sessionId}/generate-animation`, {
+      const response = await fetch(`${API_BASE}/session/${session.sessionId}/generate-animation`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1474,9 +1415,9 @@ export default function Home() {
       throw new Error('Please upload a video first to start a session');
     }
 
-    const videoAsset = assets.find(a => a.type === 'video');
-    if (!videoAsset) {
-      throw new Error('Please upload a video first');
+    const target = deriveTimelineVideoTarget(clips, assets, { preferNonAi: true });
+    if (!target) {
+      throw new Error('No video clip on the timeline. Please add a video to the timeline first.');
     }
 
     // Debug: log the time range being sent to server
@@ -1485,11 +1426,11 @@ export default function Home() {
     // Persist settings first — the server authors scene frame counts at the project fps
     await saveProjectImmediate();
 
-    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/analyze-for-animation`, {
+    const response = await fetch(`${API_BASE}/session/${session.sessionId}/analyze-for-animation`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        assetId: videoAsset.id,
+        assetId: target.asset.id,
         type: request.type,
         description: request.description,
         // Pass time range so server only analyzes that segment
@@ -1504,7 +1445,7 @@ export default function Home() {
     }
 
     return await response.json();
-  }, [session, assets, saveProjectImmediate]);
+  }, [session, clips, assets, saveProjectImmediate]);
 
   // Handle rendering from pre-approved concept (skips analysis, uses provided scenes)
   const handleRenderFromConcept = useCallback(async (concept: {
@@ -1530,7 +1471,7 @@ export default function Home() {
     // (fps comes from the concept, which embeds the fps its scenes were authored at)
     await saveProjectImmediate();
 
-    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/render-from-concept`, {
+    const response = await fetch(`${API_BASE}/session/${session.sessionId}/render-from-concept`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1593,7 +1534,7 @@ export default function Home() {
     // Persist settings first — the server resolves fps/width/height from the saved project
     await saveProjectImmediate();
 
-    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/generate-transcript-animation`, {
+    const response = await fetch(`${API_BASE}/session/${session.sessionId}/generate-transcript-animation`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),
@@ -1628,13 +1569,20 @@ export default function Home() {
       throw new Error('Please upload a video first to start a session');
     }
 
+    // Derive the transcription source from the timeline
+    const target = deriveTimelineVideoTarget(clips, assets, { preferNonAi: true });
+    if (!target) {
+      throw new Error('No video clip on the timeline. Please add a video to the timeline first.');
+    }
+
     // Persist settings first — the server resolves fps/width/height from the saved project
     await saveProjectImmediate();
 
-    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/generate-batch-animations`, {
+    const response = await fetch(`${API_BASE}/session/${session.sessionId}/generate-batch-animations`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        assetId: target.asset.id,
         count,
       }),
     });
@@ -1662,7 +1610,7 @@ export default function Home() {
       animations: data.animations,
       videoDuration: data.videoDuration,
     };
-  }, [session, refreshAssets, addClip, saveProject, saveProjectImmediate]);
+  }, [session, clips, assets, refreshAssets, addClip, saveProject, saveProjectImmediate]);
 
   // Handle extract audio (separates audio to A1 track, replaces video with muted version)
   const handleExtractAudio = useCallback(async () => {
@@ -1670,22 +1618,17 @@ export default function Home() {
       throw new Error('Please upload a video first to start a session');
     }
 
-    // Find the main video asset (non-AI generated, on V1)
-    const v1Clip = clips.find(c => c.trackId === 'V1');
-    if (!v1Clip) {
-      throw new Error('No video clip found on V1 track');
+    // Derive the video to split from the timeline (selected clip wins)
+    const target = deriveTimelineVideoTarget(clips, assets, { selectedClipId });
+    if (!target) {
+      throw new Error('No video clip on the timeline. Please add a video to the timeline first.');
     }
 
-    const videoAsset = assets.find(a => a.id === v1Clip.assetId && a.type === 'video');
-    if (!videoAsset) {
-      throw new Error('No video asset found');
-    }
-
-    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/extract-audio`, {
+    const response = await fetch(`${API_BASE}/session/${session.sessionId}/extract-audio`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        assetId: videoAsset.id,
+        assetId: target.asset.id,
       }),
     });
 
@@ -1700,10 +1643,10 @@ export default function Home() {
     await refreshAssets();
 
     // Update V1 clip to use the muted video
-    updateClip(v1Clip.id, { assetId: data.mutedVideoAsset.id });
+    updateClip(target.clip.id, { assetId: data.mutedVideoAsset.id });
 
     // Add the audio to A1 track at the same position as the video
-    addClip(data.audioAsset.id, 'A1', v1Clip.start, data.audioAsset.duration);
+    addClip(data.audioAsset.id, 'A1', target.clip.start, data.audioAsset.duration);
 
     await saveProject();
 
@@ -1714,11 +1657,11 @@ export default function Home() {
       mutedVideoAsset: data.mutedVideoAsset,
       originalAssetId: data.originalAssetId,
     };
-  }, [session, clips, assets, refreshAssets, updateClip, addClip, saveProject]);
+  }, [session, clips, assets, selectedClipId, refreshAssets, updateClip, addClip, saveProject]);
 
   const handleAudioSync = useCallback(async (params: { assetA: string; assetB: string; sampleRate: number; correlationSampleSize: number; initialGranularity: number; analysisRegion?: string; analysisDuration?: number }) => {
     if (!session?.sessionId) throw new Error('No active session');
-    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/audio-sync`, {
+    const response = await fetch(`${API_BASE}/session/${session.sessionId}/audio-sync`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
@@ -1781,10 +1724,10 @@ export default function Home() {
       throw new Error('Please upload a video first to start a session');
     }
 
-    // Find the main video asset to analyze
-    const videoAsset = assets.find(a => a.type === 'video');
-    if (!videoAsset) {
-      throw new Error('Please upload a video first');
+    // Derive the video to analyze from the timeline
+    const target = deriveTimelineVideoTarget(clips, assets, { preferNonAi: true });
+    if (!target) {
+      throw new Error('No video clip on the timeline. Please add a video to the timeline first.');
     }
 
     try {
@@ -1797,11 +1740,11 @@ export default function Home() {
       // Persist settings first — the server resolves fps/width/height from the saved project
       await saveProjectImmediate();
 
-      const response = await fetch(`http://localhost:3333/session/${session.sessionId}/generate-contextual-animation`, {
+      const response = await fetch(`${API_BASE}/session/${session.sessionId}/generate-contextual-animation`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          assetId: videoAsset.id,
+          assetId: target.asset.id,
           type: request.type,
           description: request.description,
         }),
@@ -1835,7 +1778,7 @@ export default function Home() {
       console.error('Failed to create contextual animation:', error);
       throw error;
     }
-  }, [session, assets, addClip, saveProject, saveProjectImmediate, getDuration, refreshAssets]);
+  }, [session, clips, assets, addClip, saveProject, saveProjectImmediate, getDuration, refreshAssets]);
 
   // Handle render/export
   const handleExport = useCallback(async (exportOpts?: RenderOptions) => {
@@ -1883,7 +1826,7 @@ export default function Home() {
         duration: a.duration,
       }));
 
-    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/edit-animation`, {
+    const response = await fetch(`${API_BASE}/session/${session.sessionId}/edit-animation`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1966,8 +1909,8 @@ export default function Home() {
     return tabId;
   }, [assets, createTimelineTab]);
 
-  const isProcessing = loading || legacyProcessing;
-  const currentStatus = status || legacyStatus;
+  const isProcessing = loading;
+  const currentStatus = status;
 
   return (
     <div className="flex flex-col h-screen bg-zinc-950 text-white overflow-hidden">
@@ -1996,21 +1939,13 @@ export default function Home() {
           )}
         </div>
         <div className="flex items-center gap-3">
-          {(session || legacySession) && (
+          {session && (
             <>
-              <button
-                onClick={handleGenerateChapters}
-                disabled={isProcessing || !legacySession}
-                className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
-              >
-                <ListOrdered className="w-4 h-4" />
-                Chapters
-              </button>
               {clips.length > 0 && (
                 <button
                   onClick={() => {
                     setShowRenderSettings(true);
-                    fetch('http://localhost:3333/hwaccel-info')
+                    fetch(`${API_BASE}/hwaccel-info`)
                       .then(r => r.json())
                       .then(info => {
                         if (info?.effective?.concurrency) setRecommendedConcurrency(info.effective.concurrency);

@@ -1,3 +1,4 @@
+import { API_BASE } from '@/react-app/utils/api-helpers';
 import { useState, useRef, useEffect } from 'react';
 import { Sparkles, Send, Wand2, Clock, Terminal, CheckCircle, Loader2, VolumeX, FileVideo, Type, Image, Zap, X, Scissors, Plus, Film, Music, MapPin, Timer, ImagePlus, Move, ChevronDown, ChevronRight, Volume2 } from 'lucide-react';
 import type { TimelineClip, Track, Asset, CaptionStyle } from '@/react-app/hooks/useProject';
@@ -2277,7 +2278,7 @@ export default function AIPromptPanel({
     try {
       // Single synchronous request to the local server - use fullMessage which
       // includes reference context
-      const response = await fetch('http://localhost:3333/ai-edit', {
+      const response = await fetch(`${API_BASE}/ai-edit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: fullMessage }),

@@ -547,7 +547,6 @@ function restoreSessionsFromDisk() {
       dir: sessionDir,
       assetsDir,
       rendersDir,
-      currentVideo: join(sessionDir, 'current.mp4'), // Legacy
       originalName: sessionMeta?.name || 'Restored Project',
       createdAt: sessionMeta?.createdAt || Date.now(),
       editCount: 0,
@@ -695,7 +694,6 @@ function createSession(originalName) {
     dir: sessionDir,
     assetsDir,
     rendersDir,
-    currentVideo: join(sessionDir, 'current.mp4'), // Legacy support
     originalName,
     createdAt: Date.now(),
     editCount: 0,
@@ -931,151 +929,6 @@ function calculateKeepSegments(silencePeriods, totalDuration, minSegmentDuration
   return keepSegments;
 }
 
-// Remove dead air from video
-async function handleRemoveDeadAir(req, res) {
-  const jobId = randomUUID();
-  // Full-size video artifacts stay on the upload staging volume (HDD) — they can
-  // exceed the ramdisk, and the post-parse move must be a same-volume rename.
-  const inputPath = join(UPLOAD_STAGING_DIR, `${jobId}-input.mp4`);
-  const outputPath = join(UPLOAD_STAGING_DIR, `${jobId}-output.mp4`);
-  const concatListPath = join(UPLOAD_STAGING_DIR, `${jobId}-concat.txt`);
-  const segmentPaths = [];
-
-  try {
-    const [fields, files] = await parseMultipartForm(req);
-
-    const videoFile = files.video?.[0];
-    // More aggressive defaults for "magical" dead air removal
-    // -30dB catches more pauses, 0.3s cuts shorter gaps
-    const silenceThreshold = parseFloat(fields.silenceThreshold?.[0] || '-30');
-    const minSilenceDuration = parseFloat(fields.minSilenceDuration?.[0] || '0.3');
-
-    if (!videoFile) {
-      sendJSON(res, { error: 'Missing video file' }, 400);
-      return;
-    }
-
-    // Rename uploaded file to our input path
-    const { rename, stat } = await import('fs/promises');
-    await rename(videoFile.filepath, inputPath);
-
-    console.log(`\n[${jobId}] === DEAD AIR REMOVAL ===`);
-    console.log(`[${jobId}] Input file size: ${(videoFile.size / 1024 / 1024).toFixed(1)} MB`);
-
-    // Step 1: Get video duration
-    const totalDuration = await getVideoDuration(inputPath);
-    console.log(`[${jobId}] Video duration: ${totalDuration.toFixed(2)}s`);
-
-    // Step 2: Detect silence
-    const silencePeriods = await detectSilence(inputPath, jobId, {
-      silenceThreshold,
-      minSilenceDuration,
-    });
-
-    if (silencePeriods.length === 0) {
-      console.log(`[${jobId}] No silence detected, returning original video`);
-      // Return original video
-      const outputStats = await stat(inputPath);
-      res.writeHead(200, {
-        'Content-Type': 'video/mp4',
-        'Content-Length': outputStats.size,
-        'Access-Control-Allow-Origin': '*',
-      });
-      createReadStream(inputPath).pipe(res);
-      return;
-    }
-
-    // Step 3: Calculate segments to keep
-    const keepSegments = calculateKeepSegments(silencePeriods, totalDuration);
-    console.log(`[${jobId}] Keeping ${keepSegments.length} segments:`);
-    keepSegments.forEach((seg, i) => {
-      console.log(`[${jobId}]   Segment ${i + 1}: ${seg.start.toFixed(2)}s - ${seg.end.toFixed(2)}s (${(seg.end - seg.start).toFixed(2)}s)`);
-    });
-
-    const totalKeptDuration = keepSegments.reduce((sum, seg) => sum + (seg.end - seg.start), 0);
-    const removedDuration = totalDuration - totalKeptDuration;
-    console.log(`[${jobId}] Removing ${removedDuration.toFixed(2)}s of dead air (${((removedDuration / totalDuration) * 100).toFixed(1)}%)`);
-
-    // Single-pass trim+concat filter to keep audio and video in sync
-    console.log(`[${jobId}] Building filter chain for ${keepSegments.length} segments...`);
-
-    const filterParts = [];
-    const videoStreams = [];
-    const audioStreams = [];
-
-    for (let i = 0; i < keepSegments.length; i++) {
-      const seg = keepSegments[i];
-      filterParts.push(`[0:v]trim=start=${seg.start}:end=${seg.end},setpts=PTS-STARTPTS[v${i}]`);
-      filterParts.push(`[0:a]atrim=start=${seg.start}:end=${seg.end},asetpts=PTS-STARTPTS[a${i}]`);
-      videoStreams.push(`[v${i}]`);
-      audioStreams.push(`[a${i}]`);
-    }
-
-    filterParts.push(`${videoStreams.join('')}concat=n=${keepSegments.length}:v=1:a=0[outv]`);
-    filterParts.push(`${audioStreams.join('')}concat=n=${keepSegments.length}:v=0:a=1[outa]`);
-
-    const filterComplex = filterParts.join(';');
-
-    const args = [
-      '-y', '-i', inputPath,
-      '-filter_complex', filterComplex,
-      '-map', '[outv]', '-map', '[outa]',
-      ...getFFmpegEncodeArgs('preview'),
-      '-c:a', 'aac', '-b:a', '192k',
-      '-movflags', '+faststart',
-      outputPath
-    ];
-
-    await runFFmpeg(args, jobId);
-    console.log(`\n[${jobId}] Dead air removal complete`);
-
-    // Read output file and send it back
-    const outputStats = await stat(outputPath);
-    console.log(`[${jobId}] Output file size: ${(outputStats.size / 1024 / 1024).toFixed(1)} MB`);
-    console.log(`[${jobId}] === DEAD AIR REMOVAL COMPLETE ===\n`);
-
-    res.writeHead(200, {
-      'Content-Type': 'video/mp4',
-      'Content-Length': outputStats.size,
-      'Access-Control-Allow-Origin': '*',
-      'X-Removed-Duration': removedDuration.toFixed(2),
-      'X-Original-Duration': totalDuration.toFixed(2),
-      'X-New-Duration': totalKeptDuration.toFixed(2),
-    });
-
-    const readStream = createReadStream(outputPath);
-    readStream.pipe(res);
-
-    readStream.on('close', () => {
-      // Cleanup temp files
-      try {
-        unlinkSync(inputPath);
-        unlinkSync(outputPath);
-        unlinkSync(concatListPath);
-        segmentPaths.forEach(p => { try { unlinkSync(p); } catch { } });
-        console.log(`[${jobId}] Cleaned up temp files`);
-      } catch (e) {
-        console.error(`[${jobId}] Cleanup error:`, e.message);
-      }
-    });
-
-  } catch (error) {
-    console.error(`[${jobId}] Error:`, error.message);
-
-    // Cleanup on error
-    try { unlinkSync(inputPath); } catch { }
-    try { unlinkSync(outputPath); } catch { }
-    try { unlinkSync(concatListPath); } catch { }
-    segmentPaths.forEach(p => { try { unlinkSync(p); } catch { } });
-
-    res.writeHead(500, {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': '*',
-    });
-    res.end(JSON.stringify({ error: error.message }));
-  }
-}
-
 function parseFFmpegArgs(command) {
   const args = [];
   let current = '';
@@ -1111,113 +964,6 @@ function parseFFmpegArgs(command) {
   return args;
 }
 
-async function handleProcess(req, res) {
-  const jobId = randomUUID();
-  // Full-size video artifacts stay on the upload staging volume (HDD).
-  const inputPath = join(UPLOAD_STAGING_DIR, `${jobId}-input.mp4`);
-  const outputPath = join(UPLOAD_STAGING_DIR, `${jobId}-output.mp4`);
-
-  try {
-    const [fields, files] = await parseMultipartForm(req);
-
-    const videoFile = files.video?.[0];
-    const command = fields.command?.[0];
-
-    if (!videoFile || !command) {
-      sendJSON(res, { error: 'Missing video or command' }, 400);
-      return;
-    }
-
-    // Rename uploaded file to our input path
-    const { rename } = await import('fs/promises');
-    await rename(videoFile.filepath, inputPath);
-
-    console.log(`[${jobId}] Processing video with command: ${command}`);
-    console.log(`[${jobId}] Input file size: ${(videoFile.size / 1024 / 1024).toFixed(1)} MB`);
-
-    // Parse the FFmpeg command and replace input/output placeholders
-    let args = parseFFmpegArgs(command);
-    args = args.map(arg => {
-      if (arg.match(/input\.[a-z0-9]+/i)) return inputPath;
-      if (arg.match(/output\.[a-z0-9]+/i)) return outputPath;
-      return arg;
-    });
-
-    // Add -y flag to overwrite output if not present
-    if (!args.includes('-y')) {
-      args.unshift('-y');
-    }
-
-    console.log(`[${jobId}] FFmpeg args:`, args);
-
-    // Run FFmpeg
-    const ffmpeg = spawn('ffmpeg', args);
-
-    let stderr = '';
-
-    ffmpeg.stderr.on('data', (data) => {
-      stderr += data.toString();
-      // Log progress lines
-      const lines = data.toString().split('\n');
-      for (const line of lines) {
-        if (line.includes('time=') || line.includes('frame=')) {
-          process.stdout.write(`\r[${jobId}] ${line.trim()}`);
-        }
-      }
-    });
-
-    await new Promise((resolve, reject) => {
-      ffmpeg.on('close', (code) => {
-        console.log(`\n[${jobId}] FFmpeg exited with code ${code}`);
-        if (code === 0) {
-          resolve();
-        } else {
-          reject(new Error(`FFmpeg failed with code ${code}: ${stderr.slice(-500)}`));
-        }
-      });
-      ffmpeg.on('error', reject);
-    });
-
-    // Read output file and send it back
-    const { stat } = await import('fs/promises');
-    const outputStats = await stat(outputPath);
-    console.log(`[${jobId}] Output file size: ${(outputStats.size / 1024 / 1024).toFixed(1)} MB`);
-
-    res.writeHead(200, {
-      'Content-Type': 'video/mp4',
-      'Content-Length': outputStats.size,
-      'Access-Control-Allow-Origin': '*',
-    });
-
-    const readStream = createReadStream(outputPath);
-    readStream.pipe(res);
-
-    readStream.on('close', () => {
-      // Cleanup temp files
-      try {
-        unlinkSync(inputPath);
-        unlinkSync(outputPath);
-        console.log(`[${jobId}] Cleaned up temp files`);
-      } catch (e) {
-        console.error(`[${jobId}] Cleanup error:`, e.message);
-      }
-    });
-
-  } catch (error) {
-    console.error(`[${jobId}] Error:`, error.message);
-
-    // Cleanup on error
-    try { unlinkSync(inputPath); } catch { }
-    try { unlinkSync(outputPath); } catch { }
-
-    res.writeHead(500, {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': '*',
-    });
-    res.end(JSON.stringify({ error: error.message }));
-  }
-}
-
 // Format seconds to YouTube timestamp format (MM:SS or HH:MM:SS)
 function formatTimestamp(seconds) {
   const hrs = Math.floor(seconds / 3600);
@@ -1228,140 +974,6 @@ function formatTimestamp(seconds) {
     return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   }
   return `${mins}:${secs.toString().padStart(2, '0')}`;
-}
-
-// Generate chapters from video using AI
-async function handleGenerateChapters(req, res) {
-  const jobId = randomUUID();
-  // Full-size video stays on the upload staging volume (HDD); the extracted
-  // audio is small speech-rate MP3, so the ramdisk is the right home for it.
-  const inputPath = join(UPLOAD_STAGING_DIR, `${jobId}-input.mp4`);
-  const audioPath = join(TEMP_DIR, `${jobId}-audio.mp3`);
-
-  try {
-    if (!hasLLMProvider()) {
-      sendJSON(res, { error: 'No LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_BASE_URL in .dev.vars' }, 400);
-      return;
-    }
-
-    const [fields, files] = await parseMultipartForm(req);
-
-    const videoFile = files.video?.[0];
-    if (!videoFile) {
-      sendJSON(res, { error: 'Missing video file' }, 400);
-      return;
-    }
-
-    // Rename uploaded file to our input path
-    const { rename, stat } = await import('fs/promises');
-    await rename(videoFile.filepath, inputPath);
-
-    console.log(`\n[${jobId}] === CHAPTER GENERATION ===`);
-    console.log(`[${jobId}] Input file size: ${(videoFile.size / 1024 / 1024).toFixed(1)} MB`);
-
-    // Step 1: Get video duration
-    const totalDuration = await getVideoDuration(inputPath);
-    console.log(`[${jobId}] Video duration: ${totalDuration.toFixed(2)}s`);
-
-    // Step 2: Extract audio as MP3 (compressed for faster upload to Gemini)
-    console.log(`[${jobId}] Extracting audio...`);
-    const extractArgs = [
-      '-y',
-      '-i', inputPath,
-      '-vn',                    // No video
-      '-acodec', 'libmp3lame',  // MP3 codec
-      '-ab', '64k',             // Lower bitrate for smaller file (speech doesn't need high quality)
-      '-ar', '16000',           // 16kHz sample rate (good for speech)
-      '-ac', '1',               // Mono
-      audioPath
-    ];
-    await runFFmpeg(extractArgs, jobId);
-
-    const audioStats = await stat(audioPath);
-    console.log(`\n[${jobId}] Audio extracted: ${(audioStats.size / 1024 / 1024).toFixed(1)} MB`);
-
-    // Step 3: Send audio to the LLM provider for chapter analysis
-    console.log(`[${jobId}] Sending audio to LLM provider for analysis...`);
-    const responseText = await generateWithLLM(`Analyze this audio from a video that is ${totalDuration.toFixed(1)} seconds long.
-
-Your task is to identify logical chapter breaks based on topic changes, new sections, or natural transitions in the content.
-
-For each chapter:
-1. Identify the START timestamp (in seconds from the beginning)
-2. Create a concise, descriptive title (2-6 words)
-
-Guidelines:
-- First chapter should always start at 0 seconds
-- Aim for 3-8 chapters depending on content length and topic diversity
-- Chapters should be at least 30 seconds apart
-- Titles should be engaging and descriptive (good for YouTube)
-- If the content is a tutorial, use action-oriented titles
-- If it's a discussion, summarize the main topic of each section
-
-Return your response as valid JSON with exactly this structure:
-{
-  "chapters": [
-    { "start": 0, "title": "Introduction" },
-    { "start": 45.5, "title": "Getting Started" },
-    { "start": 120, "title": "Main Topic" }
-  ],
-  "summary": "Brief 1-2 sentence summary of the video content"
-}
-
-Only return the JSON, no other text.`, { audioPath, responseMimeType: 'application/json' });
-    console.log(`[${jobId}] LLM response received`);
-
-    let result;
-    try {
-      result = parseLLMJson(responseText);
-    } catch {
-      result = { chapters: [], summary: 'Failed to parse response' };
-    }
-
-    // Format chapters for YouTube
-    const youtubeChapters = (result.chapters || [])
-      .sort((a, b) => a.start - b.start)
-      .map(ch => `${formatTimestamp(ch.start)} ${ch.title}`)
-      .join('\n');
-
-    console.log(`[${jobId}] Generated ${result.chapters?.length || 0} chapters`);
-    console.log(`[${jobId}] === CHAPTER GENERATION COMPLETE ===\n`);
-
-    // Return the chapters
-    res.writeHead(200, {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': '*',
-    });
-    res.end(JSON.stringify({
-      success: true,
-      chapters: result.chapters || [],
-      youtubeFormat: youtubeChapters,
-      summary: result.summary || '',
-      videoDuration: totalDuration,
-    }));
-
-    // Cleanup
-    try {
-      unlinkSync(inputPath);
-      unlinkSync(audioPath);
-      console.log(`[${jobId}] Cleaned up temp files`);
-    } catch (e) {
-      console.error(`[${jobId}] Cleanup error:`, e.message);
-    }
-
-  } catch (error) {
-    console.error(`[${jobId}] Error:`, error.message);
-
-    // Cleanup on error
-    try { unlinkSync(inputPath); } catch { }
-    try { unlinkSync(audioPath); } catch { }
-
-    res.writeHead(500, {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': '*',
-    });
-    res.end(JSON.stringify({ error: error.message }));
-  }
 }
 
 // ============== SESSION MANAGEMENT HANDLERS ==============
@@ -1434,164 +1046,6 @@ async function handleSessionCreate(req, res) {
   }
 }
 
-// Upload video and create a session
-async function handleSessionUpload(req, res) {
-  try {
-    const [fields, files] = await parseMultipartForm(req);
-    const videoFile = files.video?.[0];
-
-    if (!videoFile) {
-      sendJSON(res, { error: 'Missing video file' }, 400);
-      return;
-    }
-
-    // Create session and move file
-    const session = createSession(videoFile.originalFilename || 'video.mp4');
-    const { rename, stat } = await import('fs/promises');
-    await rename(videoFile.filepath, session.currentVideo);
-
-    const duration = await getVideoDuration(session.currentVideo);
-    const stats = await stat(session.currentVideo);
-
-    console.log(`[${session.id}] Video uploaded: ${(stats.size / 1024 / 1024).toFixed(1)} MB, ${duration.toFixed(2)}s`);
-
-    sendJSON(res, {
-      success: true,
-      sessionId: session.id,
-      duration,
-      size: stats.size,
-      name: session.originalName,
-    });
-
-  } catch (error) {
-    console.error('[Upload] Error:', error.message);
-    sendJSON(res, { error: error.message }, 500);
-  }
-}
-
-// Stream video for preview (supports range requests for seeking)
-async function handleSessionStream(req, res, sessionId) {
-  const session = requireSession(res, sessionId);
-  if (!session) return;
-
-  try {
-    const { stat } = await import('fs/promises');
-    const stats = await stat(session.currentVideo);
-    const fileSize = stats.size;
-
-    const range = req.headers.range;
-
-    if (range) {
-      // Handle range request for video seeking
-      const parts = range.replace(/bytes=/, '').split('-');
-      const start = parseInt(parts[0], 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-      const chunkSize = end - start + 1;
-
-      res.writeHead(206, {
-        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-        'Accept-Ranges': 'bytes',
-        'Content-Length': chunkSize,
-        'Content-Type': 'video/mp4',
-        'Access-Control-Allow-Origin': '*',
-      });
-
-      createReadStream(session.currentVideo, { start, end }).pipe(res);
-    } else {
-      res.writeHead(200, {
-        'Content-Length': fileSize,
-        'Content-Type': 'video/mp4',
-        'Access-Control-Allow-Origin': '*',
-      });
-      createReadStream(session.currentVideo).pipe(res);
-    }
-  } catch (error) {
-    console.error(`[${sessionId}] Stream error:`, error.message);
-    sendJSON(res, { error: error.message }, 500);
-  }
-}
-
-// Get session info
-async function handleSessionInfo(req, res, sessionId) {
-  const session = requireSession(res, sessionId);
-  if (!session) return;
-
-  try {
-    const { stat } = await import('fs/promises');
-    const stats = await stat(session.currentVideo);
-    const duration = await getVideoDuration(session.currentVideo);
-
-    sendJSON(res, {
-      sessionId: session.id,
-      duration,
-      size: stats.size,
-      name: session.originalName,
-      editCount: session.editCount,
-      createdAt: session.createdAt,
-    });
-  } catch (error) {
-    sendJSON(res, { error: error.message }, 500);
-  }
-}
-
-// Process video within a session (edit in place)
-async function handleSessionProcess(req, res, sessionId) {
-  const session = requireSession(res, sessionId);
-  if (!session) return;
-
-  try {
-    // Parse JSON body
-    let body = '';
-    for await (const chunk of req) body += chunk;
-    const { command } = JSON.parse(body);
-
-    if (!command) {
-      sendJSON(res, { error: 'Missing command' }, 400);
-      return;
-    }
-
-    const outputPath = join(session.dir, `output-${Date.now()}.mp4`);
-
-    console.log(`\n[${sessionId}] Processing: ${command}`);
-
-    // Parse and prepare FFmpeg command
-    let args = parseFFmpegArgs(command);
-    args = args.map(arg => {
-      if (arg.match(/input\.[a-z0-9]+/i)) return session.currentVideo;
-      if (arg.match(/output\.[a-z0-9]+/i)) return outputPath;
-      return arg;
-    });
-
-    if (!args.includes('-y')) args.unshift('-y');
-
-    console.log(`[${sessionId}] FFmpeg args:`, args.slice(0, 10).join(' '), '...');
-
-    await runFFmpeg(args, sessionId);
-
-    // Replace current video with output
-    const { rename, stat } = await import('fs/promises');
-    unlinkSync(session.currentVideo);
-    await rename(outputPath, session.currentVideo);
-
-    const newStats = await stat(session.currentVideo);
-    const newDuration = await getVideoDuration(session.currentVideo);
-    session.editCount++;
-
-    console.log(`\n[${sessionId}] Edit complete. New duration: ${newDuration.toFixed(2)}s, Size: ${(newStats.size / 1024 / 1024).toFixed(1)} MB`);
-
-    sendJSON(res, {
-      success: true,
-      duration: newDuration,
-      size: newStats.size,
-      editCount: session.editCount,
-    });
-
-  } catch (error) {
-    console.error(`[${sessionId}] Process error:`, error.message);
-    sendJSON(res, { error: error.message }, 500);
-  }
-}
-
 // Remove dead air within a session
 async function handleSessionRemoveDeadAir(req, res, sessionId) {
   const session = requireSession(res, sessionId);
@@ -1613,26 +1067,20 @@ async function handleSessionRemoveDeadAir(req, res, sessionId) {
 
     console.log(`\n[${jobId}] === DEAD AIR REMOVAL (Session) ===`);
 
-    // Find the original (non-AI-generated) video asset
-    let videoAsset = null;
-    for (const [assetId, asset] of session.assets) {
-      if (asset.type === 'video' && !asset.aiGenerated) {
-        videoAsset = asset;
-        break;
-      }
+    // Explicit target only — library-order guessing is nondeterministic after restarts
+    if (!options.assetId) {
+      sendJSON(res, {
+        error: 'assetId is required',
+        hint: 'Pass the id of the video asset to process; GET /session/:id/assets lists assets.',
+      }, 400);
+      return;
     }
-    // Fallback to any video if no original found
-    if (!videoAsset) {
-      for (const [assetId, asset] of session.assets) {
-        if (asset.type === 'video') {
-          videoAsset = asset;
-          break;
-        }
-      }
-    }
-
-    if (!videoAsset) {
-      sendJSON(res, { error: 'No video asset found in session. Please upload a video first.' }, 400);
+    const videoAsset = session.assets.get(options.assetId);
+    if (!videoAsset || videoAsset.type !== 'video') {
+      sendJSON(res, {
+        error: `No video asset with id ${options.assetId} in session`,
+        hint: 'GET /session/:id/assets lists available assets.',
+      }, 400);
       return;
     }
 
@@ -1759,35 +1207,31 @@ async function handleSessionChapters(req, res, sessionId) {
 
     console.log(`\n[${jobId}] === CHAPTER GENERATION (Session) ===`);
 
-    // Find video path - check both legacy currentVideo and new assets system
-    let videoPath = session.currentVideo;
-    if (!videoPath || !existsSync(videoPath)) {
-      // Try to find original (non-AI) video from assets
-      if (session.assets && session.assets.size > 0) {
-        for (const [, asset] of session.assets) {
-          if (asset.type === 'video' && !asset.aiGenerated && existsSync(asset.path)) {
-            videoPath = asset.path;
-            console.log(`[${jobId}] Using video asset: ${asset.filename}`);
-            break;
-          }
-        }
-        // Fallback to any video
-        if (!videoPath || !existsSync(videoPath)) {
-          for (const [, asset] of session.assets) {
-            if (asset.type === 'video' && existsSync(asset.path)) {
-              videoPath = asset.path;
-              console.log(`[${jobId}] Using video asset (fallback): ${asset.filename}`);
-              break;
-            }
-          }
-        }
-      }
-    }
-
-    if (!videoPath || !existsSync(videoPath)) {
-      sendJSON(res, { error: 'No video found in session. Please upload a video first.' }, 400);
+    // Explicit target only — library-order guessing is nondeterministic after restarts
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    const options = body ? JSON.parse(body) : {};
+    if (!options.assetId) {
+      sendJSON(res, {
+        error: 'assetId is required',
+        hint: 'Pass the id of the video asset to generate chapters from; GET /session/:id/assets lists assets.',
+      }, 400);
       return;
     }
+    const videoAsset = session.assets.get(options.assetId);
+    if (!videoAsset || videoAsset.type !== 'video') {
+      sendJSON(res, {
+        error: `No video asset with id ${options.assetId} in session`,
+        hint: 'GET /session/:id/assets lists available assets.',
+      }, 400);
+      return;
+    }
+    const videoPath = videoAsset.path;
+    if (!existsSync(videoPath)) {
+      sendJSON(res, { error: 'Video file no longer exists on disk. Please re-upload.' }, 400);
+      return;
+    }
+    console.log(`[${jobId}] Using video asset: ${videoAsset.filename}`);
 
     const totalDuration = await getVideoDuration(videoPath);
 
@@ -1868,32 +1312,6 @@ Return JSON: {"chapters": [{"start": 0, "title": "Introduction"}], "summary": "B
   } catch (error) {
     console.error(`[${jobId}] Error:`, error.message);
     try { unlinkSync(audioPath); } catch { }
-    sendJSON(res, { error: error.message }, 500);
-  }
-}
-
-// Download final video
-async function handleSessionDownload(req, res, sessionId) {
-  const session = requireSession(res, sessionId);
-  if (!session) return;
-
-  try {
-    const { stat } = await import('fs/promises');
-    const stats = await stat(session.currentVideo);
-
-    const filename = session.originalName.replace(/\.[^.]+$/, '-edited.mp4');
-
-    res.writeHead(200, {
-      'Content-Type': 'video/mp4',
-      'Content-Length': stats.size,
-      'Content-Disposition': `attachment; filename="${filename}"`,
-      'Access-Control-Allow-Origin': '*',
-    });
-
-    createReadStream(session.currentVideo).pipe(res);
-    console.log(`[${sessionId}] Downloading: ${filename}`);
-
-  } catch (error) {
     sendJSON(res, { error: error.message }, 500);
   }
 }
@@ -3693,28 +3111,15 @@ async function handleTranscribe(req, res, sessionId) {
       console.log(`[${jobId}] Using Gemini (timestamps may drift - install local Whisper for accurate sync)`);
     }
 
-    // Find the video asset
-    let videoAsset = null;
-    if (assetId) {
-      videoAsset = session.assets.get(assetId);
-    } else {
-      // If no assetId, prefer the original (non-AI-generated) video asset
-      for (const asset of session.assets.values()) {
-        if (asset.type === 'video' && !asset.aiGenerated) {
-          videoAsset = asset;
-          break;
-        }
-      }
-      // Fallback to any video if no non-AI video found
-      if (!videoAsset) {
-        for (const asset of session.assets.values()) {
-          if (asset.type === 'video') {
-            videoAsset = asset;
-            break;
-          }
-        }
-      }
+    // Explicit target only — library-order guessing is nondeterministic after restarts
+    if (!assetId) {
+      sendJSON(res, {
+        error: 'assetId is required',
+        hint: 'Pass the id of the video asset to transcribe; GET /session/:id/assets lists assets.',
+      }, 400);
+      return;
     }
+    const videoAsset = session.assets.get(assetId);
 
     if (!videoAsset) {
       sendJSON(res, { error: 'No video asset found' }, 400);
@@ -3967,22 +3372,23 @@ async function handleTranscribeAndExtract(req, res, sessionId) {
   try {
     console.log(`\n[${jobId}] === TRANSCRIBE & EXTRACT KEYWORDS ===`);
 
-    // Find the original (non-AI-generated) video asset
-    let videoAsset = null;
-    for (const asset of session.assets.values()) {
-      if (asset.type === 'video' && !asset.aiGenerated) {
-        videoAsset = asset;
-        break;
-      }
+    // Explicit target only — library-order guessing is nondeterministic after restarts
+    let reqBody = '';
+    for await (const chunk of req) reqBody += chunk;
+    const reqOptions = reqBody ? JSON.parse(reqBody) : {};
+    if (!reqOptions.assetId) {
+      sendJSON(res, {
+        error: 'assetId is required',
+        hint: 'Pass the id of the video asset to transcribe; GET /session/:id/assets lists assets.',
+      }, 400);
+      return;
     }
-    if (!videoAsset) {
-      for (const asset of session.assets.values()) {
-        if (asset.type === 'video') { videoAsset = asset; break; }
-      }
-    }
-
-    if (!videoAsset) {
-      sendJSON(res, { error: 'No video asset found in session' }, 400);
+    const videoAsset = session.assets.get(reqOptions.assetId);
+    if (!videoAsset || videoAsset.type !== 'video') {
+      sendJSON(res, {
+        error: `No video asset with id ${reqOptions.assetId} in session`,
+        hint: 'GET /session/:id/assets lists available assets.',
+      }, 400);
       return;
     }
 
@@ -4162,22 +3568,23 @@ async function handleGenerateBroll(req, res, sessionId) {
       return;
     }
 
-    // Find the original (non-AI-generated) video asset
-    let videoAsset = null;
-    for (const asset of session.assets.values()) {
-      if (asset.type === 'video' && !asset.aiGenerated) {
-        videoAsset = asset;
-        break;
-      }
+    // Explicit target only — library-order guessing is nondeterministic after restarts
+    let reqBody = '';
+    for await (const chunk of req) reqBody += chunk;
+    const reqOptions = reqBody ? JSON.parse(reqBody) : {};
+    if (!reqOptions.assetId) {
+      sendJSON(res, {
+        error: 'assetId is required',
+        hint: 'Pass the id of the video asset to transcribe; GET /session/:id/assets lists assets.',
+      }, 400);
+      return;
     }
-    if (!videoAsset) {
-      for (const asset of session.assets.values()) {
-        if (asset.type === 'video') { videoAsset = asset; break; }
-      }
-    }
-
-    if (!videoAsset) {
-      sendJSON(res, { error: 'No video asset found in session' }, 400);
+    const videoAsset = session.assets.get(reqOptions.assetId);
+    if (!videoAsset || videoAsset.type !== 'video') {
+      sendJSON(res, {
+        error: `No video asset with id ${reqOptions.assetId} in session`,
+        hint: 'GET /session/:id/assets lists available assets.',
+      }, 400);
       return;
     }
 
@@ -6142,17 +5549,20 @@ async function handleGenerateBatchAnimations(req, res, sessionId) {
     console.log(`\n[${jobId}] === GENERATE BATCH ANIMATIONS ===`);
     console.log(`[${jobId}] Requested count: ${count}`);
 
-    // Find the first video asset in the session
-    let videoAsset = null;
-    for (const asset of session.assets.values()) {
-      if (asset.type === 'video' && !asset.aiGenerated) {
-        videoAsset = asset;
-        break;
-      }
+    // Explicit target only — library-order guessing is nondeterministic after restarts
+    if (!body.assetId) {
+      sendJSON(res, {
+        error: 'assetId is required',
+        hint: 'Pass the id of the video asset to transcribe; GET /session/:id/assets lists assets.',
+      }, 400);
+      return;
     }
-
-    if (!videoAsset) {
-      sendJSON(res, { error: 'No video asset found in session' }, 400);
+    const videoAsset = session.assets.get(body.assetId);
+    if (!videoAsset || videoAsset.type !== 'video') {
+      sendJSON(res, {
+        error: `No video asset with id ${body.assetId} in session`,
+        hint: 'GET /session/:id/assets lists available assets.',
+      }, 400);
       return;
     }
 
@@ -6406,18 +5816,16 @@ async function handleAnalyzeForAnimation(req, res, sessionId) {
     // Debug: log received time range values
     console.log(`[DEBUG] Received analyze request - startTime: ${startTime} (${typeof startTime}), endTime: ${endTime} (${typeof endTime})`);
 
-    // Get the video asset to analyze
-    let videoAsset;
-    if (assetId) {
-      videoAsset = session.assets.get(assetId);
-    } else {
-      for (const [id, asset] of session.assets) {
-        if (asset.type === 'video') {
-          videoAsset = asset;
-          break;
-        }
-      }
+    // Get the video asset to analyze — explicit target only; library-order
+    // guessing is nondeterministic after restarts
+    if (!assetId) {
+      sendJSON(res, {
+        error: 'assetId is required',
+        hint: 'Pass the id of the video asset to analyze; GET /session/:id/assets lists assets.',
+      }, 400);
+      return;
     }
+    const videoAsset = session.assets.get(assetId);
 
     if (!videoAsset) {
       sendJSON(res, { error: 'No video asset found to analyze' }, 400);
@@ -7156,19 +6564,16 @@ async function handleGenerateContextualAnimation(req, res, sessionId) {
     const { assetId, type = 'intro', description } = body;
     const { fps, width, height } = resolveCompositionSettings(session, body);
 
-    // Get the video asset to analyze
-    let videoAsset;
-    if (assetId) {
-      videoAsset = session.assets.get(assetId);
-    } else {
-      // Find the first video asset
-      for (const [id, asset] of session.assets) {
-        if (asset.type === 'video') {
-          videoAsset = asset;
-          break;
-        }
-      }
+    // Get the video asset to analyze — explicit target only; library-order
+    // guessing is nondeterministic after restarts
+    if (!assetId) {
+      sendJSON(res, {
+        error: 'assetId is required',
+        hint: 'Pass the id of the video asset to analyze; GET /session/:id/assets lists assets.',
+      }, 400);
+      return;
     }
+    const videoAsset = session.assets.get(assetId);
 
     if (!videoAsset) {
       sendJSON(res, { error: 'No video asset found to analyze' }, 400);
@@ -8258,16 +7663,6 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && sessionId === 'create') {
       await handleSessionCreate(req, res);
-    } else if (req.method === 'POST' && sessionId === 'upload') {
-      await handleSessionUpload(req, res);
-    } else if (req.method === 'GET' && action === 'stream') {
-      await handleSessionStream(req, res, sessionId);
-    } else if (req.method === 'GET' && action === 'info') {
-      await handleSessionInfo(req, res, sessionId);
-    } else if (req.method === 'GET' && action === 'download') {
-      await handleSessionDownload(req, res, sessionId);
-    } else if (req.method === 'POST' && action === 'process') {
-      await handleSessionProcess(req, res, sessionId);
     } else if (req.method === 'POST' && action === 'remove-dead-air') {
       await handleSessionRemoveDeadAir(req, res, sessionId);
     } else if (req.method === 'POST' && action === 'chapters') {
@@ -8480,14 +7875,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Legacy routes (kept for backwards compatibility)
-  if (req.method === 'POST' && path === '/process') {
-    await handleProcess(req, res);
-  } else if (req.method === 'POST' && path === '/remove-dead-air') {
-    await handleRemoveDeadAir(req, res);
-  } else if (req.method === 'POST' && path === '/generate-chapters') {
-    await handleGenerateChapters(req, res);
-  } else if (req.method === 'GET' && path === '/hwaccel-info') {
+  if (req.method === 'GET' && path === '/hwaccel-info') {
     let info;
     try {
       info = getAccelSummary();
@@ -8514,13 +7902,9 @@ server.listen(PORT, () => {
   console.log(`   GET  /sessions - List all sessions`);
   console.log(`   PATCH /session/:id/name - Rename session`);
   console.log(`\n   Session API:`);
-  console.log(`   POST /session/upload - Upload video, get sessionId`);
-  console.log(`   GET  /session/:id/stream - Stream video for preview`);
-  console.log(`   GET  /session/:id/info - Get video info`);
-  console.log(`   POST /session/:id/process - Apply FFmpeg edit`);
+  console.log(`   POST /session/create - Create new editing session`);
   console.log(`   POST /session/:id/remove-dead-air - Remove silence`);
   console.log(`   POST /session/:id/chapters - Generate chapters`);
-  console.log(`   GET  /session/:id/download - Download final video`);
   console.log(`   DELETE /session/:id - Clean up session`);
   console.log(`\n   Multi-Asset API:`);
   console.log(`   POST /session/:id/assets - Upload asset (video/image/audio)`);

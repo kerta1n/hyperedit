@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { readNDJSONStream } from '../utils/ndjson';
 
-const LOCAL_FFMPEG_URL = 'http://localhost:3333';
+import { API_BASE as LOCAL_FFMPEG_URL } from '@/react-app/utils/api-helpers';
 const SESSION_STORAGE_KEY = 'clipwise-session';
 
 // Asset - source file in library

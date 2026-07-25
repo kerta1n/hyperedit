@@ -1,6 +1,6 @@
 import { useState, useCallback, useMemo } from 'react';
 
-const LOCAL_FFMPEG_URL = 'http://localhost:3333';
+import { API_BASE as LOCAL_FFMPEG_URL } from '@/react-app/utils/api-helpers';
 
 export interface RenderItem {
   id: string;

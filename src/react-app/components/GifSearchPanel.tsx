@@ -24,7 +24,7 @@ interface GifSearchPanelProps {
   }) => void;
 }
 
-const LOCAL_FFMPEG_URL = 'http://localhost:3333';
+import { API_BASE as LOCAL_FFMPEG_URL } from '@/react-app/utils/api-helpers';
 
 export default function GifSearchPanel({ sessionId, onClose, onGifAdded }: GifSearchPanelProps) {
   const [searchQuery, setSearchQuery] = useState('');

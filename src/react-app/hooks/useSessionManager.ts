@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react';
 import type { SessionInfo } from './useProject';
 
-const LOCAL_FFMPEG_URL = 'http://localhost:3333';
+import { API_BASE as LOCAL_FFMPEG_URL } from '@/react-app/utils/api-helpers';
 
 export interface SessionSummary {
   sessionId: string;

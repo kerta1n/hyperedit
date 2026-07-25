@@ -1,3 +1,4 @@
+import { API_BASE } from '@/react-app/utils/api-helpers';
 import { useCallback, useRef } from 'react';
 import type { MutableRefObject } from 'react';
 import type {
@@ -157,7 +158,7 @@ export function useCaptionGeneration({
     inFlightRef.current = true;
     try {
       // Call the transcribe endpoint with trim bounds
-      const response = await fetch(`http://localhost:3333/session/${session.sessionId}/transcribe`, {
+      const response = await fetch(`${API_BASE}/session/${session.sessionId}/transcribe`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

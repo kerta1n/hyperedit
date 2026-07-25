@@ -35,7 +35,7 @@ npm run knip             # Check for unused dependencies
 src/
 ├── react-app/           # Frontend React SPA
 │   ├── components/      # UI: Timeline, VideoPreview, AssetLibrary, AIPromptPanel, MotionGraphicsPanel
-│   ├── hooks/           # useProject (main state), useVideoSession
+│   ├── hooks/           # useProject (main state)
 │   └── pages/Home.tsx   # Main editor layout
 ├── remotion/            # Motion graphics system
 │   └── templates/       # 11 templates with registry in index.ts
@@ -65,10 +65,6 @@ The `useProject()` hook in `src/react-app/hooks/useProject.ts` is the central st
 - Auto-save is intentionally disabled to prevent excessive saves during drag operations. Saves must be triggered explicitly via `saveProject()`.
 - `refreshAssets` appends `?v=Date.now()` to `streamUrl` for cache-busting after server-side file modifications.
 - Assets with `aiGenerated: true` are deprioritized when selecting context video for new animation generation.
-
-**Two parallel session systems exist:**
-- `useProject` (modern) — multi-asset, full timeline
-- `useVideoSession` (legacy) — single-video, still used exclusively for `generateChapters` in Home.tsx
 
 ## FFmpeg Server
 

@@ -1,3 +1,4 @@
+import { API_BASE } from '@/react-app/utils/api-helpers';
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { X, Download, ChevronDown, Info, Trash2, PenLine } from 'lucide-react';
@@ -731,7 +732,7 @@ export default function RenderSettingsModal({
                   onClick={async () => {
                     for (const r of renders.filter(x => selectedIds.includes(x.id))) {
                       const link = document.createElement('a');
-                      link.href = `http://localhost:3333${r.downloadUrl}`;
+                      link.href = `${API_BASE}${r.downloadUrl}`;
                       link.download = r.filename;
                       document.body.appendChild(link);
                       link.click();
@@ -909,7 +910,7 @@ function RenderCard({
   onRenameCommit: () => void;
   onRenameCancel: () => void;
 }) {
-  const thumbSrc = render.thumbnailUrl ? `http://localhost:3333${render.thumbnailUrl}` : null;
+  const thumbSrc = render.thumbnailUrl ? `${API_BASE}${render.thumbnailUrl}` : null;
 
   return (
     <div
